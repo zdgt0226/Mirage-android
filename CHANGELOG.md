@@ -113,6 +113,15 @@
   4. **知乎 (Zhihu)**：热榜榜单封面与开屏高清图片毫秒级解码显示；
   5. **实机真实吞吐与内核健康**：产生 `20.5MB+` 真实加密流量，981 次 DNS 查询零丢包，Native Heap 仅占 ~89MB，零内存与 FD 泄露。
 
+### 11. Android 16 海外主流网络服务与客户端实机连通性测试
+* **测试平台**：Samsung Galaxy S24+ (Android 16 / API 36)
+* **实测成果与结论**：
+  1. **海外全域服务 100% 连通**：对 Google、YouTube、GitHub、Wikipedia、Cloudflare、Reddit、Telegram、HuggingFace 等服务进行探测，全部返回 HTTP 200/301/302，海外 DNS 分流无污染；
+  2. **Google 实时搜索**：浏览器内搜索 `Android 16 features`，图文排版与各大科技媒体（blog.google、Tech Advisor 等）配图毫秒级秒开；
+  3. **GitHub Trending 趋势榜**：项目列表与贡献者头像完整流式加载；
+  4. **Wikipedia 维基百科**：英文原版词条即时排版呈现；
+  5. **GitHub 官方原生 App**：个人 Issues、PR、星标与组织数据无缝云端同步。
+
 ---
 
 ## [2026-08-19] 代码审计 R1-R3 缺陷修复与稳定性提升
