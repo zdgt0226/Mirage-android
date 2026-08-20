@@ -69,15 +69,15 @@ class TunConfigDialog(
     }
 
     private fun setupListeners() {
-        binding.chipMtu1400.setOnClickListener { binding.etMtu.setText("1400") }
-        binding.chipMtu1420.setOnClickListener { binding.etMtu.setText("1420") }
-        binding.chipMtu1500.setOnClickListener { binding.etMtu.setText("1500") }
-        binding.chipMtu1280.setOnClickListener { binding.etMtu.setText("1280") }
+        binding.chipMtu1400.setOnCheckedChangeListener { _, isChecked -> if (isChecked) binding.etMtu.setText("1400") }
+        binding.chipMtu1420.setOnCheckedChangeListener { _, isChecked -> if (isChecked) binding.etMtu.setText("1420") }
+        binding.chipMtu1500.setOnCheckedChangeListener { _, isChecked -> if (isChecked) binding.etMtu.setText("1500") }
+        binding.chipMtu1280.setOnCheckedChangeListener { _, isChecked -> if (isChecked) binding.etMtu.setText("1280") }
 
-        binding.chipIdle120.setOnClickListener { binding.etTcpIdle.setText("120") }
-        binding.chipIdle300.setOnClickListener { binding.etTcpIdle.setText("300") }
-        binding.chipIdle600.setOnClickListener { binding.etTcpIdle.setText("600") }
-        binding.chipIdle1800.setOnClickListener { binding.etTcpIdle.setText("1800") }
+        binding.chipIdle120.setOnCheckedChangeListener { _, isChecked -> if (isChecked) binding.etTcpIdle.setText("120") }
+        binding.chipIdle300.setOnCheckedChangeListener { _, isChecked -> if (isChecked) binding.etTcpIdle.setText("300") }
+        binding.chipIdle600.setOnCheckedChangeListener { _, isChecked -> if (isChecked) binding.etTcpIdle.setText("600") }
+        binding.chipIdle1800.setOnCheckedChangeListener { _, isChecked -> if (isChecked) binding.etTcpIdle.setText("1800") }
 
         binding.etMtu.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
