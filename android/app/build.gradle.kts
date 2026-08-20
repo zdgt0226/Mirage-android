@@ -3,6 +3,13 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val propBuildTime = project.findProperty("buildTime") as? String 
+    ?: java.text.SimpleDateFormat("yyyy.MM.dd", java.util.Locale.CHINA).format(java.util.Date())
+val propBuildTag = project.findProperty("buildTag") as? String 
+    ?: "Release 5 (TUN Opt + 1400 MTU)"
+val propVersionCode = (project.findProperty("versionCode") as? String)?.toIntOrNull() ?: 5
+val propVersionName = project.findProperty("versionName") as? String ?: "0.2.3"
+
 android {
     namespace = "com.mirage.android"
     compileSdk = 34
@@ -11,10 +18,10 @@ android {
         applicationId = "com.mirage.android"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.2.2-geo"
-        buildConfigField("String", "BUILD_TIME", "\"2026.08.19\"")
-        buildConfigField("String", "BUILD_TAG", "\"Release 4 (Geo + Tags)\"")
+        versionCode = propVersionCode
+        versionName = propVersionName
+        buildConfigField("String", "BUILD_TIME", "\"$propBuildTime\"")
+        buildConfigField("String", "BUILD_TAG", "\"$propBuildTag\"")
         ndk {
             abiFilters += listOf("arm64-v8a")
         }

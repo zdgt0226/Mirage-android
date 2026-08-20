@@ -51,10 +51,18 @@ build_apk() {
     mkdir -p "$HERE/.build/out" "$HERE/.build/gradle-home"
     chown 1000:1000 "$HERE/.build/out" "$HERE/.build/gradle-home" 2>/dev/null || true
 
-    local ver
-    ver=$(grep -E 'versionName\s*=' "$HERE/android/app/build.gradle.kts" | head -1 | sed -E 's/.*"([^"]+)".*/\1/' || echo "0.2.0")
+    local ver="0.2.3"
     local timestamp
     timestamp=$(date +%Y%m%d_%H%M%S)
+    local build_date
+    build_date=$(date +%Y.%m.%d)
+    local git_hash
+    git_hash=$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo "dev")
+    local git_count
+    git_count=$(git -C "$HERE" rev-list --count HEAD 2>/dev/null || echo "5")
+    local build_tag="Release #$git_count ($git_hash)"
+
+    echo "  -- 构建元数据: v$ver · Code #$git_count · Build $build_date · Tag: $build_tag"
 
     # 容器内以 root 构建 (SDK bind 自宿主, 避免容器内再下载)
     systemd-nspawn -D "/var/lib/machines/$CONTAINER" --as-pid2 \
@@ -62,18 +70,18 @@ build_apk() {
         --bind="$HERE/.build/out:/output" \
         --bind="$HERE/.build/gradle-home:/root/.gradle" \
         --bind="/opt/android-sdk:/android-sdk" \
-        /bin/bash -c '
+        /bin/bash -c "
             set -e
             export JAVA_HOME=/opt/jdk-17
             export ANDROID_HOME=/android-sdk
             export ANDROID_NDK_HOME=/android-sdk/ndk/26.3.11579264
             export GRADLE_USER_HOME=/root/.gradle
-            export GRADLE_OPTS="-Dorg.gradle.native=false"
-            export PATH=/opt/jdk-17/bin:/opt/gradle-8.9/bin:$PATH
+            export GRADLE_OPTS=\"-Dorg.gradle.native=false\"
+            export PATH=/opt/jdk-17/bin:/opt/gradle-8.9/bin:\$PATH
             cd /workspace
-            gradle clean assembleDebug --no-daemon 2>&1 > /tmp/gradle_err.log || (cat /tmp/gradle_err.log | grep -B2 -A6 -iE "e: file|error:|unresolved" | head -40)
+            gradle clean assembleDebug -PbuildTime=\"$build_date\" -PbuildTag=\"$build_tag\" -PversionCode=$git_count -PversionName=\"$ver\" --no-daemon 2>&1 > /tmp/gradle_err.log || (cat /tmp/gradle_err.log | grep -B2 -A6 -iE \"e: file|error:|unresolved\" | head -40)
             cp app/build/outputs/apk/debug/app-debug.apk /output/latest-build.apk 2>/dev/null || true
-        ' 2>&1 | tail -25
+        " 2>&1 | tail -25
 
     local raw_apk="$HERE/.build/out/latest-build.apk"
     if [[ -f "$raw_apk" ]]; then

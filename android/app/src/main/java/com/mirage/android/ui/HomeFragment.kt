@@ -226,7 +226,7 @@ class HomeFragment : Fragment() {
             ⚙️ 运行内核: $coreDesc ($nativeVer)
             🧩 架构对齐: arm64-v8a (16KB Page Aligned)
             🛡️ 兼容环境: Android 9.0 (API 28) ~ Android 16 (API 36+)
-            🚀 核心特性: QUIC ICMP 端口不可达即时回退、WarmPool 预热池、全量 DNS 路由分流
+            🚀 核心特性: QUIC ICMP 端口不可达即时回退、WarmPool 预热池、全量 DNS 路由分流、TUN 零轮询事件驱动 & 防分片 MTU
         """.trimIndent()
 
         android.app.AlertDialog.Builder(ctx)
