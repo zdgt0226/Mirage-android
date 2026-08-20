@@ -61,6 +61,13 @@
   * `logJob` 磁盘落盘频率从 3s 降低为 60s，`trafficJob` 调整为 30s，允许 SoC 进入 Deep Sleep 深睡模式；
   * 抽取 `flushLogsAndStats()`，在服务正常停止（`stopInternal`）与系统异常销毁（`onDestroy`）时均触发一次完整的增量落盘，防止数据丢失。
 
+### 6. 开源贡献者与 AI 协同研发致谢
+* **涉及文件**：
+  * [`README.md`](README.md)
+  * [`CONTRIBUTORS.md`](CONTRIBUTORS.md)
+* **说明**：
+  * 正式引入 Google Gemini、Anthropic Claude、DeepSeek AI 作为核心 AI 研发与审计合作者，并在 Git 历史中配置标准 `Co-authored-by` 元数据。
+
 ---
 
 ## [2026-08-19] 代码审计 R1-R3 缺陷修复与稳定性提升

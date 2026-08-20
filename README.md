@@ -124,6 +124,19 @@ docs/
 继承自 Mirage-rs: 本项目**未经独立安全审计**, 加密分帧与握手认证为自研, 请勿用于
 生命安全级场景。认证为单一共享口令; 前向保密 (PFS) 需两端同开。
 
+## 🤝 Contributors & Acknowledgements
+
+本项目由人类开发者与前沿 AI 协同研发与深度优化：
+
+| Contributor | Role & Contributions |
+| :--- | :--- |
+| **[zdgt0226](https://github.com/zdgt0226)** | Project Creator & Maintainer |
+| 🤖 **Google Gemini** | 移动端生命周期优化、切网自愈、真机测试与系统级连接调优 |
+| 🤖 **Anthropic Claude** | 内核架构重构、FD 泄露根治、独立进程化与工程化迁移 |
+| 🤖 **DeepSeek AI** | 安全审计、Linux/Rust 线程模型缺陷排查与协议栈深度分析 |
+
+特别感谢 [Mirage-rs](https://github.com/zdgt0226/Mirage-rs) 协议的设计与实现。
+
 ## License
 
 GPL-3.0-or-later (与 Mirage-rs 一致)。
