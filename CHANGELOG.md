@@ -93,6 +93,17 @@
   4. **防蜂窝分片 MTU 调优**：默认 MTU 调整为 1400（预留 TLS 1.3 伪装头与 AEAD 开销，彻底消灭 4G/5G GTP 隧道 IP 分片与视频卡顿）。
   5. **高阶用户自定义调优面板**：在首页提供专门的「TUN 性能与网络调优」入口，支持灵活配置 MTU（1280 ~ 1500）、TCP 空闲超时（60s ~ 1800s）以及批处理深度（16 / 32 / 64 包）。
 
+### 9. 编译构建元数据全自动动态注入机制
+* **涉及文件**：
+  * [`android/app/build.gradle.kts`](android/app/build.gradle.kts)
+  * [`scripts/build-android.sh`](scripts/build-android.sh)
+  * [`android/app/src/main/java/com/mirage/android/ui/HomeFragment.kt`](android/app/src/main/java/com/mirage/android/ui/HomeFragment.kt)
+* **改动细节**：
+  1. **彻底消灭手工硬编码**：将以往静态写入的 `BUILD_TIME` 与 `versionCode` 升级为全自动动态注入机制；
+  2. **脚本动态传参**：`scripts/build-android.sh` 在每次触发构建时，自动捕获当天精确日期（`date +%Y.%m.%d`）、Git 短哈希（`git rev-parse --short HEAD`）及全局提交序号（`git rev-list --count HEAD`），动态作为 Gradle 属性传参注入；
+  3. **Gradle 属性解析**：`build.gradle.kts` 配置 `-PbuildTime`, `-PbuildTag`, `-PversionCode`, `-PversionName` 解析与安全回退；
+  4. **版本迭代至 v0.2.3**：实机首页顶栏与「版本详情」弹窗 100% 自动呈现当前编译镜像的真实 Git Hash 与日期。
+
 ---
 
 ## [2026-08-19] 代码审计 R1-R3 缺陷修复与稳定性提升
