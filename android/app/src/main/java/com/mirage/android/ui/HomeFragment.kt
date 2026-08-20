@@ -78,6 +78,11 @@ class HomeFragment : Fragment() {
             showDnsConfigDialog()
         }
 
+        binding.tunCard.setOnClickListener {
+            showTunConfigDialog()
+        }
+        updateTunSummary()
+
         observeState()
     }
 
@@ -236,6 +241,26 @@ class HomeFragment : Fragment() {
 
     private fun showDnsConfigDialog() {
         DnsConfigDialog(requireContext()).show()
+    }
+
+    private fun updateTunSummary() {
+        val ctx = context ?: return
+        val mtu = com.mirage.android.core.TunConfigStore.getMtu(ctx)
+        val batch = com.mirage.android.core.TunConfigStore.getBatchSize(ctx)
+        val desc = when (mtu) {
+            1400 -> "1400 (蜂窝推荐·防分片)"
+            1420 -> "1420 (Wi-Fi高吞吐)"
+            1500 -> "1500 (标准以太网)"
+            1280 -> "1280 (极低丢包)"
+            else -> "$mtu"
+        }
+        binding.tvTunSummary.text = "MTU: $desc · 批处理: $batch · 0轮询省电"
+    }
+
+    private fun showTunConfigDialog() {
+        TunConfigDialog(requireContext()) {
+            updateTunSummary()
+        }.show()
     }
 
     /** 备份配置: 显示导出的 JSON, 可复制/分享。 */

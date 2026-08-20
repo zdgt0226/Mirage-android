@@ -28,6 +28,7 @@ import com.mirage.android.core.NodeStore
 import com.mirage.android.core.RuleStore
 import com.mirage.android.core.SettingsStore
 import com.mirage.android.core.TrafficStatsStore
+import com.mirage.android.core.TunConfigStore
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -145,7 +146,8 @@ class CoreService : VpnService() {
         builder.addRoute("0.0.0.0", 0)
         builder.addRoute("198.18.0.0", 15)
         builder.addDnsServer(InetAddress.getByName("198.19.0.53"))
-        builder.setMtu(1500)
+        val mtu = TunConfigStore.getMtu(this)
+        builder.setMtu(mtu)
 
         val fd = try { builder.establish() } catch (e: Exception) {
             log("[core] TUN establish 异常: ${e.message}")
@@ -168,8 +170,8 @@ class CoreService : VpnService() {
         }
 
         val poolSize = if (poolSizeOverride > 0) poolSizeOverride else NodeStore.getPoolSize(this)
-        log("[core] 开始启动内核 (uri=${uri.take(30)}..., poolSize=$poolSize)")
-        val rc = MirageNative.start(fd.fd, uri, poolSize)
+        log("[core] 开始启动内核 (uri=${uri.take(30)}..., poolSize=$poolSize, mtu=$mtu)")
+        val rc = MirageNative.start(fd.fd, uri, poolSize, mtu)
         if (rc != 0) {
             log("[core] 内核启动失败 rc=$rc")
             runCatching { fd.close() }

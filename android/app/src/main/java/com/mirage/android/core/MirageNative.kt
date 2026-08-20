@@ -13,7 +13,7 @@ object MirageNative {
     }
 
     /** 启动 TUN 引擎。返回 0 = 成功, 负数 = 错误码。uri 形如 mirage://密码@host:端口?sni=... */
-    external fun start(tunFd: Int, uri: String, poolSize: Int): Int
+    external fun start(tunFd: Int, uri: String, poolSize: Int, mtu: Int): Int
 
     /** 停止引擎 (幂等)。 */
     external fun stop()

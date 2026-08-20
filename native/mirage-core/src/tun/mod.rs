@@ -39,7 +39,6 @@ pub mod udp;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::RawFd;
-use std::os::unix::io::FromRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -54,7 +53,7 @@ use tracing::{debug, info};
 use crate::engine::{Engine, TUN_ADDR_V4, TUN_DNS_V4, TUN_PEER_V4};
 use crate::tun::device::TunDevice;
 
-pub const TUN_MTU: usize = 1500;
+pub const TUN_MTU: usize = 1400;
 /// TCP socket 收发缓冲 (每条连接 2×512KB)。支持高 BDP 链路动态大窗口吞吐。
 pub const SOCK_BUF: usize = 512 * 1024;
 /// 无 4 元组的 catcher socket (SYN 来了没人连) 的存活上限, 到点由 sweeper 回收。
@@ -103,8 +102,6 @@ pub struct TunStack {
     cfg: TunConfig,
     /// 原始 TUN fd (stop 时关闭; 读线程持 dup 副本)。
     fd: RawFd,
-    /// 写 TUN fd 的 File (drain_tx / write_raw 用)。
-    write_file: StdMutex<std::fs::File>,
     /// UDP 直接数据报引擎 (按 (client,dst) 建流)。
     udp: Arc<crate::tun::udp::UdpEngine>,
 }
@@ -166,9 +163,6 @@ impl TunStack {
             created_at: HashMap::new(),
         }));
 
-        // 写 TUN 用的 File (读线程单独 dup, 互不干扰)
-        let write_file = StdMutex::new(unsafe { std::fs::File::from_raw_fd(libc::dup(fd)) });
-
         let mtu = cfg.mtu;
         let stack = Arc::new(Self {
             inner,
@@ -179,10 +173,9 @@ impl TunStack {
             engine: Arc::new(arc_swap::ArcSwap::from(Arc::clone(&engine))),
             cfg,
             fd,
-            write_file,
         });
 
-        // 读线程: TUN fd → 包 → 泵 (持 dup 副本; O_NONBLOCK + 短眠轮询, stop 时退出)
+        // 读线程: TUN fd → 内核 poll 阻塞唤醒(0 CPU自旋/0排队延迟) → 突发批读 → 泵
         let reader_stack = stack.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
         std::thread::spawn(move || {
@@ -190,25 +183,56 @@ impl TunStack {
             if rfd < 0 {
                 return;
             }
-            let mut f = unsafe { std::fs::File::from_raw_fd(rfd) };
             let mut buf = vec![0u8; 65536];
+            let mut pfd = libc::pollfd {
+                fd: rfd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
             loop {
                 if reader_stack.stopped.load(Ordering::SeqCst) {
                     break;
                 }
-                match std::io::Read::read(&mut f, &mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if tx.blocking_send(buf[..n].to_vec()).is_err() {
-                            break; // 泵已退出
+                // 内核事件驱动等待: 500ms 超时用于定期感知 stopped 状态; 有包时微秒级立即返回; 无包时 0 CPU 消耗 (支持 SoC Deep Sleep)
+                let pr = unsafe { libc::poll(&mut pfd as *mut libc::pollfd, 1, 500) };
+                if pr < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    break;
+                }
+                if pr == 0 {
+                    continue; // 500ms 超时无数据，继续检查 stopped
+                }
+                if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                    break;
+                }
+                if pfd.revents & libc::POLLIN != 0 {
+                    // 突发批读 (Burst Read): 快速排空内核队列已到达的数据包 (最多连续读 32 个包)
+                    let mut batch = 0;
+                    while batch < 32 {
+                        let n = unsafe {
+                            libc::read(rfd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+                        };
+                        if n > 0 {
+                            if tx.blocking_send(buf[..n as usize].to_vec()).is_err() {
+                                break; // 泵已退出
+                            }
+                            batch += 1;
+                        } else if n == 0 {
+                            break;
+                        } else {
+                            let err = std::io::Error::last_os_error();
+                            if err.kind() == std::io::ErrorKind::WouldBlock {
+                                break; // 无更多就绪数据
+                            }
+                            break;
                         }
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(_) => break,
                 }
             }
+            unsafe { libc::close(rfd) };
             let _ = reader_stack.engine.clone(); // keep alive until thread exit
         });
 
@@ -253,7 +277,7 @@ impl TunStack {
     }
 }
 
-/// 泵: rx 包 / 定时 tick / 外部唤醒 → pre-scan + poll → drain tx 写回 TUN。
+/// 泵: rx 包 / 定时 tick / 外部唤醒 → 批处理合并 + pre-scan + poll → drain tx 写回 TUN。
 async fn pump(stack: Arc<TunStack>, mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>) {
     let mut tick = tokio::time::interval(PUMP_TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -264,6 +288,17 @@ async fn pump(stack: Arc<TunStack>, mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>
                 match maybe_pkt {
                     Some(pkt) => {
                         stack.handle_rx_packet(pkt);
+                        // 批处理消费 (Batch Coalescing): 一次性消化通道中积攒的数据包 (最多 32 个), 显著减少 smoltcp 锁开销与上下文切换
+                        let mut drained = 0;
+                        while drained < 32 {
+                            match rx.try_recv() {
+                                Ok(next_pkt) => {
+                                    stack.handle_rx_packet(next_pkt);
+                                    drained += 1;
+                                }
+                                Err(_) => break,
+                            }
+                        }
                         stack.drain_tx();
                         stack.sweep();
                     }
@@ -319,16 +354,17 @@ impl TunStack {
         self.cfg.dns_addr.into()
     }
 
-    /// 直接把一个 IP 包写回 TUN fd (UDP 回程/DNS 应答用)。线程安全。
+    /// 直接把一个 IP 包写回 TUN fd (UDP 回程/DNS 应答用)。无锁内核直写。
     pub fn write_raw(&self, pkt: &[u8]) {
         if self.stopped.load(Ordering::SeqCst) {
             return;
         }
-        let mut f = self.write_file.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = std::io::Write::write_all(&mut *f, pkt);
+        unsafe {
+            libc::write(self.fd, pkt.as_ptr() as *const libc::c_void, pkt.len());
+        }
     }
 
-    /// 把 smoltcp 产出的出站包全部写回 TUN fd。**锁外执行**。
+    /// 把 smoltcp 产出的出站包全部写回 TUN fd。**锁外无锁内核直写**。
     fn drain_tx(&self) {
         if self.stopped.load(Ordering::SeqCst) {
             return;
@@ -343,9 +379,10 @@ impl TunStack {
         if out.is_empty() {
             return;
         }
-        let mut f = self.write_file.lock().unwrap_or_else(|e| e.into_inner());
         for p in &out {
-            let _ = std::io::Write::write_all(&mut *f, p);
+            unsafe {
+                libc::write(self.fd, p.as_ptr() as *const libc::c_void, p.len());
+            }
         }
     }
 

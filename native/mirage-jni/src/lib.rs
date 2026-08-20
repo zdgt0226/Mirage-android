@@ -141,7 +141,7 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_setLogLevel(
     }
 }
 
-/// `int start(int tunFd, String uri, int poolSize)` — uri 为 `mirage://密码@host:port?sni=...`。
+/// `int start(int tunFd, String uri, int poolSize, int mtu)` — uri 为 `mirage://密码@host:port?sni=...`。
 ///
 /// 返回 0 = 成功, 负数 = 错误码。
 #[no_mangle]
@@ -151,6 +151,7 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_start(
     tun_fd: jint,
     uri: JString,
     pool_size: jint,
+    mtu: jint,
 ) -> jint {
     init_logging();
     if STARTED.swap(true, Ordering::SeqCst) {
@@ -257,7 +258,10 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_start(
                 return Err(e);
             }
         };
-        let cfg = TunConfig::default();
+        let mut cfg = TunConfig::default();
+        if mtu >= 1280 && mtu <= 1500 {
+            cfg.mtu = mtu as usize;
+        }
         let stack = TunStack::start(engine.clone(), cfg, tun_fd as i32).await?;
         Ok((engine, stack))
     });

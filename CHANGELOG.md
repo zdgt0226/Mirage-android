@@ -76,6 +76,23 @@
 * **说明**：
   * 将项目及 Rust 内核许可证全面统一为宽松的 MIT 许可证，便于社区广泛使用与集成。
 
+### 8. 移动端 TUN 专项性能优化与高阶调优面板
+* **涉及文件**：
+  * [`native/mirage-core/src/tun/mod.rs`](native/mirage-core/src/tun/mod.rs)
+  * [`native/mirage-jni/src/lib.rs`](native/mirage-jni/src/lib.rs)
+  * [`android/app/src/main/java/com/mirage/android/core/TunConfigStore.kt`](android/app/src/main/java/com/mirage/android/core/TunConfigStore.kt)
+  * [`android/app/src/main/java/com/mirage/android/ui/TunConfigDialog.kt`](android/app/src/main/java/com/mirage/android/ui/TunConfigDialog.kt)
+  * [`android/app/src/main/res/layout/dialog_tun_config.xml`](android/app/src/main/res/layout/dialog_tun_config.xml)
+  * [`android/app/src/main/res/layout/fragment_home.xml`](android/app/src/main/res/layout/fragment_home.xml)
+  * [`android/app/src/main/java/com/mirage/android/ui/HomeFragment.kt`](android/app/src/main/java/com/mirage/android/ui/HomeFragment.kt)
+  * [`android/app/src/main/java/com/mirage/android/CoreService.kt`](android/app/src/main/java/com/mirage/android/CoreService.kt)
+* **优化背景与技术实现**：
+  1. **消灭 2ms 轮询自旋，改用内核事件驱动 (极度省电 + 降延迟)**：读线程采用 `libc::poll` 阻塞等待替代原 `WouldBlock` + 2ms 轮询，消灭空载唤醒，待机零 CPU 占用，允许 SoC 进入 Deep Sleep，同时将数据包到达延迟降至微秒级。
+  2. **批处理收发 (Batching Coalescing)**：单次唤醒最多突发读取 32 个包，泵任务单次迭代批量排空就绪队列，大幅降低上下文切换开销与 smoltcp 锁竞争。
+  3. **无锁内核直写**：`write_raw` 与 `drain_tx` 移除用户态互斥锁，利用内核驱动级原子队列直接下发。
+  4. **防蜂窝分片 MTU 调优**：默认 MTU 调整为 1400（预留 TLS 1.3 伪装头与 AEAD 开销，彻底消灭 4G/5G GTP 隧道 IP 分片与视频卡顿）。
+  5. **高阶用户自定义调优面板**：在首页提供专门的「TUN 性能与网络调优」入口，支持灵活配置 MTU（1280 ~ 1500）、TCP 空闲超时（60s ~ 1800s）以及批处理深度（16 / 32 / 64 包）。
+
 ---
 
 ## [2026-08-19] 代码审计 R1-R3 缺陷修复与稳定性提升
