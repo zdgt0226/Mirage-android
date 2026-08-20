@@ -139,4 +139,4 @@ docs/
 
 ## License
 
-GPL-3.0-or-later (与 Mirage-rs 一致)。
+[MIT License](LICENSE)

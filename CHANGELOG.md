@@ -68,6 +68,14 @@
 * **说明**：
   * 正式引入 Google Gemini、Anthropic Claude、DeepSeek AI 作为核心 AI 研发与审计合作者，并在 Git 历史中配置标准 `Co-authored-by` 元数据。
 
+### 7. 开源许可证规范化 (MIT)
+* **涉及文件**：
+  * [`README.md`](README.md)
+  * [`native/mirage-core/Cargo.toml`](native/mirage-core/Cargo.toml)
+  * [`LICENSE`](LICENSE)
+* **说明**：
+  * 将项目及 Rust 内核许可证全面统一为宽松的 MIT 许可证，便于社区广泛使用与集成。
+
 ---
 
 ## [2026-08-19] 代码审计 R1-R3 缺陷修复与稳定性提升
