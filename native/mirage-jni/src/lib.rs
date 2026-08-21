@@ -386,16 +386,25 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_recentLogs(
     }
     for (i, l) in logs.iter().enumerate() {
         let s = env.new_string(l).unwrap_or_else(|_| JString::from(JObject::null()));
-        if !s.is_null() {
-            let _ = env.set_object_array_element(&arr, i as i32, s);
-        }
-    }
-    arr.into_raw()
+/// `String getDiagnosticSnapshotJson()` — 获取内核诊断快照 JSON (包含流量、活跃流、日志丢包、版本等)。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_getDiagnosticSnapshotJson(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let json = mirage_core::monitor::get_diagnostic_snapshot_json();
+    env.new_string(json).unwrap_or_else(|_| JString::from(JObject::null())).into_raw()
 }
 
-
-
-/// `double[] getStats()` — 流量统计: [up_total, down_total, up_rate, down_rate,
+/// `boolean clearNativeLogs()` — 清空 Rust 内核内存日志。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_clearNativeLogs(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jboolean {
+    mirage_core::monitor::clear_logs();
+    1
+}
 /// tcp_conns, udp_flows, dns_queries] (速率单位 B/s)。
 #[no_mangle]
 pub extern "system" fn Java_com_mirage_android_core_MirageNative_getStats(

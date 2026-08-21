@@ -9,11 +9,11 @@
 #     需要手动维护，本脚本会在有差异时提示
 #
 # 用法:
-#   ./native/vendor-sync.sh [mirage-rs 路径]   # 默认 /opt/claude/Mirage-rs
+#   ./native/vendor-sync.sh [mirage-rs 路径]   # 默认 /opt/Mirage-rs
 # ============================================================================
 set -euo pipefail
 
-UPSTREAM="${1:-/opt/claude/Mirage-rs}"
+UPSTREAM="${1:-/opt/Mirage-rs}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$HERE/native/mirage-core/src/vendor"
 

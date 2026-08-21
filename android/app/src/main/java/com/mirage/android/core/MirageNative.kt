@@ -30,6 +30,12 @@ object MirageNative {
     /** 取最近日志行 */
     external fun recentLogs(): Array<String>
 
+    /** 清空 Rust 内核内存日志 */
+    external fun clearNativeLogs(): Boolean
+
+    /** 获取内核结构化诊断快照 JSON */
+    external fun getDiagnosticSnapshotJson(): String
+
     external fun version(): String
 
     /** 动态设置 Rust 日志等级 (trace/debug/info/warn/error)。 */

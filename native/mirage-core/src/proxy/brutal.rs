@@ -72,7 +72,7 @@ pub fn set_brutal_rate(fd: i32, rate_bytes_per_sec: u64) {
             rate: u64,
             cwnd_gain: u32,
         }
-        // X10 编码: 15 = 1.5× BDP. 跟 Python POC 一致 (/opt/claude/mirage
+        // X10 编码: 15 = 1.5× BDP. 跟 Python POC 一致 (/opt/Mirage-rs
         // /core/brutal.py::_DEFAULT_CWND_GAIN), 实测吞吐显著高于 20. 之前
         // alpha.5 改成 20 是基于"apernet 内核默认 20"的误判.
         const CWND_GAIN_X10: u32 = 15;

@@ -74,6 +74,17 @@
             </intent-filter>
         </service>
 
+        <!-- 日志与诊断包安全导出 FileProvider -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <meta-data
             android:name="com.google.android.gms.car.application"
             android:resource="@xml/car_app" />

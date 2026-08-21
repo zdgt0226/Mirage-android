@@ -94,16 +94,18 @@ impl Default for MemoryWriter {
     }
 }
 
+const LOG_CAP: usize = 2000;
+
 impl MemoryWriter {
     pub fn new() -> Self {
-        let (tx, rx) = std::sync::mpsc::sync_channel(1000);
-        let buffer = Arc::new(Mutex::new(VecDeque::with_capacity(500)));
+        let (tx, rx) = std::sync::mpsc::sync_channel(2000);
+        let buffer = Arc::new(Mutex::new(VecDeque::with_capacity(LOG_CAP)));
         let bg_buf = buffer.clone();
         
         std::thread::spawn(move || {
             while let Ok(s) = rx.recv() {
                 let mut q = bg_buf.lock().unwrap_or_else(|e| e.into_inner());
-                if q.len() >= 500 {
+                if q.len() >= LOG_CAP {
                     q.pop_front();
                 }
                 q.push_back(s);
@@ -119,7 +121,7 @@ impl MemoryWriter {
     /// 追加一行到环形日志。
     pub fn write_line(&self, line: &str) {
         let mut q = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
-        if q.len() >= 500 {
+        if q.len() >= LOG_CAP {
             q.pop_front();
         }
         q.push_back(line.to_string());
@@ -128,6 +130,11 @@ impl MemoryWriter {
     pub fn get_logs(&self) -> Vec<String> {
         let q = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
         q.iter().cloned().collect()
+    }
+
+    pub fn clear(&self) {
+        let mut q = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        q.clear();
     }
 }
 
@@ -162,6 +169,11 @@ pub fn recent_logs() -> Vec<String> {
     global_logger().get_logs()
 }
 
+/// 清空全局内存日志。
+pub fn clear_logs() {
+    global_logger().clear();
+}
+
 /// 追加一行日志 (tracing writer 转发用)。
 pub fn recent_logs_push(line: &str) {
     let mut s = line.to_string();
@@ -169,6 +181,44 @@ pub fn recent_logs_push(line: &str) {
         s.pop();
     }
     global_logger().write_line(&s);
+}
+
+/// 生成结构化内核诊断快照 JSON (用于一键诊断包导出与离线分析)。
+pub fn get_diagnostic_snapshot_json() -> String {
+    let (up, down, up_rate, down_rate) = sample();
+    let tcp = crate::tun::tcp::TCP_ACTIVE.load(Ordering::Relaxed);
+    let udp = crate::tun::udp::flow_count_global();
+    let dns = crate::tun::dns::DNS_QUERIES.load(Ordering::Relaxed);
+    let stall_secs = tunnel_stall_secs();
+    let active_tunnels = tunnel_conn_count();
+    let dropped_logs = DROPPED_LOGS.load(Ordering::Relaxed);
+    let logs_count = recent_logs().len();
+
+    let snapshot = serde_json::json!({
+        "timestamp": unix_now_secs(),
+        "stats": {
+            "up_total_bytes": up,
+            "down_total_bytes": down,
+            "up_rate_bps": up_rate,
+            "down_rate_bps": down_rate,
+            "active_tcp_connections": tcp,
+            "active_udp_flows": udp,
+            "total_dns_queries": dns,
+            "active_tunnel_connections": active_tunnels,
+            "tunnel_stall_secs": stall_secs
+        },
+        "logging": {
+            "in_memory_log_count": logs_count,
+            "log_buffer_capacity": LOG_CAP,
+            "dropped_logs": dropped_logs
+        },
+        "version": {
+            "core_version": env!("CARGO_PKG_VERSION"),
+            "protocol_sync": crate::PROTOCOL_SYNC.lines().nth(2).unwrap_or("")
+        }
+    });
+
+    serde_json::to_string_pretty(&snapshot).unwrap_or_else(|_| "{}".to_string())
 }
 
 // ── 活跃连接监控 ────────────────────────────────────────────────────────────
