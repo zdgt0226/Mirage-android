@@ -54,10 +54,10 @@ use crate::engine::{Engine, TUN_ADDR_V4, TUN_DNS_V4, TUN_PEER_V4};
 use crate::tun::device::TunDevice;
 
 pub const TUN_MTU: usize = 1400;
-/// TCP socket 收发缓冲 (每条连接 2×512KB)。支持高 BDP 链路动态大窗口吞吐。
-pub const SOCK_BUF: usize = 512 * 1024;
+/// TCP socket 收发缓冲 (每条连接 2×128KB)。移动端吞吐与内存占用的最佳平衡点。
+pub const SOCK_BUF: usize = 128 * 1024;
 /// 无 4 元组的 catcher socket (SYN 来了没人连) 的存活上限, 到点由 sweeper 回收。
-const CATCHER_TTL: Duration = Duration::from_secs(30);
+const CATCHER_TTL: Duration = Duration::from_secs(15);
 /// 泵的定时 tick (驱动 smoltcp 计时器: 重传/窗口/超时)。
 const PUMP_TICK: Duration = Duration::from_millis(25);
 
@@ -386,7 +386,7 @@ impl TunStack {
         }
     }
 
-    /// 回收过期的无 4 元组 catcher socket (SYN 来了没人连)。
+    /// 回收过期的无 4 元组 catcher socket 及已关闭/超时的残留 socket。
     fn sweep(&self) {
         let mut g = lock_inner(&self.inner);
         let now = Instant::now();
@@ -395,12 +395,17 @@ impl TunStack {
             .iter()
             .filter(|(h, s)| {
                 let age = g.created_at.get(h).copied().unwrap_or(now);
-                if now.duration_since(age) < CATCHER_TTL {
-                    return false;
-                }
                 match s {
                     smoltcp::socket::Socket::Tcp(t) => {
-                        t.state() == stcp::State::Listen && t.remote_endpoint().is_none()
+                        // 1. 无 4 元组的 catcher 超时回收
+                        if t.state() == stcp::State::Listen && t.remote_endpoint().is_none() {
+                            return now.duration_since(age) >= CATCHER_TTL;
+                        }
+                        // 2. Closed / TimeWait 状态的 socket 快速清理
+                        if t.state() == stcp::State::Closed || t.state() == stcp::State::TimeWait {
+                            return true;
+                        }
+                        false
                     }
                     _ => false,
                 }
@@ -408,7 +413,7 @@ impl TunStack {
             .map(|(h, _)| h)
             .collect();
         if !stale.is_empty() {
-            debug!("[TUN] 回收 {} 个过期 socket", stale.len());
+            debug!("[TUN] 回收 {} 个过期/关闭 socket", stale.len());
         }
         for h in stale {
             g.created_at.remove(&h);

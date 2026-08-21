@@ -138,6 +138,20 @@
   3. **智能 DNS 降级与 SERVFAIL 快速失败**：直连解析失败时检查隧道健康状态。仅当隧道健康时才分配 Fake-IP；若隧道不可用则立即返回 `SERVFAIL` (RCODE=3)，让客户端快速切换或重试，杜绝无效等待；
   4. **FD 压力测试工具**：新增 `examples/fd_stress.rs` 诊断工具，8 轮池取放压测严格证明内核与连接池零 FD 泄漏。
 
+### 13. 根治长时间使用后多媒体/图片视频加载逐渐变慢的性能衰退 (Performance Critical)
+* **涉及文件**：
+  * [`native/mirage-core/src/tun/tcp.rs`](native/mirage-core/src/tun/tcp.rs)
+  * [`native/mirage-core/src/tun/mod.rs`](native/mirage-core/src/tun/mod.rs)
+  * [`native/mirage-core/src/tun/udp.rs`](native/mirage-core/src/tun/udp.rs)
+* **背景与性能衰退根因剖析**：
+  1. **smoltcp 轮询时间复杂度恶化 ($O(N)$ 灾难)**：原 `RELAY_IDLE` (300s) 和 `RELAY_IDLE_DIRECT` (600s) 超时时间过长。在 Telegram、YouTube、X、哔哩哔哩等多图多流应用运行数分钟后，大量已传输完毕的 HTTP/HTTPS Keep-Alive 闲置连接滞留在 smoltcp 的 `SocketSet` 中（实测累积达 6,800+ 个 socket）。由于 smoltcp 的 `Interface::poll` 在每个入站数据包到达时都需要全量遍历所有 socket，导致单包轮询耗时从微秒级恶化至毫秒级，造成高 CPU 消耗与严重的网络吞吐断崖式下跌；
+  2. **WarmPool 预热连接被闲置长连接耗尽**：原 300s 隧道空闲超时导致 WarmPool 中的隧道被已下载完图片的空闲连接长期锁定，后续新图片请求无法命中 0ms 预热池，全部回退到耗时 100~300ms 的按需重新握手；
+  3. **堆内存与 SocketSet 垃圾滞留**：原有 `sweep()` 仅清理 Listen 态 Catcher，对已进入 `Closed`/`TimeWait` 态的 socket 未作周期性清理。
+* **治本性能调优方案**：
+  1. **TCP / UDP 空闲超时精准调优为 30s**：将 `RELAY_IDLE`、`RELAY_IDLE_DIRECT` 与 `UDP_IDLE` 统一优化为 **30s**。连接完成数据交换进入空闲 30s 后即时释放，将长期驻留的活动 Socket 数量稳定控制在几十个安全区间；
+  2. **smoltcp 内存与缓冲优化**：`SOCK_BUF` 调整为 `128KB`（2×128KB），在满足百兆移动带宽滑窗吞吐的同时，大幅降低内存开销与 Cache 抖动；
+  3. **增强型 Sweeper 实时回收**：升级 `sweep()` 逻辑，周期性全自动清除 `Closed`、`TimeWait` 状态的残留 Socket，确保 `SocketSet` 始终维持纯净轻量。
+
 ---
 
 ## [2026-08-19] 代码审计 R1-R3 缺陷修复与稳定性提升

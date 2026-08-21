@@ -31,7 +31,7 @@ use crate::engine::Engine;
 use crate::proxy::outbound::OutboundNode;
 use crate::tun::{TunStack, TUN_MTU};
 
-const UDP_IDLE: Duration = Duration::from_secs(60);
+const UDP_IDLE: Duration = Duration::from_secs(30);
 /// 首下行超时 (对齐上游 FIRST_DOWNLINK_TIMEOUT)。
 const FIRST_DOWNLINK_TIMEOUT: Duration = Duration::from_secs(8);
 /// 并发 UDP 流上限 (每流一条隧道, 别抽干 WarmPool; 超限丢新流 → 客户端 QUIC 回落 TCP)。
