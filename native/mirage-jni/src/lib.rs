@@ -73,10 +73,34 @@ impl std::io::Write for PanelWriter {
     }
 }
 
+/// 提升进程文件描述符上限 (治本修复 too many open files)。
+///
+/// Android 应用进程默认 RLIMIT_NOFILE 常为 256~1024。代理场景 fd 峰值 = 隧道池
+/// (常驻 + on-demand 并发拨号 ~24) + 活跃隧道/直连连接 + UDP 流, 多 App 并发时
+/// 易撞上限 → 一切新 socket 创建失败 (EMFILE) → 隧道/直连/DNS 查询全挂。
+/// 应用进程可将 soft limit 提升到 hard limit 内 (无需 root)。
+fn raise_nofile_limit() {
+    #[cfg(unix)]
+    unsafe {
+        let mut lim: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) == 0 {
+            // cur = max(当前, 8192), 但不越过系统 hard limit
+            let cur = lim.rlim_cur.max(8192).min(lim.rlim_max);
+            if cur != lim.rlim_cur {
+                let new = libc::rlimit { rlim_cur: cur, rlim_max: lim.rlim_max };
+                if libc::setrlimit(libc::RLIMIT_NOFILE, &new) == 0 {
+                    eprintln!("[mirage-jni] RLIMIT_NOFILE: {} -> {}", lim.rlim_cur, cur);
+                }
+            }
+        }
+    }
+}
+
 /// 初始化日志系统 (幂等)。
 fn init_logging() {
     static LOG_INIT: Once = Once::new();
     LOG_INIT.call_once(|| {
+        raise_nofile_limit();
         let default_filter = EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| "mirage_core=debug,mirage_jni=debug".into());
         let (filter_layer, reload_handle) = reload::Layer::new(default_filter);

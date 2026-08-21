@@ -221,8 +221,9 @@ async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
     None
 }
 
-/// 构造应答: A → 给定 IP; AAAA/其他 → 空 answer (NOERROR)。
-fn build_response(query: &[u8], domain: &str, qtype: u16, a_record: Option<[u8; 4]>, question_len: usize) -> Option<Vec<u8>> {
+/// 构造应答: A → 给定 IP; AAAA/其他 → 空 answer (NOERROR); rcode=3 → SERVFAIL
+/// (隧道也不可用时的快速失败, 避免客户端连必死的 fake-IP 白等)。
+fn build_response(query: &[u8], domain: &str, qtype: u16, a_record: Option<[u8; 4]>, question_len: usize, rcode: u8) -> Option<Vec<u8>> {
     if query.len() < 12 || question_len < 13 || question_len > query.len() {
         return None;
     }
@@ -231,7 +232,7 @@ fn build_response(query: &[u8], domain: &str, qtype: u16, a_record: Option<[u8; 
 
     let mut resp = Vec::with_capacity(12 + question.len() + 16);
     resp.extend_from_slice(id);
-    resp.extend_from_slice(&[0x81, 0x80]);
+    resp.extend_from_slice(&[0x81, 0x80 | (rcode & 0x0F)]);
     resp.extend_from_slice(&[0, 1]);
     if a_record.is_some() {
         resp.extend_from_slice(&[0, 1]);
@@ -296,7 +297,13 @@ fn parse_query(buf: &[u8]) -> Option<(String, u16, usize)> {
 /// 把应答写回 TUN 的公共封装。
 fn send_dns_reply(stack: &TunStack, client: std::net::SocketAddr, query: &[u8],
                   domain: &str, qtype: u16, a: Option<[u8; 4]>, question_len: usize) {
-    if let Some(resp) = build_response(query, domain, qtype, a, question_len) {
+    send_dns_reply_rcode(stack, client, query, domain, qtype, a, question_len, 0);
+}
+
+/// 带 RCODE 的应答封装 (rcode=3 用于 SERVFAIL)。
+fn send_dns_reply_rcode(stack: &TunStack, client: std::net::SocketAddr, query: &[u8],
+                        domain: &str, qtype: u16, a: Option<[u8; 4]>, question_len: usize, rcode: u8) {
+    if let Some(resp) = build_response(query, domain, qtype, a, question_len, rcode) {
         let dns_addr = stack.dns_addr_std();
         let src = std::net::SocketAddr::new(std::net::IpAddr::V4(dns_addr), 53);
         if let Some(pkt) = crate::tun::udp::build_reply_ip_public(src, client, &resp) {
@@ -345,12 +352,21 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, quer
                     send_dns_reply(&stack2, client, &query2, &domain, qtype, Some(ip.octets()), question_len);
                     crate::monitor::record_conn_close(cid, qlen, 64);
                 }
-                // 上游失败 → 兜底 fake-IP (保证连通性)
+                // 上游失败 → 兜底策略: 隧道健康则 fake-IP (服务端远程解析, 合理降级);
+                // 隧道也不健康 (如 fd 耗尽/上游失联) 则 SERVFAIL 快速失败 —— 否则客户端
+                // 连 fake-IP 后走隧道 pool.get() 白等 10s+, 且制造"国内也依赖隧道"的假象。
                 None => {
-                    if let Some(a) = stack2.engine().fake_ip_allocate(&domain).map(|i| i.octets()) {
-                        send_dns_reply(&stack2, client, &query2, &domain, qtype, Some(a), question_len);
-                        crate::monitor::record_conn_close(cid, qlen, 64);
+                    let engine = stack2.engine();
+                    if engine.is_healthy() {
+                        if let Some(a) = engine.fake_ip_allocate(&domain).map(|i| i.octets()) {
+                            send_dns_reply(&stack2, client, &query2, &domain, qtype, Some(a), question_len);
+                            crate::monitor::record_conn_close(cid, qlen, 64);
+                        } else {
+                            crate::monitor::record_conn_close(cid, qlen, 0);
+                        }
                     } else {
+                        tracing::warn!("[TUN-DNS] 直连解析失败且隧道不健康, 返回 SERVFAIL ({}), 避免 fake-IP 白等", domain);
+                        send_dns_reply_rcode(&stack2, client, &query2, &domain, qtype, None, question_len, 3);
                         crate::monitor::record_conn_close(cid, qlen, 0);
                     }
                 }
@@ -378,7 +394,7 @@ pub fn answer_dns_udp(engine: &Engine, payload: &[u8]) -> Option<Vec<u8>> {
     } else {
         None
     };
-    build_response(payload, &domain, qtype, a, question_len)
+    build_response(payload, &domain, qtype, a, question_len, 0)
 }
 
 /// TCP DNS relay: 读 [2B len][query] → 回 [2B len][response] → 关闭。
@@ -407,7 +423,7 @@ pub async fn relay_tcp_dns(stack: Arc<TunStack>, handle: SocketHandle) {
         if let Some((domain, qtype, question_len)) = parse_query(&query) {
             if qtype == 1 && crate::direct::should_direct(Some(&domain), None) {
                 if let Some(ip) = resolve_upstream(&domain).await {
-                    let resp = build_response(&query, &domain, qtype, Some(ip.octets()), question_len).unwrap_or_default();
+                    let resp = build_response(&query, &domain, qtype, Some(ip.octets()), question_len, 0).unwrap_or_default();
                     let mut framed = Vec::with_capacity(2 + resp.len());
                     framed.extend_from_slice(&(resp.len() as u16).to_be_bytes());
                     framed.extend_from_slice(&resp);
@@ -442,12 +458,32 @@ mod tests {
             }
             p - 12 + 1
         };
-        let resp = build_response(&query, "example.com", 1, Some([198, 18, 0, 2]), 12 + qname_end + 4).unwrap();
+        let resp = build_response(&query, "example.com", 1, Some([198, 18, 0, 2]), 12 + qname_end + 4, 0).unwrap();
         // A 记录部分: [C0 0C][00 01][00 01][TTL 4B][00 04][IP 4B]
         let a_offset = resp.len() - 16;
         let ttl_bytes = &resp[a_offset + 6..a_offset + 10];
         let ttl = u32::from_be_bytes([ttl_bytes[0], ttl_bytes[1], ttl_bytes[2], ttl_bytes[3]]);
         assert_eq!(ttl, 60, "Fake-IP 应答 TTL 必须为 60s");
+    }
+
+    #[test]
+    fn servfail_rcode_is_3() {
+        let query = build_a_query("example.com", 0x5678);
+        let qname_end = {
+            let mut p = 12usize;
+            while p < query.len() && query[p] != 0 {
+                p += 1 + query[p] as usize;
+            }
+            p - 12 + 1
+        };
+        // rcode=3 → flags 低字节 0x80|0x03 = 0x83 (0x8183 = SERVFAIL, RA 置位)
+        let resp = build_response(&query, "example.com", 1, None, 12 + qname_end + 4, 3).unwrap();
+        assert_eq!(resp[2], 0x81, "QR+RD");
+        assert_eq!(resp[3], 0x83, "RA + RCODE=3 (SERVFAIL)");
+        assert_eq!(resp[6], 0, "ANSWER 数必须为 0 (SERVFAIL 无答案)");
+        // rcode=0 时 flags 应为 0x8180 (NOERROR)
+        let ok = build_response(&query, "example.com", 1, None, 12 + qname_end + 4, 0).unwrap();
+        assert_eq!(ok[3], 0x80, "NOERROR");
     }
 
     #[test]

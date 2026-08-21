@@ -1,10 +1,14 @@
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
 
 val propBuildTime = project.findProperty("buildTime") as? String 
-    ?: java.text.SimpleDateFormat("yyyy.MM.dd", java.util.Locale.CHINA).format(java.util.Date())
+    ?: SimpleDateFormat("yyyy.MM.dd", Locale.CHINA).format(Date())
 val propBuildTag = project.findProperty("buildTag") as? String 
     ?: "Release 5 (TUN Opt + 1400 MTU)"
 val propVersionCode = (project.findProperty("versionCode") as? String)?.toIntOrNull() ?: 5
