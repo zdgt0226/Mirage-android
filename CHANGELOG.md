@@ -122,6 +122,22 @@
   4. **Wikipedia 维基百科**：英文原版词条即时排版呈现；
   5. **GitHub 官方原生 App**：个人 Issues、PR、星标与组织数据无缝云端同步。
 
+### 12. 根治 `too many open files` 与国内 DNS 兜底解耦
+* **涉及文件**：
+  * [`native/mirage-jni/src/lib.rs`](native/mirage-jni/src/lib.rs)
+  * [`native/mirage-core/src/tun/tcp.rs`](native/mirage-core/src/tun/tcp.rs)
+  * [`native/mirage-core/src/tun/dns.rs`](native/mirage-core/src/tun/dns.rs)
+  * [`native/mirage-core/examples/fd_stress.rs`](native/mirage-core/examples/fd_stress.rs)
+  * [`android/app/build.gradle.kts`](android/app/build.gradle.kts)
+* **根因剖析与诊断**：
+  1. **非资源泄漏，而是撞击系统软上限**：手机端各 App（微信、淘宝、B站等）存在大量长保活 Keep-Alive 与预加载连接，在原先 1800s（30分钟）空闲窗口期内持续累积，导致峰值 FD 达到 Android 进程默认较低的 `RLIMIT_NOFILE`（256~1024），随后新套接字创建触发 `EMFILE` 错误；
+  2. **国内依赖隧道假象**：`tun/dns.rs` 国内直连 UDP 解析因 FD 耗尽失败后，原本无条件兜底分配 Fake-IP 并交由隧道代理，此时隧道同样因 FD 不足无法拨号，造成客户端陷入 10s+ 超时死等，且制造了“国内直连也依赖隧道”的假象。
+* **治本修复方案**：
+  1. **提升 FD 上限至 8192**：在 `mirage-jni` 初始化时通过 `libc::getrlimit` / `libc::setrlimit` 将进程软限制 `rlim_cur` 自动提升至 8192（在 `rlim_max` 硬上限内，无需 root 权限），将并发连接容量扩大数倍；
+  2. **直连空闲超时优化**：`RELAY_IDLE_DIRECT` 从 1800s 调优为 600s（10分钟），在确保国内大文件传输不中断的前提下，加快空闲无用连接的回收；
+  3. **智能 DNS 降级与 SERVFAIL 快速失败**：直连解析失败时检查隧道健康状态。仅当隧道健康时才分配 Fake-IP；若隧道不可用则立即返回 `SERVFAIL` (RCODE=3)，让客户端快速切换或重试，杜绝无效等待；
+  4. **FD 压力测试工具**：新增 `examples/fd_stress.rs` 诊断工具，8 轮池取放压测严格证明内核与连接池零 FD 泄漏。
+
 ---
 
 ## [2026-08-19] 代码审计 R1-R3 缺陷修复与稳定性提升
