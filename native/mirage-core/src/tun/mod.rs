@@ -386,7 +386,7 @@ impl TunStack {
         }
     }
 
-    /// 回收过期的无 4 元组 catcher socket 及已关闭/超时的残留 socket。
+    /// 回收过期的无 4 元组 catcher socket (未完成 TCP 握手的孤儿监听)。
     fn sweep(&self) {
         let mut g = lock_inner(&self.inner);
         let now = Instant::now();
@@ -397,15 +397,10 @@ impl TunStack {
                 let age = g.created_at.get(h).copied().unwrap_or(now);
                 match s {
                     smoltcp::socket::Socket::Tcp(t) => {
-                        // 1. 无 4 元组的 catcher 超时回收
-                        if t.state() == stcp::State::Listen && t.remote_endpoint().is_none() {
-                            return now.duration_since(age) >= CATCHER_TTL;
-                        }
-                        // 2. Closed / TimeWait 状态的 socket 快速清理
-                        if t.state() == stcp::State::Closed || t.state() == stcp::State::TimeWait {
-                            return true;
-                        }
-                        false
+                        // 仅回收超时未收到 SYN/ACK 的空闲 catcher (无 4 元组)
+                        t.state() == stcp::State::Listen
+                            && t.remote_endpoint().is_none()
+                            && now.duration_since(age) >= CATCHER_TTL
                     }
                     _ => false,
                 }
@@ -413,7 +408,7 @@ impl TunStack {
             .map(|(h, _)| h)
             .collect();
         if !stale.is_empty() {
-            debug!("[TUN] 回收 {} 个过期/关闭 socket", stale.len());
+            debug!("[TUN] 回收 {} 个过期 catcher socket", stale.len());
         }
         for h in stale {
             g.created_at.remove(&h);

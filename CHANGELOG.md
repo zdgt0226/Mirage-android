@@ -150,7 +150,18 @@
 * **治本性能调优方案**：
   1. **TCP / UDP 空闲超时精准调优为 30s**：将 `RELAY_IDLE`、`RELAY_IDLE_DIRECT` 与 `UDP_IDLE` 统一优化为 **30s**。连接完成数据交换进入空闲 30s 后即时释放，将长期驻留的活动 Socket 数量稳定控制在几十个安全区间；
   2. **smoltcp 内存与缓冲优化**：`SOCK_BUF` 调整为 `128KB`（2×128KB），在满足百兆移动带宽滑窗吞吐的同时，大幅降低内存开销与 Cache 抖动；
-  3. **增强型 Sweeper 实时回收**：升级 `sweep()` 逻辑，周期性全自动清除 `Closed`、`TimeWait` 状态的残留 Socket，确保 `SocketSet` 始终维持纯净轻量。
+  3. **Catcher 孤儿监听及时回收**：`sweep()` 仅针对未完成三次握手的孤儿 Catcher 监听进行超时清理。
+
+### 14. 修复 Sweeper 跨任务移除 Socket 引发 `TunTcpStream` Panic 闪退 (Critical)
+* **涉及文件**：
+  * [`native/mirage-core/src/tun/mod.rs`](native/mirage-core/src/tun/mod.rs)
+  * [`native/mirage-core/src/tun/tcp.rs`](native/mirage-core/src/tun/tcp.rs)
+* **背景与根因**：
+  * 在 `sweep()` 中若直接将处于 `Closed/TimeWait` 状态的 Socket 从 `SocketSet` 移除，而持有该 Socket 的异步任务 `TunTcpStream` 仍在等待或执行 `close()`/`drop()`，后续调用 `g.sockets.get_mut(handle)` 时 `smoltcp` 会因找不到 Handle 触发 Panic：`index out of bounds / item not found`。
+  * 该 Panic 发生在异步任务清理或 Drop 析构路径中，导致 Rust 触发 `panic_in_cleanup` / `SIGABRT` 造成后台 Core 进程闪退。
+* **修改方案**：
+  * **职责分离**：`sweep()` 仅回收超时的孤儿 Catcher Socket（无 4 元组监听）；所有已建立连接的 Socket 生命期统一由 `TunTcpStream` 的 `close()` 和 `Drop` 负责释放；
+  * **访问防护**：`TunTcpStream` 的 `wait_established`、`destination`、`poll_read`、`poll_write`、`close`、`poll_shutdown` 在访问 Socket 句柄前均增加 `any(|(h, _)| h == self.handle)` 存在性防御检查，彻底杜绝任何越界 Panic。
 
 ---
 

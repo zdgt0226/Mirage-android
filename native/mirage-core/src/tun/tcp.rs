@@ -72,6 +72,9 @@ impl TunTcpStream {
     async fn wait_established(&self) -> io::Result<()> {
         std::future::poll_fn(|cx| {
             let mut g = lock_inner(&self.stack.inner);
+            if !g.sockets.iter().any(|(h, _)| h == self.handle) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionAborted, "连接已被清理")));
+            }
             let sock = g.sockets.get_mut::<tcp::Socket>(self.handle);
             match sock.state() {
                 tcp::State::Established => Poll::Ready(Ok(())),
@@ -94,6 +97,9 @@ impl TunTcpStream {
             return Some(d);
         }
         let g = lock_inner(&self.stack.inner);
+        if !g.sockets.iter().any(|(h, _)| h == self.handle) {
+            return None;
+        }
         let sock = g.sockets.get::<tcp::Socket>(self.handle);
         let d = sock.local_endpoint().map(|ep| (ep.addr.into(), ep.port));
         drop(g);
@@ -103,19 +109,22 @@ impl TunTcpStream {
 
     /// 关闭连接并释放 socket (幂等)。
     pub fn close(&self) {
+        if !self.alive.swap(false, Ordering::Relaxed) {
+            return;
+        }
         {
             let mut g = lock_inner(&self.stack.inner);
-            if self.alive.load(Ordering::Relaxed) {
+            if g.sockets.iter().any(|(h, _)| h == self.handle) {
                 g.sockets.get_mut::<tcp::Socket>(self.handle).close();
             }
         }
         self.stack.poll_now();
         {
             let mut g = lock_inner(&self.stack.inner);
-            if self.alive.swap(false, Ordering::Relaxed) {
+            if g.sockets.iter().any(|(h, _)| h == self.handle) {
                 g.sockets.remove(self.handle);
-                g.created_at.remove(&self.handle);
             }
+            g.created_at.remove(&self.handle);
         }
     }
 }
@@ -135,6 +144,9 @@ impl AsyncRead for TunTcpStream {
         let mut total = 0;
         let n = {
             let mut g = lock_inner(&self.stack.inner);
+            if !g.sockets.iter().any(|(h, _)| h == self.handle) {
+                return Poll::Ready(Ok(())); // Socket 已释放，视为 EOF
+            }
             let sock = g.sockets.get_mut::<tcp::Socket>(self.handle);
             if sock.can_recv() {
                 let mut err = None;
@@ -180,6 +192,9 @@ impl AsyncWrite for TunTcpStream {
     ) -> Poll<io::Result<usize>> {
         let n = {
             let mut g = lock_inner(&self.stack.inner);
+            if !g.sockets.iter().any(|(h, _)| h == self.handle) {
+                return Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)));
+            }
             let sock = g.sockets.get_mut::<tcp::Socket>(self.handle);
             if !sock.may_send() {
                 return Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)));
@@ -203,7 +218,9 @@ impl AsyncWrite for TunTcpStream {
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         {
             let mut g = lock_inner(&self.stack.inner);
-            g.sockets.get_mut::<tcp::Socket>(self.handle).close();
+            if g.sockets.iter().any(|(h, _)| h == self.handle) {
+                g.sockets.get_mut::<tcp::Socket>(self.handle).close();
+            }
         }
         self.stack.poll_now();
         Poll::Ready(Ok(()))
