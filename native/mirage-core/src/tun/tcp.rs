@@ -36,10 +36,10 @@ impl Drop for TcpActiveGuard {
 
 /// 建连 (SYN→Established) 超时。catcher 被 SYN 接住后一般一个 RTT 内完成握手。
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-/// 隧道 relay 空闲超时 (双向 30s 无数据则断开释放资源，兼顾长连接与防僵尸连接/池耗尽)。
-const RELAY_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
-/// 直连 relay 空闲超时 (30s: 及时回收空闲 keep-alive 连接，防止 smoltcp SocketSet 与 FD 累积膨胀)。
-const RELAY_IDLE_DIRECT: std::time::Duration = std::time::Duration::from_secs(30);
+/// 隧道 relay 空闲超时 (双向 300s 无数据则断开释放资源，兼顾 SSH/IM/推送长连接与防僵尸连接)。
+const RELAY_IDLE: std::time::Duration = std::time::Duration::from_secs(300);
+/// 直连 relay 空闲超时 (300s: 兼顾长连接保活与系统资源回收)。
+const RELAY_IDLE_DIRECT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// 一条已建立的 TCP 连接 (smoltcp 侧)。
 pub struct TunTcpStream {

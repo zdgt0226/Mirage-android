@@ -190,9 +190,19 @@
             android:layout_weight="1" />
 
         <ImageButton
+            android:id="@+id/btnExportLogs"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="导出诊断包"
+            android:src="@android:drawable/ic_menu_save"
+            app:tint="@color/meow_connected" />
+
+        <ImageButton
             android:id="@+id/btnCopyLogs"
             android:layout_width="32dp"
             android:layout_height="32dp"
+            android:layout_marginStart="4dp"
             android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="复制"
             android:src="@android:drawable/ic_menu_share"

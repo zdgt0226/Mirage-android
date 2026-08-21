@@ -163,6 +163,43 @@
   * **职责分离**：`sweep()` 仅回收超时的孤儿 Catcher Socket（无 4 元组监听）；所有已建立连接的 Socket 生命期统一由 `TunTcpStream` 的 `close()` 和 `Drop` 负责释放；
   * **访问防护**：`TunTcpStream` 的 `wait_established`、`destination`、`poll_read`、`poll_write`、`close`、`poll_shutdown` 在访问 Socket 句柄前均增加 `any(|(h, _)| h == self.handle)` 存在性防御检查，彻底杜绝任何越界 Panic。
 
+### 15. 结构化日志度量增强与一键诊断包安全导出 (Diagnostic Bundle & Log Export)
+* **涉及文件**：
+  * [`native/mirage-core/src/monitor.rs`](native/mirage-core/src/monitor.rs)
+  * [`native/mirage-jni/src/lib.rs`](native/mirage-jni/src/lib.rs)
+  * [`android/app/src/main/java/com/mirage/android/core/MirageNative.kt`](android/app/src/main/java/com/mirage/android/core/MirageNative.kt)
+  * [`android/app/src/main/java/com/mirage/android/core/LogExporter.kt`](android/app/src/main/java/com/mirage/android/core/LogExporter.kt)
+  * [`android/app/src/main/java/com/mirage/android/core/LogStore.kt`](android/app/src/main/java/com/mirage/android/core/LogStore.kt)
+  * [`android/app/src/main/java/com/mirage/android/ui/TrafficFragment.kt`](android/app/src/main/java/com/mirage/android/ui/TrafficFragment.kt)
+  * [`android/app/src/main/res/layout/fragment_traffic.xml`](android/app/src/main/res/layout/fragment_traffic.xml)
+  * [`android/app/src/main/res/xml/file_paths.xml`](android/app/src/main/res/xml/file_paths.xml)
+  * [`android/app/src/main/AndroidManifest.xml`](android/app/src/main/AndroidManifest.xml)
+* **功能与优化实现**：
+  1. **内存飞行记录仪扩容至 2,000 行**：Rust 内核与 Kotlin 内存日志环由 500 行扩展至 2,000 行，记录更长周期的连接与调试事件；
+  2. **结构化诊断快照 JSON**：新增 `get_diagnostic_snapshot_json()` JNI 接口，输出包含累计流量、实时速率、活跃流、DNS 查询、日志丢包率与协议版本的度量快照；
+  3. **一键打包诊断 Zip**：自动汇聚 `mirage_core.log`、`system_info.json`、`stats_snapshot.json`、`active_connections.json` 与 `rule_hits.json`；
+  4. **隐私敏感信息自动脱敏 (Data Sanitization)**：导出时自动对节点密码、Authorization 标头与 Token 进行正则掩码，确保日志安全可分享；
+  5. **UI 一键导出与系统分享**：在流量监测页日志面板新增导出按钮，通过 `FileProvider` 一键调起系统分享菜单（支持 Telegram、微信、邮箱）或保存到本地。
+
+### 16. 空闲超时健康化与跨进程日志彻底清理 (Release #51)
+* **涉及文件**：
+  * [`native/mirage-core/src/tun/tcp.rs`](native/mirage-core/src/tun/tcp.rs)
+  * [`native/mirage-core/src/tun/udp.rs`](native/mirage-core/src/tun/udp.rs)
+  * [`android/app/src/main/java/com/mirage/android/CoreService.kt`](android/app/src/main/java/com/mirage/android/CoreService.kt)
+  * [`android/app/src/main/java/com/mirage/android/core/CoreController.kt`](android/app/src/main/java/com/mirage/android/core/CoreController.kt)
+  * [`android/app/src/main/java/com/mirage/android/data/repository/VpnRepository.kt`](android/app/src/main/java/com/mirage/android/data/repository/VpnRepository.kt)
+  * [`android/app/src/main/java/com/mirage/android/core/LogStore.kt`](android/app/src/main/java/com/mirage/android/core/LogStore.kt)
+  * [`android/app/src/main/java/com/mirage/android/MainActivity.kt`](android/app/src/main/java/com/mirage/android/MainActivity.kt)
+* **修改方案**：
+  1. **TCP/UDP 空闲超时恢复健康标准值**：
+     * 隧道代理中继超时 `RELAY_IDLE` 由 30s 回调至 **300s**（5分钟），保护 SSH 交互、IM 长连接（心跳 45~180s）、推送通道与 WebSocket 不被误切断；
+     * 直连中继超时 `RELAY_IDLE_DIRECT` 回调至 **300s**；
+     * UDP 流空闲超时 `UDP_IDLE` 由 30s 回调至 **60s**；
+  2. **日志清空跨进程穿透贯通**：
+     * `VpnRepository.clearLogs()` 联动 AIDL `CoreController.clearNativeLogs()`，彻底清空 `:core` 进程的 `MemoryWriter` 原生环形日志、`:core` 进程 `LogStore` 以及 `core.log` 磁盘文件；
+  3. **UI 进程按需懒加载 (On-demand Lazy Load)**：
+     * 移除 `MainActivity.onCreate()` 中对 `NativeLoader.load()` 的冗余强制调用，UI 进程专注轻量控制器职责，内核由 `:core` 独立按需加载，节省主进程内存。
+
 ---
 
 ## [2026-08-19] 代码审计 R1-R3 缺陷修复与稳定性提升

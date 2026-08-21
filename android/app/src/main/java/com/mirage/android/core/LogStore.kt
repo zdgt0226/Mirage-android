@@ -6,7 +6,7 @@ import java.util.concurrent.ConcurrentLinkedDeque
 /** 内存日志环 (App 日志面板 + Android Logcat 输出)。 */
 object LogStore {
     private val logs = ConcurrentLinkedDeque<String>()
-    private const val CAP = 500
+    private const val CAP = 2000
 
     fun append(line: String) {
         Log.i("Mirage", line)
@@ -16,5 +16,7 @@ object LogStore {
 
     fun all(): List<String> = logs.toList()
 
-    fun clear() = logs.clear()
+    fun clear() {
+        logs.clear()
+    }
 }

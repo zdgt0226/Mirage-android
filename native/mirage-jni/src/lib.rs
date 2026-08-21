@@ -386,6 +386,13 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_recentLogs(
     }
     for (i, l) in logs.iter().enumerate() {
         let s = env.new_string(l).unwrap_or_else(|_| JString::from(JObject::null()));
+        if !s.is_null() {
+            let _ = env.set_object_array_element(&arr, i as i32, s);
+        }
+    }
+    arr.into_raw()
+}
+
 /// `String getDiagnosticSnapshotJson()` — 获取内核诊断快照 JSON (包含流量、活跃流、日志丢包、版本等)。
 #[no_mangle]
 pub extern "system" fn Java_com_mirage_android_core_MirageNative_getDiagnosticSnapshotJson(

@@ -81,6 +81,17 @@ class TrafficFragment : Fragment() {
             }
         }
 
+        binding.btnExportLogs.setOnClickListener {
+            viewLifecycleOwner.lifecycleScope.launch {
+                Toast.makeText(requireContext(), "正在打包生成诊断日志包...", Toast.LENGTH_SHORT).show()
+                runCatching {
+                    com.mirage.android.core.LogExporter.shareDiagnosticZip(requireContext())
+                }.onFailure { e ->
+                    Toast.makeText(requireContext(), "导出失败: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+
         observeState()
     }
 

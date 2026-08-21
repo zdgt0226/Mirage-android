@@ -102,9 +102,6 @@ class MainActivity : AppCompatActivity() {
             insets
         }
 
-        // 确保内核库已初始化
-        NativeLoader.load(this)
-
         checkNotificationPermission()
         handleIncomingUri(intent)
 

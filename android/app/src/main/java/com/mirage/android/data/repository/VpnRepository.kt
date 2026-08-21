@@ -169,6 +169,8 @@ class VpnRepository(private val context: Context) {
 
     fun clearLogs() {
         _logs.value = emptyList()
+        com.mirage.android.core.LogStore.clear()
+        CoreController.clearNativeLogs()
     }
 
     fun setLogLevel(level: com.mirage.android.data.model.LogLevel): Boolean {
