@@ -103,3 +103,27 @@ scripts/test-e2e.sh   # 需 root; 内部用 systemd-nspawn 隔离, 不动宿主�
 - 终端请求：`toybox nc` + `toybox printf` 验证 HTTP 80 / HTTPS 443 / DNS 53。
 - UI 交互与渲染验证：`adb exec-out screencap -p` 像素级校验分段选项卡与状态同步。
 - 内核状态：JNI 诊断快照提取与 `mirage_core.log` 运行轨迹分析。
+
+---
+
+## 2026-08-24 Fake-IP 路由隔离与 X.com 海外代理实机全通验证 (v0.2.8 Build 2026.08.24 #53)
+
+**环境**: 三星 Galaxy S24+ (SM-S9260 / Android 16 SDK 36), 节点 117.55.230.75:8443.
+
+### 🔴 定位并根治的关键问题: Fake-IP 虚拟网段被 GeoIP:private 误判劫持
+
+1. **根因**: `geoip.dat` 规则集将 RFC 2544 / RFC 5737 / RFC 6890 定义的 `198.18.0.0/15` 特殊保留段归入 `geoip:private`。客户端将 Fake-IP 分配给海外域名后，TCP/UDP 连接命中 `geoip:private -> direct` 规则，导致所有 Fake-IP 流量全被误判为“局域网直连”，无法打开 X (Twitter) 等海外服务。
+2. **解法**:
+   - 在 [`native/mirage-core/src/direct.rs`](file:///opt/Mirage-android/native/mirage-core/src/direct.rs) 与 [`geo.rs`](file:///opt/Mirage-android/native/mirage-core/src/geo.rs) 中增加 `is_fake_ip` 虚拟地址判断。
+   - `ConditionKind::GeoIp`、`ConditionKind::IpCidr`、`is_direct_ip`、`is_cn_ip` 遇到 Fake-IP 一律直接返回 `false`，彻底杜绝 Fake-IP 虚拟地址污染 IP 维度规则。
+   - 包含 Rust 原生动态库 `libmirage_jni.so` 全量交叉编译与重新打包。
+
+### ✅ 实机验证通过证据
+
+| 验证项 | 实测结果与截图 |
+|---|---|
+| **X (Twitter) 真实访问** | Chrome 访问 `https://x.com` 瞬间加载首屏、推文、图片、猫咪推文、广告、个人头像与互动计数，完全正常流畅渲染 (`231_x_com_with_new_so.png`) |
+| **连接信息真实判定** | `api.x.com:443`、`x.com:443`、`play-fe.googleapis.com:443`、`android.googleapis.com:443` 全部准确显示为 **● 隧道代理 (Proxy)** (`232_mirage_conns_x_proxy_verified.png`) |
+| **国内直连与海外代理共存** | 国内站点（`m.bilibili.com`）与海外站点（`x.com`）同时并发访问，国内流量瞬时直连传输完成，海外流量持续稳定走隧道代理 (`233_bilibili_and_x_coexist.png`) |
+| **自动化回归测试** | `cargo test` 103 项测试全部通过（新增 `test_fake_ip_routing_safety`） |
+
