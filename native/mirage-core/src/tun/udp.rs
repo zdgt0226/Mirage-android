@@ -627,6 +627,48 @@ pub fn build_icmp_port_unreachable(orig_pkt: &[u8]) -> Option<Vec<u8>> {
 
             Some(pkt)
         }
+        6 => {
+            // IPv6: IPv6 header (40B) + ICMPv6 header (8B) + original datagram (up to 1232B)
+            if orig_pkt.len() < 40 + 8 {
+                return None;
+            }
+            let orig_src = &orig_pkt[8..24];
+            let orig_dst = &orig_pkt[24..40];
+
+            let icmp_payload_len = orig_pkt.len().min(1232);
+            let icmp_msg_len = 8 + icmp_payload_len;
+            let total_len = 40 + icmp_msg_len;
+            let mut pkt = vec![0u8; total_len];
+
+            // Outer IPv6 Header
+            pkt[0] = 0x60;
+            pkt[4..6].copy_from_slice(&(icmp_msg_len as u16).to_be_bytes());
+            pkt[6] = 58; // Next Header: ICMPv6 (58)
+            pkt[7] = 64; // Hop Limit
+            pkt[8..24].copy_from_slice(orig_dst); // Src = original Dst
+            pkt[24..40].copy_from_slice(orig_src); // Dst = original Src
+
+            // ICMPv6 Header (Type 1: Destination Unreachable, Code 4: Port Unreachable)
+            pkt[40] = 1;
+            pkt[41] = 4;
+            // 42..44 checksum
+            // 44..48 unused (0)
+
+            // ICMPv6 Payload
+            pkt[48..48 + icmp_payload_len].copy_from_slice(&orig_pkt[..icmp_payload_len]);
+
+            // ICMPv6 Checksum (IPv6 Pseudo-header)
+            let mut pseudo = Vec::with_capacity(40 + icmp_msg_len);
+            pseudo.extend_from_slice(orig_dst);
+            pseudo.extend_from_slice(orig_src);
+            pseudo.extend_from_slice(&(icmp_msg_len as u32).to_be_bytes());
+            pseudo.extend_from_slice(&[0u8, 0, 0, 58]);
+            pseudo.extend_from_slice(&pkt[40..]);
+            let icmp_csum = checksum(&pseudo);
+            pkt[42..44].copy_from_slice(&icmp_csum.to_be_bytes());
+
+            Some(pkt)
+        }
         _ => None,
     }
 }

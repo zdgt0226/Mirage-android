@@ -153,6 +153,11 @@ class CoreService : VpnService() {
         builder.addRoute("0.0.0.0", 0)
         builder.addRoute("198.18.0.0", 15)
         builder.addDnsServer(InetAddress.getByName("198.19.0.53"))
+        // 捕获 IPv6 流量，防止 Android 14/15/16 5G 蜂窝网络 IPv6 绕过 VPN 直连物理网卡被 GFW 阻断
+        runCatching {
+            builder.addAddress("fdfe:dcba:9876::1", 128)
+            builder.addRoute("::", 0)
+        }
         val mtu = TunConfigStore.getMtu(this)
         builder.setMtu(mtu)
 
