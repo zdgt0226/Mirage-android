@@ -165,9 +165,19 @@ async fn udp_flow_relay(
     let _guard = FlowGuard { stack: stack.clone(), key };
     let flow_id = NEXT_FLOW_ID.fetch_add(1, Ordering::Relaxed);
 
-    // 分流: 裸 IP 命中 CN → 直连 (protect UDP socket 走真实网络)
-    if crate::direct::should_direct(None, Some(key.dst)) {
-        return udp_flow_direct(stack, engine, key, rx).await;
+    // 复合分流规则决策
+    let reverse_domain = engine.fake_ip_reverse(&key.dst);
+    let action = crate::direct::route_decision(reverse_domain.as_deref(), Some(key.dst), Some(key.dst_port), Some("udp"));
+
+    if action == crate::direct::RuleAction::Block {
+        let target_str = reverse_domain.as_deref().map(|d| d.to_string()).unwrap_or_else(|| format!("{}:{}", key.dst, key.dst_port));
+        let (cid, _, _) = crate::monitor::record_conn_start("UDP", &target_str, "规则拦截 (Block)");
+        crate::monitor::record_conn_close(cid, 0, 0);
+        return;
+    }
+
+    if action == crate::direct::RuleAction::Direct {
+        return udp_flow_direct(stack, engine, key, reverse_domain, rx).await;
     }
 
     // 取出站节点
@@ -739,10 +749,36 @@ fn reply_ip_header_direction() {
 /// 直连 UDP 流: protect UDP socket 直接收发 (回程构 IP 包写 TUN)。
 async fn udp_flow_direct(
     stack: Arc<TunStack>,
-    _engine: Arc<Engine>,
+    engine: Arc<Engine>,
     key: FlowKey,
+    reverse_domain: Option<String>,
     mut rx: tokio::sync::mpsc::Receiver<(SocketAddr, SocketAddr, Vec<u8>)>,
 ) {
+    let is_fake = engine.is_fake_ip(&key.dst);
+    let target_ip = if is_fake {
+        if let Some(ref dom) = reverse_domain {
+            if let Some(real_ip) = crate::tun::dns::direct_dns_lookup(dom) {
+                real_ip
+            } else if let Some(real_v4) = crate::tun::dns::resolve_upstream(dom).await {
+                std::net::IpAddr::V4(real_v4)
+            } else {
+                debug!("[TUN-UDP/direct] 直连 UDP 域名 [{}] 解析失败，放弃", dom);
+                return;
+            }
+        } else {
+            debug!("[TUN-UDP/direct] 目标为 Fake-IP ({}) 但无对应域名，无法直连 UDP", key.dst);
+            return;
+        }
+    } else {
+        key.dst
+    };
+
+    let target_display = if let Some(ref dom) = reverse_domain {
+        format!("{}:{}", dom, key.dst_port)
+    } else {
+        format!("{}:{}", target_ip, key.dst_port)
+    };
+
     let sock = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => s,
         Err(_) => return,
@@ -750,11 +786,11 @@ async fn udp_flow_direct(
     // protect: 绕过 TUN (否则 UDP 又被卷回)
     crate::protect::protect(std::os::unix::io::AsRawFd::as_raw_fd(&sock));
 
-    let dst = SocketAddr::new(key.dst, key.dst_port);
+    let dst = SocketAddr::new(target_ip, key.dst_port);
     let client = SocketAddr::new(key.src, key.src_port);
     debug!("[TUN-UDP/direct] 新流 {} → {}", fmt_flow(&key), dst);
 
-    let (cid, conn_up, conn_down) = crate::monitor::record_conn_start("UDP", &format!("{}:{}", key.dst, key.dst_port), "直连");
+    let (cid, conn_up, conn_down) = crate::monitor::record_conn_start("UDP", &target_display, "直连");
     let sock_rc = std::sync::Arc::new(sock);
 
     // 下行: 客户端 → 目标
@@ -779,10 +815,10 @@ async fn udp_flow_direct(
         n_sent
     };
 
-    // 上行: 目标 → 客户端 (构回程 IP 包)
+    // 上行: 目标 → 客户端 (构回程 IP 包，源地址填回客户端期望的 key.dst 虚拟地址或真实地址)
     let up_sock = sock_rc.clone();
     let up_client = client;
-    let up_dst = dst;
+    let up_dst = SocketAddr::new(key.dst, key.dst_port);
     let down_atomic = conn_down.clone();
     let up = async move {
         let mut n_recv: u64 = 0;
@@ -792,7 +828,7 @@ async fn udp_flow_direct(
                 Ok(Ok(v)) => v,
                 _ => break,
             };
-            // 回程: src = 原目标, dst = 客户端
+            // 回程: src = 原目标 (key.dst), dst = 客户端 (key.src)
             if let Some(pkt) = build_reply_ip_public(up_dst, up_client, &buf[..n]) {
                 stack.write_raw(&pkt);
             }

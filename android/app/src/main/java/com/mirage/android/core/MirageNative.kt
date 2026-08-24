@@ -107,6 +107,9 @@ object MirageNative {
     /** 获取当前已加载的所有 GeoSite tags 和 GeoIP codes (JSON)。 */
     external fun getGeoTags(): String
 
+    /** 获取包含详细条目数量的 GeoSite 和 GeoIP 列表 (JSON)。 */
+    external fun getGeoTagsDetail(): String
+
     /**
      * Rust 侧同步调用 (隧道 socket connect 前): 把 fd 交给当前活跃的 VpnService protect。
      * 必须同步返回 (protect 设置 SO_MARK 影响路由, 晚了会导致隧道流量进 TUN 环路)。

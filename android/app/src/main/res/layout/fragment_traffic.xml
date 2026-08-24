@@ -157,32 +157,40 @@
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
-        <com.google.android.material.button.MaterialButtonToggleGroup
-            android:id="@+id/toggleViewMode"
+        <LinearLayout
             android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            app:checkedButton="@id/btnModeLogs"
-            app:selectionRequired="true"
-            app:singleSelection="true">
+            android:layout_height="36dp"
+            android:background="@drawable/bg_telegram_pill"
+            android:orientation="horizontal"
+            android:padding="2dp">
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnModeLogs"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+            <TextView
+                android:id="@+id/btnTabLogs"
                 android:layout_width="wrap_content"
-                android:layout_height="36dp"
-                android:paddingHorizontal="12dp"
+                android:layout_height="match_parent"
+                android:background="@drawable/bg_telegram_pill_active"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:paddingHorizontal="14dp"
                 android:text="运行日志"
-                android:textSize="12sp" />
+                android:textColor="@android:color/white"
+                android:textSize="12sp"
+                android:textStyle="bold" />
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnModeConns"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+            <TextView
+                android:id="@+id/btnTabConns"
                 android:layout_width="wrap_content"
-                android:layout_height="36dp"
-                android:paddingHorizontal="12dp"
+                android:layout_height="match_parent"
+                android:background="@android:color/transparent"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:paddingHorizontal="14dp"
                 android:text="连接信息"
+                android:textColor="@color/meow_ink_secondary"
                 android:textSize="12sp" />
-        </com.google.android.material.button.MaterialButtonToggleGroup>
+        </LinearLayout>
 
         <View
             android:layout_width="0dp"

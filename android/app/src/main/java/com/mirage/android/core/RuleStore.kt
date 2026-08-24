@@ -1,37 +1,90 @@
 package com.mirage.android.core
 
 import android.content.Context
+import com.mirage.android.data.model.Rule
+import com.mirage.android.data.model.RuleCondition
 import org.json.JSONArray
 import org.json.JSONObject
 
 /**
  * 自定义分流规则存储。
- * 规则类型: domain (域名/子域) / cidr (IP段或裸IP)
- * 动作: direct (直连) / proxy (代理)
- * 优先级: 自定义规则 > 内置国内规则 > 默认(代理)
+ * 支持单条件规则与复合多条件规则 (AND / OR 逻辑算子)。
  */
 object RuleStore {
 
-    data class Rule(
-        val type: String,      // "domain" | "cidr" (展示用)
-        val kind: String,      // Clash 匹配方式: suffix/exact/keyword/regex/cidr
-        val pattern: String,   // 域名 或 IP/CIDR
-        val action: String,    // "direct" | "proxy"
-    )
-
     private const val PREFS = "mirage_rules"
     private const val KEY_RULES = "rules_json"
-    private const val KEY_DEFAULT = "default_action"  // "proxy" | "direct"
+    private const val KEY_DEFAULT = "default_action"  // "proxy" | "direct" | "block"
 
     fun getRules(ctx: Context): List<Rule> {
-        val raw = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_RULES, "[]") ?: "[]"
+        val sp = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (!sp.contains(KEY_RULES)) {
+            val defaults = listOf(
+                Rule(
+                    id = java.util.UUID.randomUUID().toString(),
+                    name = "国内域名直连 (GeoSite)",
+                    enabled = true,
+                    action = "direct",
+                    conditions = listOf(RuleCondition("geosite", "cn"))
+                ),
+                Rule(
+                    id = java.util.UUID.randomUUID().toString(),
+                    name = "国内 IP 直连 (GeoIP)",
+                    enabled = true,
+                    action = "direct",
+                    conditions = listOf(RuleCondition("geoip", "cn"))
+                ),
+                Rule(
+                    id = java.util.UUID.randomUUID().toString(),
+                    name = "广告拦截 (GeoSite Ads)",
+                    enabled = true,
+                    action = "block",
+                    conditions = listOf(RuleCondition("geosite", "category-ads-all"))
+                )
+            )
+            saveRules(ctx, defaults)
+            return defaults
+        }
+        val raw = sp.getString(KEY_RULES, "[]") ?: "[]"
         return runCatching {
             val arr = JSONArray(raw)
-            (0 until arr.length()).map { i ->
-                val o = arr.getJSONObject(i)
-                Rule(o.getString("type"), o.optString("kind", o.getString("type")),
-                    o.getString("pattern"), o.getString("action"))
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val id = o.optString("id", java.util.UUID.randomUUID().toString())
+                val name = o.optString("name", "")
+                val enabled = o.optBoolean("enabled", true)
+                val logic = o.optString("logic", "OR")
+                val action = o.optString("action", "direct")
+                val hits = o.optLong("hits", 0L)
+
+                val conditions = mutableListOf<RuleCondition>()
+                val condArr = o.optJSONArray("conditions")
+                if (condArr != null && condArr.length() > 0) {
+                    for (ci in 0 until condArr.length()) {
+                        val co = condArr.optJSONObject(ci) ?: continue
+                        conditions.add(RuleCondition(
+                            co.optString("type", "domain_suffix"),
+                            co.optString("pattern", "")
+                        ))
+                    }
+                }
+
+                val type = o.optString("type", "domain")
+                val kind = o.optString("kind", "suffix")
+                val pattern = o.optString("pattern", "")
+
+                Rule(
+                    id = id,
+                    name = name,
+                    enabled = enabled,
+                    logic = logic,
+                    conditions = conditions,
+                    type = type,
+                    kind = kind,
+                    pattern = pattern,
+                    action = action,
+                    hits = hits,
+                )
             }
         }.getOrDefault(emptyList())
     }
@@ -50,7 +103,20 @@ object RuleStore {
         }
     }
 
-    /** 上下移动规则 (from → to)。 */
+    /** 切换某条规则的启用状态 */
+    fun toggleRuleEnabled(ctx: Context, index: Int): Boolean {
+        val list = getRules(ctx).toMutableList()
+        if (index in list.indices) {
+            val old = list[index]
+            val updated = old.copy(enabled = !old.enabled)
+            list[index] = updated
+            saveRules(ctx, list)
+            return updated.enabled
+        }
+        return false
+    }
+
+    /** 拖动排序规则 (from -> to) */
     fun moveRule(ctx: Context, from: Int, to: Int) {
         val list = getRules(ctx).toMutableList()
         if (from in list.indices && to in list.indices) {
@@ -71,7 +137,22 @@ object RuleStore {
     fun saveRules(ctx: Context, list: List<Rule>) {
         val arr = JSONArray()
         for (r in list) {
-            arr.put(JSONObject().put("type", r.type).put("kind", r.kind).put("pattern", r.pattern).put("action", r.action))
+            val obj = JSONObject()
+                .put("id", r.id)
+                .put("name", r.name)
+                .put("enabled", r.enabled)
+                .put("logic", r.logic)
+                .put("action", r.action)
+                .put("type", r.type)
+                .put("kind", r.kind)
+                .put("pattern", r.pattern)
+
+            val condArr = JSONArray()
+            for (c in r.effectiveConditions) {
+                condArr.put(JSONObject().put("type", c.type).put("pattern", c.pattern))
+            }
+            obj.put("conditions", condArr)
+            arr.put(obj)
         }
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putString(KEY_RULES, arr.toString()).apply()
@@ -84,24 +165,28 @@ object RuleStore {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_DEFAULT, action).apply()
     }
 
-    /** 生成传给 Rust setRules 的 JSON (新格式: rules 数组 + kind)。 */
+    /** 生成传给 Rust setCustomRules 的 JSON */
     fun toJson(ctx: Context): String {
+        val root = JSONObject()
+        root.put("default_action", getDefaultAction(ctx))
+
         val arr = JSONArray()
         for (r in getRules(ctx)) {
-            val kind = when (r.kind.lowercase()) {
-                "geosite" -> "geosite"
-                "geoip" -> "geoip"
-                "exact" -> "exact"
-                "keyword" -> "keyword"
-                "regex" -> "regex"
-                "cidr" -> "cidr"
-                else -> "suffix"
+            val obj = JSONObject()
+                .put("id", r.id)
+                .put("name", r.displayName)
+                .put("enabled", r.enabled)
+                .put("logic", r.logic)
+                .put("action", r.action.trim().lowercase())
+
+            val condArr = JSONArray()
+            for (c in r.effectiveConditions) {
+                condArr.put(JSONObject().put("type", c.type).put("pattern", c.pattern))
             }
-            arr.put(JSONObject()
-                .put("kind", kind)
-                .put("pattern", r.pattern.trim())
-                .put("action", r.action.trim().lowercase()))
+            obj.put("conditions", condArr)
+            arr.put(obj)
         }
-        return JSONObject().put("rules", arr).toString()
+        root.put("rules", arr)
+        return root.toString()
     }
 }

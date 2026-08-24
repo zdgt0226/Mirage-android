@@ -48,12 +48,16 @@
             app:strokeColor="@color/meow_outline" />
     </LinearLayout>
 
-    <!-- 全局屏蔽 QUIC 开关卡片 (Telegram 风格) -->
+    <!-- Geo 规则集 (geosite.dat / geoip.dat) 资产中心卡片 -->
     <com.google.android.material.card.MaterialCardView
+        android:id="@+id/cardGeoAssetCenter"
         style="@style/MirageCard"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="6dp"
+        android:clickable="true"
+        android:focusable="true"
+        android:foreground="?attr/selectableItemBackground"
         app:cardCornerRadius="12dp">
 
         <LinearLayout
@@ -64,110 +68,25 @@
             android:paddingHorizontal="14dp"
             android:paddingVertical="10dp">
 
+            <ImageView
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:background="@drawable/badge_latency_bg"
+                android:padding="6dp"
+                android:src="@drawable/ic_nav_nodes"
+                app:tint="@color/meow_blue" />
+
             <LinearLayout
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
                 android:layout_weight="1"
                 android:orientation="vertical">
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="屏蔽海外 QUIC (UDP 443)"
-                    android:textColor="@color/meow_ink"
-                    android:textSize="14sp"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
-                    android:text="仅对海外代理流量拦截以消除 X/YouTube 握手超时，国内直连正常放行"
-                    android:textColor="@color/meow_ink_secondary"
-                    android:textSize="11sp" />
-            </LinearLayout>
-
-            <com.google.android.material.materialswitch.MaterialSwitch
-                android:id="@+id/switchBlockQuic"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:checked="true" />
-        </LinearLayout>
-    </com.google.android.material.card.MaterialCardView>
-
-    <!-- UDP 多路复用 (UDP Mux) 开关卡片 -->
-    <com.google.android.material.card.MaterialCardView
-        style="@style/MirageCard"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        app:cardCornerRadius="12dp">
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingHorizontal="14dp"
-            android:paddingVertical="10dp">
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="UDP 多路复用 (UDP Mux)"
-                    android:textColor="@color/meow_ink"
-                    android:textSize="14sp"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
-                    android:text="在 4 条共享隧道内复用所有 UDP 会话，解决高并发下连接池耗尽问题 (需服务端 ≥v0.9.0)"
-                    android:textColor="@color/meow_ink_secondary"
-                    android:textSize="11sp" />
-            </LinearLayout>
-
-            <com.google.android.material.materialswitch.MaterialSwitch
-                android:id="@+id/switchUdpMux"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:checked="true" />
-        </LinearLayout>
-    </com.google.android.material.card.MaterialCardView>
-
-    <!-- Geo 规则集 (geosite.dat / geoip.dat) 管理卡片 -->
-    <com.google.android.material.card.MaterialCardView
-        style="@style/MirageCard"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        app:cardCornerRadius="12dp">
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingHorizontal="14dp"
-            android:paddingVertical="10dp">
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Geo 规则库 (GeoSite / GeoIP)"
+                    android:text="Geo 规则集资产中心"
                     android:textColor="@color/meow_ink"
                     android:textSize="14sp"
                     android:textStyle="bold" />
@@ -177,63 +96,51 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="2dp"
-                    android:text="点击管理自定义更新源与更新数据文件"
+                    android:text="规则源设置 · 自动更新调度 · Tag 深度内省器"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="11sp" />
             </LinearLayout>
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnManageGeo"
-                style="@style/Widget.Material3.Button.TonalButton"
-                android:layout_width="wrap_content"
-                android:layout_height="36dp"
-                android:paddingHorizontal="10dp"
-                android:text="更新 / 配置"
-                android:textSize="12sp"
-                app:cornerRadius="8dp" />
+            <ImageView
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:src="@drawable/ic_arrow_forward"
+                app:tint="@color/meow_ink_secondary" />
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
-    <!-- 内置规则折叠卡片 -->
-    <com.google.android.material.card.MaterialCardView
-        style="@style/MirageCard"
+    <!-- 拖拽排序提示栏 -->
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        app:cardCornerRadius="10dp">
+        android:layout_marginTop="8dp"
+        android:layout_marginBottom="2dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
 
-        <LinearLayout
-            android:layout_width="match_parent"
+        <TextView
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:orientation="vertical">
+            android:layout_weight="1"
+            android:text="规则列表 (首条命中即生效)"
+            android:textColor="@color/meow_ink"
+            android:textSize="13sp"
+            android:textStyle="bold" />
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/builtinToggleBtn"
-                style="@style/Widget.Material3.Button.TextButton"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="start|center_vertical"
-                android:text="查看内置规则 (GeoIP CN / GeoSite CN) ▾"
-                android:textColor="@color/meow_blue"
-                android:textSize="13sp" />
-
-            <LinearLayout
-                android:id="@+id/builtinContainer"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:paddingHorizontal="12dp"
-                android:paddingBottom="12dp"
-                android:visibility="gone" />
-        </LinearLayout>
-    </com.google.android.material.card.MaterialCardView>
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="按住 ≡ 上下拖动调优"
+            android:textColor="@color/meow_ink_secondary"
+            android:textSize="11sp" />
+    </LinearLayout>
 
     <!-- 自定义规则列表 -->
     <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:layout_marginVertical="6dp">
+        android:layout_marginVertical="4dp">
 
         <androidx.recyclerview.widget.RecyclerView
             android:id="@+id/recyclerRules"
@@ -247,9 +154,9 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="center"
-            android:text="暂无自定义规则，默认国内直连，其余代理"
+            android:text="暂无自定义规则，点击下方「常用预设」或「添加规则」"
             android:textColor="@color/meow_ink_secondary"
-            android:textSize="14sp"
+            android:textSize="13sp"
             android:visibility="gone" />
     </FrameLayout>
 

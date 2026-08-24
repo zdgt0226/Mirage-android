@@ -33,6 +33,7 @@
 
 pub mod dns;
 pub mod device;
+pub mod sniffer;
 pub mod tcp;
 pub mod udp;
 

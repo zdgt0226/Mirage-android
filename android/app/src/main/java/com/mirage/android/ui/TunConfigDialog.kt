@@ -97,10 +97,34 @@ class TunConfigDialog(
             override fun afterTextChanged(s: Editable?) {}
         })
 
+        val vpnRepo = com.mirage.android.data.repository.VpnRepository.getInstance(context)
+        binding.switchBlockQuic.isChecked = vpnRepo.isBlockQuic.value
+        binding.switchUdpMux.isChecked = vpnRepo.isUdpMux.value
+
+        binding.switchBlockQuic.setOnCheckedChangeListener { _, isChecked ->
+            vpnRepo.setBlockQuic(isChecked)
+            Toast.makeText(
+                context,
+                if (isChecked) "已开启海外 QUIC 屏蔽 (国内正常放行，海外促使 HTTP/2 秒级降级)" else "已放行全局 QUIC 流量",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+
+        binding.switchUdpMux.setOnCheckedChangeListener { _, isChecked ->
+            vpnRepo.setUdpMux(isChecked)
+            Toast.makeText(
+                context,
+                if (isChecked) "已启用 UDP Mux 多路复用 (4条共享隧道并发)" else "已关闭 UDP Mux (传统单流单隧道)",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+
         binding.btnResetDefault.setOnClickListener {
             binding.etMtu.setText(TunConfigStore.DEFAULT_MTU.toString())
             binding.etTcpIdle.setText(TunConfigStore.DEFAULT_TCP_IDLE_SEC.toString())
             syncBatchChips(TunConfigStore.DEFAULT_BATCH_SIZE)
+            binding.switchBlockQuic.isChecked = true
+            binding.switchUdpMux.isChecked = true
         }
 
         binding.btnCancel.setOnClickListener {

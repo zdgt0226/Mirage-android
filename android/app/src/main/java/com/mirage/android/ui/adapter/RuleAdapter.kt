@@ -1,8 +1,9 @@
 package com.mirage.android.ui.adapter
 
-import android.content.Context
+import android.annotation.SuppressLint
 import android.graphics.Color
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.PopupMenu
@@ -15,8 +16,9 @@ import com.mirage.android.databinding.ItemRuleBinding
 class RuleAdapter(
     private val onEdit: (Int, Rule) -> Unit,
     private val onDelete: (Int, Rule) -> Unit,
-    private val onMoveUp: (Int, Rule) -> Unit,
-    private val onMoveDown: (Int, Rule) -> Unit
+    private val onToggleEnabled: (Int, Rule, Boolean) -> Unit,
+    private val onMove: (Int, Int) -> Unit,
+    private val onStartDrag: (RecyclerView.ViewHolder) -> Unit
 ) : ListAdapter<Rule, RuleAdapter.RuleViewHolder>(RuleDiffCallback) {
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RuleViewHolder {
@@ -25,20 +27,29 @@ class RuleAdapter(
     }
 
     override fun onBindViewHolder(holder: RuleViewHolder, position: Int) {
-        holder.bind(getItem(position))
+        holder.bind(getItem(position), position)
     }
 
-    inner class RuleViewHolder(private val binding: ItemRuleBinding) :
+    inner class RuleViewHolder(val binding: ItemRuleBinding) :
         RecyclerView.ViewHolder(binding.root) {
 
-        fun bind(rule: Rule) {
-            binding.tvPattern.text = rule.pattern
-            binding.tvKind.text = rule.kindDisplayName
+        @SuppressLint("ClickableViewAccessibility")
+        fun bind(rule: Rule, position: Int) {
+            binding.tvPriorityIndex.text = "#${position + 1}"
+            binding.tvPattern.text = rule.displayName
+            binding.tvKind.text = rule.summaryText
+
+            if (rule.isComposite) {
+                binding.tvLogicBadge.visibility = View.VISIBLE
+                binding.tvLogicBadge.text = "${rule.logic.uppercase()} 复合"
+            } else {
+                binding.tvLogicBadge.visibility = View.GONE
+            }
+
             binding.tvAction.text = rule.actionDisplayName
-            // 命中统计 (规则页面加载后由 Fragment 填充)
             if (rule.hits > 0) {
                 binding.tvHits.visibility = View.VISIBLE
-                binding.tvHits.text = "命中 ${rule.hits}"
+                binding.tvHits.text = "${rule.hits}次"
             } else {
                 binding.tvHits.visibility = View.GONE
             }
@@ -49,28 +60,78 @@ class RuleAdapter(
                 else -> binding.tvAction.setTextColor(Color.parseColor("#0077CC")) // 蓝
             }
 
+            // 启闭 Switch 状态与卡片透明度
+            binding.switchEnabled.setOnCheckedChangeListener(null)
+            binding.switchEnabled.isChecked = rule.enabled
+            binding.cardRule.alpha = if (rule.enabled) 1.0f else 0.5f
+
+            binding.switchEnabled.setOnCheckedChangeListener { _, isChecked ->
+                val pos = bindingAdapterPosition
+                if (pos != RecyclerView.NO_POSITION) {
+                    binding.cardRule.alpha = if (isChecked) 1.0f else 0.5f
+                    onToggleEnabled(pos, rule, isChecked)
+                }
+            }
+
+            // 左侧专属大触控区域：触摸直接触发平滑拖拽
+            binding.layoutDragGrip.setOnTouchListener { _, event ->
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    onStartDrag(this)
+                }
+                false
+            }
+
+            binding.root.setOnClickListener {
+                val pos = bindingAdapterPosition
+                if (pos != RecyclerView.NO_POSITION) {
+                    onEdit(pos, rule)
+                }
+            }
+
+            // 长按卡片也可直接发起拖动
+            binding.root.setOnLongClickListener {
+                onStartDrag(this)
+                true
+            }
+
             binding.btnMore.setOnClickListener { v ->
-                showPopupMenu(v, bindingAdapterPosition, rule)
+                val pos = bindingAdapterPosition
+                if (pos != RecyclerView.NO_POSITION) {
+                    showPopupMenu(v, pos, rule)
+                }
             }
         }
 
         private fun showPopupMenu(anchor: View, position: Int, rule: Rule) {
             val ctx = anchor.context
             val popup = PopupMenu(ctx, anchor)
-            popup.menu.add(0, 1, 0, "上移")
-            popup.menu.add(0, 2, 0, "下移")
-            popup.menu.add(0, 3, 0, "编辑")
-            popup.menu.add(0, 4, 0, "删除")
+            val total = itemCount
 
-            popup.menu.getItem(0).isEnabled = position > 0
-            popup.menu.getItem(1).isEnabled = position < itemCount - 1
+            if (position > 0) {
+                popup.menu.add(0, 10, 0, "📌 置顶 (移至 #1)")
+                popup.menu.add(0, 11, 1, "⬆️ 上移一位")
+            }
+            if (position < total - 1) {
+                popup.menu.add(0, 12, 2, "⬇️ 下移一位")
+                popup.menu.add(0, 13, 3, "🔻 置底 (移至最后)")
+            }
+            popup.menu.add(0, 1, 4, "✏️ 编辑规则")
+            popup.menu.add(0, 2, 5, if (rule.enabled) "⏸️ 禁用规则" else "▶️ 启用规则")
+            popup.menu.add(0, 3, 6, "🗑️ 删除规则")
 
             popup.setOnMenuItemClickListener { item ->
                 when (item.itemId) {
-                    1 -> onMoveUp(position, rule)
-                    2 -> onMoveDown(position, rule)
-                    3 -> onEdit(position, rule)
-                    4 -> onDelete(position, rule)
+                    10 -> onMove(position, 0)
+                    11 -> onMove(position, position - 1)
+                    12 -> onMove(position, position + 1)
+                    13 -> onMove(position, total - 1)
+                    1 -> onEdit(position, rule)
+                    2 -> {
+                        val newEnabled = !rule.enabled
+                        binding.switchEnabled.isChecked = newEnabled
+                        onToggleEnabled(position, rule, newEnabled)
+                    }
+                    3 -> onDelete(position, rule)
                 }
                 true
             }
@@ -80,7 +141,7 @@ class RuleAdapter(
 
     object RuleDiffCallback : DiffUtil.ItemCallback<Rule>() {
         override fun areItemsTheSame(oldItem: Rule, newItem: Rule): Boolean =
-            oldItem.pattern == newItem.pattern && oldItem.kind == newItem.kind
+            oldItem.id == newItem.id
 
         override fun areContentsTheSame(oldItem: Rule, newItem: Rule): Boolean =
             oldItem == newItem

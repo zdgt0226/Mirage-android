@@ -81,12 +81,29 @@ class RulesViewModel(application: Application) : AndroidViewModel(application) {
         ruleRepo.updateRule(index, Rule(type = type, kind = kind, pattern = pattern.trim().lowercase(), action = action))
     }
 
+    fun saveRule(index: Int?, rule: Rule) {
+        if (index == null || index < 0) {
+            ruleRepo.addRule(rule)
+        } else {
+            ruleRepo.updateRule(index, rule)
+        }
+        ruleRepo.applyRules()
+    }
+
+    fun toggleRuleEnabled(index: Int): Boolean {
+        val res = ruleRepo.toggleRuleEnabled(index)
+        ruleRepo.applyRules()
+        return res
+    }
+
     fun deleteRule(index: Int) {
         ruleRepo.removeRule(index)
+        ruleRepo.applyRules()
     }
 
     fun moveRule(from: Int, to: Int) {
         ruleRepo.moveRule(from, to)
+        ruleRepo.applyRules()
     }
 
     fun setDefaultAction(action: String) {

@@ -101,17 +101,39 @@ class TrafficFragment : Fragment() {
         binding.recyclerConnections.adapter = connAdapter
     }
 
+    private var currentMode = 0 // 0: 日志, 1: 连接信息
+
     private fun setupToggleMode() {
-        binding.toggleViewMode.addOnButtonCheckedListener { _, checkedId, isChecked ->
-            if (!isChecked) return@addOnButtonCheckedListener
-            if (checkedId == R.id.btnModeLogs) {
+        fun updateModeUI(mode: Int) {
+            currentMode = mode
+            if (mode == 0) {
+                binding.btnTabLogs.setBackgroundResource(R.drawable.bg_telegram_pill_active)
+                binding.btnTabLogs.setTextColor(Color.WHITE)
+                binding.btnTabLogs.typeface = android.graphics.Typeface.DEFAULT_BOLD
+
+                binding.btnTabConns.setBackgroundColor(Color.TRANSPARENT)
+                binding.btnTabConns.setTextColor(requireContext().getColor(R.color.meow_ink_secondary))
+                binding.btnTabConns.typeface = android.graphics.Typeface.DEFAULT
+
                 binding.boxLogs.visibility = View.VISIBLE
                 binding.boxConnections.visibility = View.GONE
             } else {
+                binding.btnTabConns.setBackgroundResource(R.drawable.bg_telegram_pill_active)
+                binding.btnTabConns.setTextColor(Color.WHITE)
+                binding.btnTabConns.typeface = android.graphics.Typeface.DEFAULT_BOLD
+
+                binding.btnTabLogs.setBackgroundColor(Color.TRANSPARENT)
+                binding.btnTabLogs.setTextColor(requireContext().getColor(R.color.meow_ink_secondary))
+                binding.btnTabLogs.typeface = android.graphics.Typeface.DEFAULT
+
                 binding.boxLogs.visibility = View.GONE
                 binding.boxConnections.visibility = View.VISIBLE
             }
         }
+
+        binding.btnTabLogs.setOnClickListener { updateModeUI(0) }
+        binding.btnTabConns.setOnClickListener { updateModeUI(1) }
+        updateModeUI(0)
     }
 
     private fun setupLogLevelChips() {
@@ -154,7 +176,7 @@ class TrafficFragment : Fragment() {
                 launch {
                     viewModel.connections.collect { conns ->
                         connAdapter.submitList(conns)
-                        binding.btnModeConns.text = if (conns.isNotEmpty()) "连接信息 (${conns.size})" else "连接信息"
+                        binding.btnTabConns.text = if (conns.isNotEmpty()) "连接信息 (${conns.size})" else "连接信息"
                         binding.tvEmptyConnections.visibility = if (conns.isEmpty()) View.VISIBLE else View.GONE
                     }
                 }

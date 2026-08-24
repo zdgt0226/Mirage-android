@@ -37,6 +37,11 @@
             </intent-filter>
         </activity>
 
+        <!-- Geo 规则集资产中心 -->
+        <activity
+            android:name=".ui.GeoAssetActivity"
+            android:exported="false" />
+
         <!-- VPN 服务 (独立内核进程 :core) -->
         <service
             android:name=".CoreService"

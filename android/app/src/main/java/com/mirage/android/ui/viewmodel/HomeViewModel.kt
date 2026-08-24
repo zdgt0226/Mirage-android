@@ -60,4 +60,5 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun checkCurrentState() {
         vpnRepo.checkCurrentState()
     }
+
 }

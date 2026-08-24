@@ -42,6 +42,7 @@ interface ICoreService {
     long testNode(String uri, int timeoutMs);
     String loadGeoFiles(String geositePath, String geoipPath);
     String getGeoTags();
+    String getGeoTagsDetail();
     String getDiagnosticSnapshotJson();
     boolean clearNativeLogs();
     void registerCallback(ICoreCallback cb);

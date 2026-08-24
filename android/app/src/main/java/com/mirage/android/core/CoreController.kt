@@ -108,6 +108,10 @@ object CoreController {
         call { it.geoTags } ?: runCatching {
             MirageNative.getGeoTags()
         }.getOrDefault("{}")
+    fun getGeoTagsDetail(): String =
+        call { it.geoTagsDetail } ?: runCatching {
+            MirageNative.getGeoTagsDetail()
+        }.getOrDefault("{}")
     fun getDiagnosticSnapshotJson(): String =
         call { it.diagnosticSnapshotJson } ?: "{}"
     fun clearNativeLogs(): Boolean =

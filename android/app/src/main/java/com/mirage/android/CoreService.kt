@@ -580,6 +580,8 @@ class CoreService : VpnService() {
             GeoManager.loadGeoFilesToNative(this@CoreService, geositePath, geoipPath)
         override fun getGeoTags(): String =
             runCatching { MirageNative.getGeoTags() }.getOrDefault("{}")
+        override fun getGeoTagsDetail(): String =
+            runCatching { MirageNative.getGeoTagsDetail() }.getOrDefault("{}")
         override fun getDiagnosticSnapshotJson(): String =
             runCatching { MirageNative.getDiagnosticSnapshotJson() }.getOrDefault("{}")
         override fun clearNativeLogs(): Boolean {

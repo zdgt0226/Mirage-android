@@ -280,10 +280,31 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
     };
     debug!("[TUN-TCP] 新连接 → {}", format!("{}:{}", dst.0, dst.1));
 
-    // 分流: fake-IP 反查域名 (DNS 层已决定走向) / 裸 IP (直连标记+CN 段 → 直连)
-    let direct_domain = stack.engine().fake_ip_reverse(&dst.0);
+    // 分流: fake-IP 反查域名 / 裸 IP 智能嗅探 (TLS SNI / HTTP Host)
+    let mut direct_domain = stack.engine().fake_ip_reverse(&dst.0);
+    let mut initial_payload: Vec<u8> = Vec::new();
 
-    if crate::direct::should_block(direct_domain.as_deref(), Some(dst.0)) {
+    // 性能快速通道: 若该 IP 已经为直连 IP 或国内 IP，无需消耗 CPU/网络嗅探，直接跳过快速直连
+    let should_sniff = direct_domain.is_none() && !crate::direct::is_direct_ip(dst.0) && !crate::direct::is_cn_ip(dst.0);
+
+    if should_sniff {
+        let mut sniff_buf = [0u8; 2048];
+        // 将超时从 150ms 压缩至 40ms (移动端 smoltcp 缓冲区读取为 0ms，非 HTTP/TLS 最多等待 40ms 放行)
+        if let Ok(Ok(n)) = tokio::time::timeout(std::time::Duration::from_millis(40), stream.read(&mut sniff_buf)).await {
+            if n > 0 {
+                let sniffed = crate::tun::sniffer::Sniffer::sniff_tcp(&sniff_buf[..n]);
+                if let Some(h) = sniffed.host {
+                    debug!("[TUN-TCP] 智能嗅探提取域名 ({:?}): {} (目标: {}:{})", sniffed.protocol, h, dst.0, dst.1);
+                    direct_domain = Some(h);
+                }
+                initial_payload.extend_from_slice(&sniff_buf[..n]);
+            }
+        }
+    }
+
+    let action = crate::direct::route_decision(direct_domain.as_deref(), Some(dst.0), Some(dst.1), Some("tcp"));
+
+    if action == crate::direct::RuleAction::Block {
         let target_name = direct_domain.as_deref().map(|d| d.to_string()).unwrap_or_else(|| dst.0.to_string());
         let (cid, _, _) = crate::monitor::record_conn_start("TCP", &format!("{}:{}", target_name, dst.1), "规则拦截 (Block)");
         crate::monitor::record_conn_close(cid, 0, 0);
@@ -292,33 +313,10 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
         return;
     }
 
-    let is_direct = match &direct_domain {
-        Some(d) => {
-            // 域名: 用户规则说直连 → 需要真实 IP; DNS 分流已把直连域名解析为真实 IP
-            // (客户端连的就是真实 IP, 不会进 fake-IP)。这里兜底: 有缓存 IP 才直连。
-            if crate::direct::should_direct(Some(d), None) {
-                match crate::direct::resolve_direct_domain(d) {
-                    Some(ip) => {
-                        relay_direct(stack.clone(), stream, (ip, dst.1)).await;
-                        return;
-                    }
-                    None => false, // 无真实 IP → fallback 走隧道 (不丢连接)
-                }
-            } else {
-                false
-            }
-        }
-        None => {
-            // 裸 IP: 直连标记 (DNS 分流) 或 CN 段 → 直连; 否则代理
-            let direct = crate::direct::should_direct(None, Some(dst.0));
-            if direct {
-                relay_direct(stack.clone(), stream, dst).await;
-                return;
-            }
-            false
-        }
-    };
-    let _ = is_direct;
+    if action == crate::direct::RuleAction::Direct {
+        relay_direct(stack.clone(), stream, dst, direct_domain.clone(), initial_payload).await;
+        return;
+    }
 
     let tunnel = match connect_tunnel(&stack, dst, direct_domain.clone()).await {
         Ok(t) => t,
@@ -338,6 +336,15 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
     // 拆成读写半程: upload (app→tunnel) / download (tunnel→app)
     let (mut tun_reader, mut tun_writer) = (tunnel.reader, tunnel.writer);
     let (mut local_rd, mut local_wr) = tokio::io::split(stream);
+
+    // 如果嗅探期间预读了首包数据，优先推入隧道发送
+    if !initial_payload.is_empty() {
+        if tun_writer.send_data(&initial_payload).await.is_err() {
+            crate::monitor::record_conn_close(cid, 0, 0);
+            return;
+        }
+        conn_up.fetch_add(initial_payload.len() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
 
     let up_atomic = conn_up.clone();
     let upload = async {
@@ -420,19 +427,57 @@ fn _sock_buf_const() -> usize {
 }
 
 /// 直连路径: smoltcp socket ⇄ 真实 TCP socket (protect 绕过 TUN)。
-async fn relay_direct(_stack: Arc<TunStack>, stream: TunTcpStream, dst: (std::net::IpAddr, u16)) {
-    let (cid, conn_up, conn_down) = crate::monitor::record_conn_start("TCP", &format!("{}:{}", dst.0, dst.1), "直连");
+async fn relay_direct(
+    stack: Arc<TunStack>,
+    stream: TunTcpStream,
+    dst: (std::net::IpAddr, u16),
+    direct_domain: Option<String>,
+    initial_payload: Vec<u8>,
+) {
+    let engine = stack.engine();
+    let is_fake = engine.is_fake_ip(&dst.0);
+
+    // 如果目标是 Fake-IP，必须先解析出公网真实 IP，避免向虚拟不可达地址发起直连
+    let target_ip = if is_fake {
+        if let Some(ref dom) = direct_domain {
+            if let Some(real_ip) = crate::tun::dns::direct_dns_lookup(dom) {
+                real_ip
+            } else if let Some(real_v4) = crate::tun::dns::resolve_upstream(dom).await {
+                std::net::IpAddr::V4(real_v4)
+            } else {
+                debug!("[TUN-TCP/direct] 直连域名 [{}] 真实解析失败，放弃直连", dom);
+                return;
+            }
+        } else {
+            debug!("[TUN-TCP/direct] 目标为 Fake-IP ({}) 但无对应域名映射，无法直连", dst.0);
+            return;
+        }
+    } else {
+        dst.0
+    };
+
+    let target_display = if let Some(ref dom) = direct_domain {
+        format!("{}:{}", dom, dst.1)
+    } else {
+        format!("{}:{}", target_ip, dst.1)
+    };
+
+    let (cid, conn_up, conn_down) = crate::monitor::record_conn_start("TCP", &target_display, "直连");
     TCP_ACTIVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _guard = TcpActiveGuard;
     use std::os::unix::io::AsRawFd;
-    let addr = std::net::SocketAddr::new(dst.0, dst.1);
+    let addr = std::net::SocketAddr::new(target_ip, dst.1);
     let sock = match addr {
         std::net::SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
         std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
     };
     let sock = match sock {
         Ok(s) => s,
-        Err(e) => { debug!("[TUN-TCP/direct] 建 socket 失败: {e}"); return; }
+        Err(e) => {
+            crate::monitor::record_conn_close(cid, 0, 0);
+            debug!("[TUN-TCP/direct] 建 socket 失败: {e}");
+            return;
+        }
     };
     // protect: 直连 socket 也要绕过 TUN (否则 0.0.0.0/0→tun0 环路)
     crate::protect::protect(sock.as_raw_fd());
@@ -441,10 +486,28 @@ async fn relay_direct(_stack: Arc<TunStack>, stream: TunTcpStream, dst: (std::ne
         sock.connect(addr),
     ).await {
         Ok(Ok(s)) => s,
-        Ok(Err(e)) => { debug!("[TUN-TCP/direct] 连接 {addr} 失败: {e}"); return; }
-        Err(_) => { debug!("[TUN-TCP/direct] 连接 {addr} 超时"); return; }
+        Ok(Err(e)) => {
+            crate::monitor::record_conn_close(cid, 0, 0);
+            debug!("[TUN-TCP/direct] 连接 {addr} 失败: {e}");
+            return;
+        }
+        Err(_) => {
+            crate::monitor::record_conn_close(cid, 0, 0);
+            debug!("[TUN-TCP/direct] 连接 {addr} 超时");
+            return;
+        }
     };
     let _ = remote.set_nodelay(true);
+
+    // 如果嗅探期间读取了首包，先写入真实 socket
+    if !initial_payload.is_empty() {
+        if remote.write_all(&initial_payload).await.is_err() {
+            crate::monitor::record_conn_close(cid, 0, 0);
+            return;
+        }
+        conn_up.fetch_add(initial_payload.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        crate::monitor::add_up(initial_payload.len() as u64);
+    }
 
     // 双向转发 (smoltcp 侧 TunTcpStream ↔ 真实 socket)
     let mut local = stream;

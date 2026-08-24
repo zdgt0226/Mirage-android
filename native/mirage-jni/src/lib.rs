@@ -759,6 +759,16 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_getGeoTags(
     env.new_string(json).unwrap_or_else(|_| JString::from(JObject::null())).into_raw()
 }
 
+/// `String getGeoTagsDetail()` — 获取包含详细条目数量的 GeoSite 和 GeoIP 列表 (供 Tag 内省搜索器使用)。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_getGeoTagsDetail(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let json = mirage_core::geo::get_geo_tags_detail_json();
+    env.new_string(json).unwrap_or_else(|_| JString::from(JObject::null())).into_raw()
+}
+
 /// `boolean setUdpMux(boolean enabled)` — 设置是否开启 UDP 多路复用 (UDP Mux)。
 #[no_mangle]
 pub extern "system" fn Java_com_mirage_android_core_MirageNative_setUdpMux(

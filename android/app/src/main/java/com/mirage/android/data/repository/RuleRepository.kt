@@ -2,19 +2,16 @@ package com.mirage.android.data.repository
 
 import android.content.Context
 import com.mirage.android.core.CoreController
+import com.mirage.android.core.RuleStore
 import com.mirage.android.data.model.Rule
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import org.json.JSONArray
-import org.json.JSONObject
 
 /**
- * 路由规则仓库。
+ * 路由规则仓库 (对齐 RuleStore 与 CoreController)。
  */
 class RuleRepository(private val context: Context) {
-
-    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     private val _rules = MutableStateFlow<List<Rule>>(emptyList())
     val rules: StateFlow<List<Rule>> = _rules.asStateFlow()
@@ -37,128 +34,72 @@ class RuleRepository(private val context: Context) {
     }
 
     private fun loadData() {
-        val raw = prefs.getString(KEY_RULES, "[]") ?: "[]"
-        val list = runCatching {
-            val arr = JSONArray(raw)
-            (0 until arr.length()).map { i ->
-                val o = arr.getJSONObject(i)
-                Rule(
-                    type = o.optString("type", "domain"),
-                    kind = o.optString("kind", "suffix"),
-                    pattern = o.getString("pattern"),
-                    action = o.optString("action", "direct")
-                )
-            }
-        }.getOrDefault(emptyList())
-
-        _rules.value = list
-        _defaultAction.value = prefs.getString(KEY_DEFAULT_ACTION, "proxy") ?: "proxy"
+        _rules.value = RuleStore.getRules(context)
+        _defaultAction.value = RuleStore.getDefaultAction(context)
     }
 
-    private fun saveRules(list: List<Rule>) {
-        val arr = JSONArray()
-        for (r in list) {
-            arr.put(
-                JSONObject()
-                    .put("type", r.type)
-                    .put("kind", r.kind)
-                    .put("pattern", r.pattern)
-                    .put("action", r.action)
-            )
-        }
-        prefs.edit().putString(KEY_RULES, arr.toString()).apply()
-    }
-
-    /** 应用内核规则命中统计到规则列表 (不持久化, 运行时显示)。 */
     fun applyHits(hitsMap: Map<String, Long>) {
         _rules.value = _rules.value.map { r ->
-            val key = "${r.kind}|${r.pattern}|${r.action}"
-            r.copy(hits = hitsMap[key] ?: 0L)
+            val key = "${r.id}|${r.displayName}|${r.action}"
+            val altKey = "${r.kind}|${r.pattern}|${r.action}"
+            val hits = hitsMap[key] ?: hitsMap[altKey] ?: 0L
+            r.copy(hits = hits)
         }
     }
 
-    /** 清空规则命中统计。 */
     fun resetRuleHits() {
         _rules.value = _rules.value.map { it.copy(hits = 0L) }
         CoreController.resetRuleHits()
     }
 
     fun addRule(rule: Rule) {
-        val current = _rules.value.toMutableList()
-        current.add(rule)
-        _rules.value = current
-        saveRules(current)
+        RuleStore.addRule(context, rule)
+        loadData()
     }
 
     fun updateRule(index: Int, rule: Rule) {
-        val current = _rules.value.toMutableList()
-        if (index in current.indices) {
-            current[index] = rule
-            _rules.value = current
-            saveRules(current)
-        }
+        RuleStore.updateRule(context, index, rule)
+        loadData()
+    }
+
+    fun toggleRuleEnabled(index: Int): Boolean {
+        val result = RuleStore.toggleRuleEnabled(context, index)
+        loadData()
+        return result
     }
 
     fun removeRule(index: Int) {
-        val current = _rules.value.toMutableList()
-        if (index in current.indices) {
-            current.removeAt(index)
-            _rules.value = current
-            saveRules(current)
-        }
+        RuleStore.removeRule(context, index)
+        loadData()
     }
 
     fun moveRule(from: Int, to: Int) {
-        val current = _rules.value.toMutableList()
-        if (from in current.indices && to in current.indices && from != to) {
-            val item = current.removeAt(from)
-            current.add(to, item)
-            _rules.value = current
-            saveRules(current)
-        }
+        RuleStore.moveRule(context, from, to)
+        loadData()
     }
 
     fun setDefaultAction(action: String) {
+        RuleStore.setDefaultAction(context, action)
         _defaultAction.value = action
-        prefs.edit().putString(KEY_DEFAULT_ACTION, action).apply()
-    }
-
-    fun toJson(): String {
-        val arr = JSONArray()
-        for (r in _rules.value) {
-            arr.put(
-                JSONObject()
-                    .put("kind", r.kind)
-                    .put("pattern", r.pattern.trim().lowercase())
-                    .put("action", r.action)
-            )
-        }
-        return JSONObject().put("rules", arr).toString()
-    }
-
-    fun refreshBuiltin() {
-        runCatching {
-            _builtinDomains.value = CoreController.getBuiltinDomains().toList()
-            _builtinIpCount.value = CoreController.getBuiltinIpCount()
-        }
     }
 
     fun applyRules(): Boolean {
-        return CoreController.setRules(toJson())
+        val json = RuleStore.toJson(context)
+        return CoreController.setRules(json)
+    }
+
+    fun refreshBuiltin() {
+        _builtinDomains.value = emptyList()
+        _builtinIpCount.value = 0L
     }
 
     companion object {
-        private const val PREFS_NAME = "mirage_rules"
-        private const val KEY_RULES = "rules_json"
-        private const val KEY_DEFAULT_ACTION = "default_action"
-
         @Volatile
         private var instance: RuleRepository? = null
 
-        fun getInstance(context: Context): RuleRepository {
-            return instance ?: synchronized(this) {
+        fun getInstance(context: Context): RuleRepository =
+            instance ?: synchronized(this) {
                 instance ?: RuleRepository(context.applicationContext).also { instance = it }
             }
-        }
     }
 }

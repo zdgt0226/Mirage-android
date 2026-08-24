@@ -112,6 +112,15 @@ impl Engine {
         }
     }
 
+    /// 检查 IP 是否落在 Fake-IP 网段中。
+    pub fn is_fake_ip(&self, ip: &IpAddr) -> bool {
+        if let IpAddr::V4(v4) = ip {
+            self.fake_ip.is_fake_ip(v4)
+        } else {
+            false
+        }
+    }
+
     /// 分配 fake-IP (DNS 应答用)。返回 None 表示网段耗尽。
     pub fn fake_ip_allocate(&self, domain: &str) -> Option<std::net::Ipv4Addr> {
         Some(self.fake_ip.lookup_or_assign(domain))

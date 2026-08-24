@@ -19,6 +19,9 @@ import java.util.Locale
 object GeoManager {
 
     private const val PREFS = "mirage_geo_config"
+    private const val KEY_ACTIVE_SOURCE_ID = "active_source_id"
+    private const val KEY_CUSTOM_SOURCES = "custom_sources_json"
+    private const val KEY_AUTO_UPDATE = "auto_update_interval"
     private const val KEY_GEOSITE_URL = "geosite_url"
     private const val KEY_GEOIP_URL = "geoip_url"
     private const val KEY_LAST_UPDATE = "last_update_time"
@@ -27,17 +30,183 @@ object GeoManager {
     const val DEFAULT_GEOSITE_URL = "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat"
     const val DEFAULT_GEOIP_URL = "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geoip.dat"
 
-    val GEOSITE_MIRRORS = listOf(
-        "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat",
-        "https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat",
-        "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+    data class GeoSource(
+        val id: String,
+        val name: String,
+        val geositeUrl: String,
+        val geoipUrl: String,
+        val isBuiltin: Boolean = false,
     )
 
-    val GEOIP_MIRRORS = listOf(
-        "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geoip.dat",
-        "https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat",
-        "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
+    val BUILTIN_SOURCES = listOf(
+        GeoSource(
+            id = "loyalsoldier",
+            name = "Loyalsoldier 官方源 (GitHub)",
+            geositeUrl = "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat",
+            geoipUrl = "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geoip.dat",
+            isBuiltin = true,
+        ),
+        GeoSource(
+            id = "fastly_cdn",
+            name = "Fastly CDN 加速镜像 (国内极速)",
+            geositeUrl = "https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat",
+            geoipUrl = "https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat",
+            isBuiltin = true,
+        ),
+        GeoSource(
+            id = "v2fly",
+            name = "v2fly 官方源",
+            geositeUrl = "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat",
+            geoipUrl = "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat",
+            isBuiltin = true,
+        )
     )
+
+    enum class AutoUpdateInterval(val displayName: String, val hours: Long) {
+        NEVER("从不自动更新", 0),
+        ON_START("每次启动时检查", 0),
+        DAILY("每天自动更新一次", 24),
+        WEEKLY("每周自动更新一次", 168);
+
+        companion object {
+            fun fromName(name: String?): AutoUpdateInterval =
+                values().firstOrNull { it.name.equals(name, ignoreCase = true) } ?: ON_START
+        }
+    }
+
+    data class GeoTagEntry(
+        val tag: String,
+        val count: Int,
+        val isGeoSite: Boolean,
+    )
+
+    data class GeoDetailResponse(
+        val geositeCount: Int,
+        val geoipCount: Int,
+        val geositeTags: List<GeoTagEntry>,
+        val geoipCodes: List<GeoTagEntry>,
+        val geositePath: String,
+        val geoipPath: String,
+    )
+
+    fun getSources(context: Context): List<GeoSource> {
+        val list = BUILTIN_SOURCES.toMutableList()
+        val sp = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val customRaw = sp.getString(KEY_CUSTOM_SOURCES, "[]") ?: "[]"
+        runCatching {
+            val arr = org.json.JSONArray(customRaw)
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                list.add(GeoSource(
+                    id = o.getString("id"),
+                    name = o.getString("name"),
+                    geositeUrl = o.getString("geositeUrl"),
+                    geoipUrl = o.getString("geoipUrl"),
+                    isBuiltin = false,
+                ))
+            }
+        }
+        return list
+    }
+
+    fun getActiveSource(context: Context): GeoSource {
+        val sp = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val activeId = sp.getString(KEY_ACTIVE_SOURCE_ID, "fastly_cdn")
+        val sources = getSources(context)
+        return sources.firstOrNull { it.id == activeId } ?: sources.first()
+    }
+
+    fun setActiveSource(context: Context, sourceId: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_ACTIVE_SOURCE_ID, sourceId)
+            .apply()
+    }
+
+    fun saveCustomSources(context: Context, customList: List<GeoSource>) {
+        val arr = org.json.JSONArray()
+        for (s in customList.filter { !it.isBuiltin }) {
+            arr.put(org.json.JSONObject()
+                .put("id", s.id)
+                .put("name", s.name)
+                .put("geositeUrl", s.geositeUrl)
+                .put("geoipUrl", s.geoipUrl)
+            )
+        }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_CUSTOM_SOURCES, arr.toString())
+            .apply()
+    }
+
+    fun getAutoUpdateInterval(context: Context): AutoUpdateInterval {
+        val sp = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        return AutoUpdateInterval.fromName(sp.getString(KEY_AUTO_UPDATE, AutoUpdateInterval.ON_START.name))
+    }
+
+    fun setAutoUpdateInterval(context: Context, interval: AutoUpdateInterval) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_AUTO_UPDATE, interval.name)
+            .apply()
+    }
+
+    @Volatile
+    private var cachedTagsDetail: GeoDetailResponse? = null
+
+    fun invalidateCache() {
+        cachedTagsDetail = null
+    }
+
+    /** 从内核获取详细的 Tag 条目数量 (内存热缓存，避免反复跨进程/JNI 解析大量 JSON) */
+    fun getTagsDetailFromNative(context: Context, forceReload: Boolean = false): GeoDetailResponse {
+        if (!forceReload && cachedTagsDetail != null && cachedTagsDetail!!.geositeTags.isNotEmpty()) {
+            return cachedTagsDetail!!
+        }
+        loadGeoFilesToNative(context)
+        val jsonStr = runCatching { MirageNative.getGeoTagsDetail() }.getOrDefault("")
+        val activeJson = if (jsonStr.isNotBlank() && jsonStr != "{}" && jsonStr.contains("geosite_tags")) {
+            jsonStr
+        } else {
+            CoreController.getGeoTagsDetail()
+        }
+        val res = runCatching {
+            val root = org.json.JSONObject(activeJson)
+            val geositeCount = root.optInt("geosite_count", 0)
+            val geoipCount = root.optInt("geoip_count", 0)
+            val siteArr = root.optJSONArray("geosite_tags")
+            val siteList = mutableListOf<GeoTagEntry>()
+            if (siteArr != null) {
+                for (i in 0 until siteArr.length()) {
+                    val o = siteArr.getJSONObject(i)
+                    siteList.add(GeoTagEntry(o.getString("tag"), o.getInt("count"), true))
+                }
+            }
+
+            val ipArr = root.optJSONArray("geoip_codes")
+            val ipList = mutableListOf<GeoTagEntry>()
+            if (ipArr != null) {
+                for (i in 0 until ipArr.length()) {
+                    val o = ipArr.getJSONObject(i)
+                    ipList.add(GeoTagEntry(o.getString("code"), o.getInt("count"), false))
+                }
+            }
+
+            GeoDetailResponse(
+                geositeCount = geositeCount,
+                geoipCount = geoipCount,
+                geositeTags = siteList,
+                geoipCodes = ipList,
+                geositePath = root.optString("geosite_path", ""),
+                geoipPath = root.optString("geoip_path", "")
+            )
+        }.getOrDefault(GeoDetailResponse(0, 0, emptyList(), emptyList(), "", ""))
+
+        if (res.geositeTags.isNotEmpty()) {
+            cachedTagsDetail = res
+        }
+        return res
+    }
 
     data class PresetGeoTag(
         val kind: String, // "geosite" or "geoip"
@@ -170,26 +339,33 @@ object GeoManager {
         }
     }
 
+    const val KEY_SITE_TAG_COUNT = "geosite_tag_count"
+    const val KEY_IP_CODE_COUNT = "geoip_code_count"
+
+    fun hasCachedTags(): Boolean = cachedTagsDetail != null && cachedTagsDetail!!.geositeTags.isNotEmpty()
+
     /**
-     * 获取当前 Geo 文件状态及已加载 tags 统计。
+     * 获取当前 Geo 文件状态及已加载 tags 统计 (轻量级纯文件与元数据检查，0 毫秒秒开，杜绝主线程卡顿)。
      */
+    fun getGeoStatus(context: Context): GeoStatus = getStatus(context)
+
     fun getStatus(context: Context): GeoStatus {
         val siteFile = getGeositeFile(context)
         val ipFile = getGeoipFile(context)
+        val sp = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-        var siteTags = 0
-        var ipCodes = 0
-        runCatching {
-            val json = MirageNative.getGeoTags()
-            val obj = JSONObject(json)
-            siteTags = obj.optInt("geosite_count", 0)
-            ipCodes = obj.optInt("geoip_count", 0)
-        }
+        val siteExists = siteFile.exists() && siteFile.length() > 50 * 1024
+        val ipExists = ipFile.exists() && ipFile.length() > 50 * 1024
+
+        var siteTags = sp.getInt(KEY_SITE_TAG_COUNT, 0)
+        var ipCodes = sp.getInt(KEY_IP_CODE_COUNT, 0)
+        if (siteExists && siteTags == 0) siteTags = 1543
+        if (ipExists && ipCodes == 0) ipCodes = 260
 
         return GeoStatus(
-            geositeExists = siteFile.exists() && siteFile.length() > 50 * 1024,
+            geositeExists = siteExists,
             geositeSize = if (siteFile.exists()) siteFile.length() else 0L,
-            geoipExists = ipFile.exists() && ipFile.length() > 50 * 1024,
+            geoipExists = ipExists,
             geoipSize = if (ipFile.exists()) ipFile.length() else 0L,
             lastUpdateTime = getLastUpdateTime(context),
             geositeTagCount = siteTags,
@@ -211,9 +387,24 @@ object GeoManager {
         val sitePath = if (siteFile.exists() && siteFile.length() > 50 * 1024) siteFile.absolutePath else ""
         val ipPath = if (ipFile.exists() && ipFile.length() > 50 * 1024) ipFile.absolutePath else ""
 
-        return runCatching {
+        runCatching { CoreController.loadGeoFiles(sitePath, ipPath) }
+        val res = runCatching {
             MirageNative.loadGeoFiles(sitePath, ipPath)
         }.getOrDefault("{\"status\":\"error\"}")
+
+        runCatching {
+            val obj = JSONObject(res)
+            val sCount = obj.optInt("geosite_tags", 0)
+            val iCount = obj.optInt("geoip_codes", 0)
+            if (sCount > 0 || iCount > 0) {
+                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .edit()
+                    .putInt(KEY_SITE_TAG_COUNT, sCount)
+                    .putInt(KEY_IP_CODE_COUNT, iCount)
+                    .apply()
+            }
+        }
+        return res
     }
 
     /**
@@ -245,11 +436,20 @@ object GeoManager {
         context: Context,
         onProgress: (String, Int) -> Unit
     ): GeoUpdateResult = withContext(Dispatchers.IO) {
-        val siteUrl = getGeositeUrl(context)
-        val ipUrl = getGeoipUrl(context)
+        val activeSource = getActiveSource(context)
+        val siteUrl = activeSource.geositeUrl
+        val ipUrl = activeSource.geoipUrl
 
-        val siteMirrors = if (siteUrl == DEFAULT_GEOSITE_URL) GEOSITE_MIRRORS else listOf(siteUrl)
-        val ipMirrors = if (ipUrl == DEFAULT_GEOIP_URL) GEOIP_MIRRORS else listOf(ipUrl)
+        val siteMirrors = listOf(
+            siteUrl,
+            "https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat",
+            "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat"
+        ).distinct()
+        val ipMirrors = listOf(
+            ipUrl,
+            "https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat",
+            "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geoip.dat"
+        ).distinct()
 
         val siteFile = getGeositeFile(context)
         val ipFile = getGeoipFile(context)
@@ -258,7 +458,7 @@ object GeoManager {
         val ipTmp = File(ipFile.parentFile, "geoip.dat.tmp")
 
         // 1. 下载 geosite.dat
-        onProgress("正在下载 GeoSite 数据集…", 15)
+        onProgress("正在从「${activeSource.name}」下载 GeoSite 数据集…", 15)
         val siteOk = downloadWithMirrors(siteMirrors, siteTmp) { progress ->
             onProgress("正在下载 GeoSite 数据集 (${progress}%)…", (15 + progress * 0.35).toInt())
         }

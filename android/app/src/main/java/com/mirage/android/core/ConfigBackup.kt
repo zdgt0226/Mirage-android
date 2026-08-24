@@ -93,11 +93,11 @@ object ConfigBackup {
                 if (!overwrite && existingRules.any { it.pattern == pat && it.kind == kind }) {
                     continue // 合并模式下去重
                 }
-                val rule = RuleStore.Rule(
-                    o.optString("type", "domain"),
-                    kind,
-                    pat,
-                    o.optString("action", "proxy")
+                val rule = com.mirage.android.data.model.Rule(
+                    type = o.optString("type", "domain"),
+                    kind = kind,
+                    pattern = pat,
+                    action = o.optString("action", "proxy")
                 )
                 existingRules.add(rule)
                 RuleStore.addRule(ctx, rule)

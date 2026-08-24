@@ -21,6 +21,8 @@
 pub mod config;
 pub mod crypto;
 pub mod direct;
+pub mod direct_cn_domains;
+pub mod direct_cn_ipv4;
 pub mod geo;
 pub mod dns;
 pub mod engine;

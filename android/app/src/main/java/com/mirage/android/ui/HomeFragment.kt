@@ -17,6 +17,7 @@ import com.mirage.android.R
 import com.mirage.android.data.model.VpnState
 import com.mirage.android.databinding.FragmentHomeBinding
 import com.mirage.android.ui.viewmodel.HomeViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -101,6 +102,19 @@ class HomeFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 launch {
+                    // 自愈: 直接读真实内核状态并强制刷新 UI 控件 (绕开 MutableStateFlow
+                    // 对"相等值"不 emit 的问题)。StateFlow 回调/广播丢失时 3s 内自动纠正。
+                    while (true) {
+                        delay(3000)
+                        val running = com.mirage.android.core.CoreController.isRunning()
+                        updateVpnUi(if (running) {
+                            VpnState.Connected(viewModel.selectedNode.value)
+                        } else {
+                            VpnState.Disconnected
+                        })
+                    }
+                }
+                launch {
                     viewModel.vpnState.collect { state ->
                         updateVpnUi(state)
                     }
@@ -142,6 +156,14 @@ class HomeFragment : Fragment() {
                     }
                 }
                 launch {
+                    val vpnRepo = com.mirage.android.data.repository.VpnRepository.getInstance(requireContext())
+                    vpnRepo.isBlockQuic.collect { updateTunSummary() }
+                }
+                launch {
+                    val vpnRepo = com.mirage.android.data.repository.VpnRepository.getInstance(requireContext())
+                    vpnRepo.isUdpMux.collect { updateTunSummary() }
+                }
+                launch {
                     viewModel.latencyMs.collect { rtt ->
                         if (rtt >= 0 && viewModel.vpnState.value is VpnState.Connected) {
                             binding.tvLatency.visibility = View.VISIBLE
@@ -156,6 +178,7 @@ class HomeFragment : Fragment() {
     }
 
     private fun updateVpnUi(state: VpnState) {
+        android.util.Log.i("Mirage", "[ui] updateVpnUi state=${state}")
         val running = state.isRunning
         if (binding.connectSwitch.isChecked != running) {
             binding.connectSwitch.isChecked = running
@@ -248,13 +271,16 @@ class HomeFragment : Fragment() {
         val mtu = com.mirage.android.core.TunConfigStore.getMtu(ctx)
         val batch = com.mirage.android.core.TunConfigStore.getBatchSize(ctx)
         val desc = when (mtu) {
-            1400 -> "1400 (蜂窝推荐·防分片)"
-            1420 -> "1420 (Wi-Fi高吞吐)"
-            1500 -> "1500 (标准以太网)"
-            1280 -> "1280 (极低丢包)"
+            1400 -> "1400"
+            1420 -> "1420"
+            1500 -> "1500"
+            1280 -> "1280"
             else -> "$mtu"
         }
-        binding.tvTunSummary.text = "MTU: $desc · 批处理: $batch · 0轮询省电"
+        val vpnRepo = com.mirage.android.data.repository.VpnRepository.getInstance(ctx)
+        val quic = if (vpnRepo.isBlockQuic.value) "屏蔽QUIC" else "放行QUIC"
+        val mux = if (vpnRepo.isUdpMux.value) "UDP Mux" else "单流UDP"
+        binding.tvTunSummary.text = "MTU: $desc · 批处理: $batch · $quic · $mux"
     }
 
     private fun showTunConfigDialog() {

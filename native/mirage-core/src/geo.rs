@@ -435,3 +435,37 @@ pub fn get_geo_tags_json() -> String {
         "geoip_codes": ips,
     }).to_string()
 }
+
+/// 获取包含详细条目数量的 GeoSite 和 GeoIP 列表 (供 Tag 内省搜索器使用)
+pub fn get_geo_tags_detail_json() -> String {
+    let g = global_geo().read().unwrap_or_else(|e| e.into_inner());
+    
+    let mut site_details: Vec<serde_json::Value> = g.sites.iter().map(|(tag, entries)| {
+        serde_json::json!({
+            "tag": tag,
+            "count": entries.len(),
+        })
+    }).collect();
+    site_details.sort_by(|a, b| {
+        a["tag"].as_str().unwrap_or("").cmp(b["tag"].as_str().unwrap_or(""))
+    });
+
+    let mut ip_details: Vec<serde_json::Value> = g.ip_v4.iter().map(|(code, entries)| {
+        serde_json::json!({
+            "code": code,
+            "count": entries.len(),
+        })
+    }).collect();
+    ip_details.sort_by(|a, b| {
+        a["code"].as_str().unwrap_or("").cmp(b["code"].as_str().unwrap_or(""))
+    });
+
+    serde_json::json!({
+        "geosite_count": site_details.len(),
+        "geoip_count": ip_details.len(),
+        "geosite_tags": site_details,
+        "geoip_codes": ip_details,
+        "geosite_path": g.geosite_path,
+        "geoip_path": g.geoip_path,
+    }).to_string()
+}

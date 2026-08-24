@@ -5,8 +5,8 @@
     android:id="@+id/cardRule"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_marginHorizontal="2dp"
-    android:layout_marginVertical="4dp"
+    android:layout_marginHorizontal="4dp"
+    android:layout_marginVertical="3dp"
     app:cardCornerRadius="14dp"
     app:cardElevation="0dp"
     app:strokeColor="@color/meow_outline"
@@ -17,74 +17,146 @@
         android:layout_height="wrap_content"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:paddingHorizontal="14dp"
-        android:paddingVertical="12dp">
+        android:paddingVertical="8dp">
 
-        <ImageView
-            android:layout_width="36dp"
-            android:layout_height="36dp"
-            android:background="@drawable/bg_telegram_avatar"
-            android:padding="8dp"
-            android:src="@drawable/ic_nav_rules"
-            app:tint="@color/meow_blue" />
-
+        <!-- 左侧高敏专有拖拽把手区 (宽度 46dp，极易触摸，杜绝误触 Switch) -->
         <LinearLayout
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="10dp"
-            android:layout_weight="1"
-            android:orientation="vertical">
+            android:id="@+id/layoutDragGrip"
+            android:layout_width="46dp"
+            android:layout_height="match_parent"
+            android:background="?attr/selectableItemBackground"
+            android:clickable="true"
+            android:contentDescription="按住上下拖动调整优先级"
+            android:focusable="true"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:paddingHorizontal="4dp">
+
+            <ImageView
+                android:id="@+id/ivDragIcon"
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:src="@android:drawable/ic_menu_sort_by_size"
+                app:tint="@color/meow_ink_secondary" />
 
             <TextView
-                android:id="@+id/tvPattern"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:ellipsize="end"
-                android:maxLines="1"
-                android:textColor="@color/meow_ink"
-                android:textSize="15sp"
-                android:textStyle="bold"
-                tools:text="google.com" />
-
-            <TextView
-                android:id="@+id/tvKind"
+                android:id="@+id/tvPriorityIndex"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="2dp"
                 android:textColor="@color/meow_ink_secondary"
-                android:textSize="11sp"
-                tools:text="DOMAIN-SUFFIX" />
+                android:textSize="10sp"
+                android:textStyle="bold"
+                tools:text="#1" />
         </LinearLayout>
 
-        <TextView
-            android:id="@+id/tvHits"
-            android:layout_width="wrap_content"
+        <!-- 中间内容区 (充分利用屏幕宽度) -->
+        <LinearLayout
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="0"
-            android:textColor="@color/meow_ink_secondary"
-            android:textSize="11sp"
-            android:visibility="gone" />
+            android:layout_marginStart="4dp"
+            android:layout_marginEnd="6dp"
+            android:layout_weight="1"
+            android:orientation="vertical">
 
-        <TextView
-            android:id="@+id/tvAction"
+            <!-- 第一行: 规则名称与逻辑角标 -->
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/tvPattern"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:textColor="@color/meow_ink"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    tools:text="Google 服务加速" />
+
+                <TextView
+                    android:id="@+id/tvLogicBadge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:background="@drawable/badge_latency_bg"
+                    android:paddingHorizontal="4dp"
+                    android:paddingVertical="1dp"
+                    android:textColor="@color/meow_blue"
+                    android:textSize="9sp"
+                    android:textStyle="bold"
+                    android:visibility="gone"
+                    tools:text="AND 复合"
+                    tools:visibility="visible" />
+            </LinearLayout>
+
+            <!-- 第二行: 动作胶囊 + 规则类型/摘要 + 命中统计 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="3dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/tvAction"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/badge_latency_bg"
+                    android:paddingHorizontal="5dp"
+                    android:paddingVertical="1dp"
+                    android:textSize="10sp"
+                    android:textStyle="bold"
+                    tools:text="代理"
+                    tools:textColor="@color/meow_blue" />
+
+                <TextView
+                    android:id="@+id/tvKind"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:textColor="@color/meow_ink_secondary"
+                    android:textSize="11sp"
+                    tools:text="GEOSITE · google 且 端口(443)" />
+
+                <TextView
+                    android:id="@+id/tvHits"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp"
+                    android:background="@drawable/badge_latency_bg"
+                    android:paddingHorizontal="4dp"
+                    android:paddingVertical="1dp"
+                    android:textColor="@color/meow_ink_secondary"
+                    android:textSize="9sp"
+                    android:visibility="gone"
+                    tools:text="14次"
+                    tools:visibility="visible" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- 右侧控制区: 独立开关 + 更多选项菜单 (间距充裕，防止误触) -->
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/switchEnabled"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginHorizontal="8dp"
-            android:background="@drawable/badge_latency_bg"
-            android:paddingHorizontal="8dp"
-            android:paddingVertical="3dp"
-            android:textSize="11sp"
-            android:textStyle="bold"
-            tools:text="直连"
-            tools:textColor="#10B981" />
+            android:layout_marginEnd="4dp"
+            android:checked="true" />
 
         <ImageButton
             android:id="@+id/btnMore"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
+            android:layout_width="34dp"
+            android:layout_height="34dp"
+            android:layout_marginEnd="6dp"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="操作"
+            android:contentDescription="更多操作"
+            android:padding="6dp"
             android:src="@drawable/ic_more_vert"
             app:tint="@color/meow_ink_secondary" />
     </LinearLayout>

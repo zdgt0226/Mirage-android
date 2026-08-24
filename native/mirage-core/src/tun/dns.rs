@@ -154,7 +154,7 @@ fn parse_a_answer(buf: &[u8], qname_len: usize) -> Option<[u8; 4]> {
 }
 
 /// 异步向上游查询真实 IP (protect UDP socket, 自动重试与兜底)。
-async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
+pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
     {
         let map = direct_cache().lock().unwrap_or_else(|e| e.into_inner());
         if let Some((ip, at)) = map.get(domain) {
@@ -322,7 +322,9 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, quer
     DNS_QUERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     debug!("[TUN-DNS] 查询 {} (type {})", domain, qtype);
 
-    if direct::should_block(Some(&domain), None) {
+    let decision = direct::route_decision(Some(&domain), None, Some(53), Some("udp"));
+
+    if decision == direct::RuleAction::Block {
         let (cid, _conn_up, _conn_down) = crate::monitor::record_conn_start(
             "DNS",
             &format!("{domain}:53"),
@@ -334,7 +336,7 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, quer
         return;
     }
 
-    let is_direct = qtype == 1 && direct::should_direct(Some(&domain), None);
+    let is_direct = qtype == 1 && decision == direct::RuleAction::Direct;
     let (cid, _conn_up, _conn_down) = crate::monitor::record_conn_start(
         "DNS",
         &format!("{domain}:53"),

@@ -27,6 +27,10 @@ import com.mirage.android.ui.NodesFragment
 import com.mirage.android.ui.RulesFragment
 import com.mirage.android.ui.TrafficFragment
 import com.mirage.android.ui.viewmodel.HomeViewModel
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import com.mirage.android.core.GeoManager
 
 /**
  * 主容器: ViewPager2 + 底部导航 (状态保持, 消除切换卡顿)。
@@ -106,9 +110,19 @@ class MainActivity : AppCompatActivity() {
         handleIncomingUri(intent)
 
         setupViewPager()
+        checkGeoInitialization()
 
         if (intent?.getBooleanExtra("auto_connect", false) == true) {
             requestVpnPermissionAndConnect()
+        }
+    }
+
+    private fun checkGeoInitialization() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val status = GeoManager.getGeoStatus(this@MainActivity)
+            if (!status.isReady) {
+                GeoManager.updateGeoFiles(this@MainActivity) { _, _ -> }
+            }
         }
     }
 
@@ -129,16 +143,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupViewPager() {
-        val fragments = listOf(
-            HomeFragment(),
-            NodesFragment(),
-            RulesFragment(),
-            TrafficFragment()
-        )
-
         binding.viewPager.adapter = object : FragmentStateAdapter(this) {
-            override fun getItemCount(): Int = fragments.size
-            override fun createFragment(position: Int): Fragment = fragments[position]
+            override fun getItemCount(): Int = 4
+            override fun createFragment(position: Int): Fragment = when (position) {
+                0 -> HomeFragment()
+                1 -> NodesFragment()
+                2 -> RulesFragment()
+                3 -> TrafficFragment()
+                else -> throw IllegalStateException("Invalid position $position")
+            }
         }
         binding.viewPager.isUserInputEnabled = false // 禁用滑动切换，依靠底部导航
         binding.viewPager.offscreenPageLimit = 3
