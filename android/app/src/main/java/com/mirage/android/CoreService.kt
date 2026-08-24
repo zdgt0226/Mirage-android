@@ -46,8 +46,9 @@ import java.util.concurrent.CopyOnWriteArrayList
  */
 class CoreService : VpnService() {
 
+    private val stateLock = Any()
     private var tunFd: ParcelFileDescriptor? = null
-    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private var scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val callbacks = CopyOnWriteArrayList<ICoreCallback>()
 
     private var logJob: Job? = null
@@ -124,7 +125,8 @@ class CoreService : VpnService() {
         callbacks.forEach { runCatching { it.onLog(msg) } }
     }
 
-    fun startInternal(uriOverride: String? = null, poolSizeOverride: Int = -1): Int {
+    fun startInternal(uriOverride: String? = null, poolSizeOverride: Int = -1): Int = synchronized(stateLock) {
+        setActive(this)
         if (MirageNative.isRunning()) {
             notifyState()
             return 0
@@ -139,6 +141,10 @@ class CoreService : VpnService() {
             log("[core] VPN 未授权")
             return -2
         }
+
+        // 清理并关闭可能遗留的旧 tunFd
+        tunFd?.let { runCatching { it.close() } }
+        tunFd = null
 
         val builder = Builder()
         builder.setSession("Mirage")
@@ -156,6 +162,13 @@ class CoreService : VpnService() {
             log("[core] TUN establish 返回 null")
             return -4
         }
+        val rawFd = try {
+            fd.fd
+        } catch (e: Exception) {
+            log("[core] 获取 TUN 文件描述符异常: ${e.message}")
+            runCatching { fd.close() }
+            return -5
+        }
         tunFd = fd
         startForegroundCompat()
 
@@ -171,7 +184,7 @@ class CoreService : VpnService() {
 
         val poolSize = if (poolSizeOverride > 0) poolSizeOverride else NodeStore.getPoolSize(this)
         log("[core] 开始启动内核 (uri=${uri.take(30)}..., poolSize=$poolSize, mtu=$mtu)")
-        val rc = MirageNative.start(fd.fd, uri, poolSize, mtu)
+        val rc = MirageNative.start(rawFd, uri, poolSize, mtu)
         if (rc != 0) {
             log("[core] 内核启动失败 rc=$rc")
             runCatching { fd.close() }
@@ -333,13 +346,12 @@ class CoreService : VpnService() {
         }
     }
 
-    fun stopInternal() {
-        clearActive()
+    fun stopInternal(): Unit = synchronized(stateLock) {
         log("[core] stop()")
         cancelAllJobs()
         flushLogsAndStats()
         runCatching { MirageNative.stop() }
-        runCatching { tunFd?.close() }
+        tunFd?.let { runCatching { it.close() } }
         tunFd = null
         runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -352,7 +364,6 @@ class CoreService : VpnService() {
         runCatching { getSystemService(NotificationManager::class.java)?.cancel(1) }
         notifyState()
         runCatching { sendBroadcast(Intent(ACTION_VPN_STOPPED).setPackage(packageName)) }
-        stopSelf()
     }
 
     fun setNodeInternal(uri: String): Boolean {

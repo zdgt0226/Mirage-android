@@ -52,7 +52,8 @@ class HomeFragment : Fragment() {
             showVersionDetailsDialog()
         }
 
-        binding.connectSwitch.setOnCheckedChangeListener { _, isChecked ->
+        binding.connectSwitch.setOnClickListener {
+            val isChecked = binding.connectSwitch.isChecked
             if (isChecked && !viewModel.vpnState.value.isRunning) {
                 performConnect()
             } else if (!isChecked && viewModel.vpnState.value.isRunning) {
@@ -102,16 +103,15 @@ class HomeFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 launch {
-                    // 自愈: 直接读真实内核状态并强制刷新 UI 控件 (绕开 MutableStateFlow
-                    // 对"相等值"不 emit 的问题)。StateFlow 回调/广播丢失时 3s 内自动纠正。
+                    // 自愈: 仅在状态处于稳态且有偏差时纠正，不干扰 Connecting/Stopping 中间态
                     while (true) {
                         delay(3000)
                         val running = com.mirage.android.core.CoreController.isRunning()
-                        updateVpnUi(if (running) {
-                            VpnState.Connected(viewModel.selectedNode.value)
-                        } else {
-                            VpnState.Disconnected
-                        })
+                        if (running && viewModel.vpnState.value !is VpnState.Connected) {
+                            updateVpnUi(VpnState.Connected(viewModel.selectedNode.value))
+                        } else if (!running && viewModel.vpnState.value !is VpnState.Disconnected && viewModel.vpnState.value !is VpnState.Connecting && viewModel.vpnState.value !is VpnState.Stopping) {
+                            updateVpnUi(VpnState.Disconnected)
+                        }
                     }
                 }
                 launch {

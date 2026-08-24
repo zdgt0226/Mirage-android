@@ -51,7 +51,7 @@ build_apk() {
     mkdir -p "$HERE/.build/out" "$HERE/.build/gradle-home"
     chown 1000:1000 "$HERE/.build/out" "$HERE/.build/gradle-home" 2>/dev/null || true
 
-    local ver="0.2.8"
+    local ver="0.2.9"
     local timestamp
     timestamp=$(date +%Y%m%d_%H%M%S)
     local build_date

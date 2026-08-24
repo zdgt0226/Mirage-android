@@ -145,7 +145,11 @@ class VpnRepository(private val context: Context) {
             putExtra("uri", selected.uri)
             putExtra("pool_size", nodeRepo.getPoolSize())
         }
-        context.startForegroundService(intent)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            context.startForegroundService(intent)
+        } else {
+            context.startService(intent)
+        }
         startTelemetry()
     }
 
@@ -153,9 +157,6 @@ class VpnRepository(private val context: Context) {
         _vpnState.value = VpnState.Stopping
         runCatching { CoreController.clearDnsCache() }
         runCatching { CoreController.stop() }
-        val stopIntent = Intent(context, CoreService::class.java).setAction(CoreService.ACTION_STOP)
-        runCatching { context.startService(stopIntent) }
-        runCatching { context.stopService(stopIntent) }
         _vpnState.value = VpnState.Disconnected
         _connections.value = emptyList()
         stopTelemetry()
@@ -235,7 +236,7 @@ class VpnRepository(private val context: Context) {
                         _connections.value = emptyList()
                     }
                 } else {
-                    if (_vpnState.value !is VpnState.Disconnected && _vpnState.value !is VpnState.Connecting) {
+                    if (_vpnState.value !is VpnState.Disconnected && _vpnState.value !is VpnState.Connecting && _vpnState.value !is VpnState.Stopping) {
                         withContext(Dispatchers.Main) {
                             _vpnState.value = VpnState.Disconnected
                         }

@@ -12,7 +12,7 @@ val propBuildTime = project.findProperty("buildTime") as? String
 val propBuildTag = project.findProperty("buildTag") as? String 
     ?: "Release 5 (TUN Opt + 1400 MTU)"
 val propVersionCode = (project.findProperty("versionCode") as? String)?.toIntOrNull() ?: 56
-val propVersionName = project.findProperty("versionName") as? String ?: "0.2.8"
+val propVersionName = project.findProperty("versionName") as? String ?: "0.2.9"
 
 android {
     namespace = "com.mirage.android"

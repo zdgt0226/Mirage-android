@@ -178,10 +178,14 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_start(
     mtu: jint,
 ) -> jint {
     init_logging();
-    if STARTED.swap(true, Ordering::SeqCst) {
-        // 幂等: 已在跑, 返回 0 (Kotlin 应先 stop)
-        return 0;
+    {
+        let has_runtime = RUNTIME.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        if STARTED.load(Ordering::SeqCst) && has_runtime {
+            // 幂等: 已在跑, 返回 0 (Kotlin 应先 stop)
+            return 0;
+        }
     }
+    STARTED.store(true, Ordering::SeqCst);
 
     let uri_str: String = match env.get_string(&uri) {
         Ok(s) => s.into(),
@@ -314,13 +318,13 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_stop(
     _env: JNIEnv,
     _class: JClass,
 ) {
-    if let Some(state) = RUNTIME.lock().unwrap_or_else(|e| e.into_inner()).take() {
+    let state = RUNTIME.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(state) = state {
         state.stack.stop();
-        // drop runtime (停止 tokio worker)
         drop(state);
-        STARTED.store(false, Ordering::SeqCst);
-        tracing::info!("MirageCore 已停止");
     }
+    STARTED.store(false, Ordering::SeqCst);
+    tracing::info!("MirageCore 已停止");
 }
 
 /// `boolean isRunning()`
