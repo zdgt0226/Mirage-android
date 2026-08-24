@@ -35,7 +35,8 @@ object ConfigBackup {
         // Geo 配置
         root.put("geosite_url", GeoManager.getGeositeUrl(ctx))
         root.put("geoip_url", GeoManager.getGeoipUrl(ctx))
-        // QUIC & UDP Mux 设置
+        // TUN & 性能微调 (IPv6 / QUIC / UDP Mux)
+        root.put("enable_ipv6", TunConfigStore.isIpv6Enabled(ctx))
         val vpnPrefs = ctx.getSharedPreferences("mirage_vpn_prefs", Context.MODE_PRIVATE)
         root.put("block_quic", vpnPrefs.getBoolean("block_quic", true))
         root.put("udp_mux", vpnPrefs.getBoolean("udp_mux", true))
@@ -124,8 +125,12 @@ object ConfigBackup {
             val u = root.optString("geoip_url", "")
             if (u.isNotBlank()) GeoManager.setGeoipUrl(ctx, u)
         }
-        // QUIC & UDP Mux
+        // TUN & 性能微调 (IPv6 / QUIC / UDP Mux)
         val vpnRepo = com.mirage.android.data.repository.VpnRepository.getInstance(ctx)
+        if (root.has("enable_ipv6")) {
+            val ipv6 = root.optBoolean("enable_ipv6", true)
+            vpnRepo.setIpv6Enabled(ipv6)
+        }
         if (root.has("block_quic")) {
             val bq = root.optBoolean("block_quic", true)
             vpnRepo.setBlockQuic(bq)

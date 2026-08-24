@@ -157,6 +157,10 @@ class HomeFragment : Fragment() {
                 }
                 launch {
                     val vpnRepo = com.mirage.android.data.repository.VpnRepository.getInstance(requireContext())
+                    vpnRepo.isIpv6Enabled.collect { updateTunSummary() }
+                }
+                launch {
+                    val vpnRepo = com.mirage.android.data.repository.VpnRepository.getInstance(requireContext())
                     vpnRepo.isBlockQuic.collect { updateTunSummary() }
                 }
                 launch {
@@ -278,9 +282,10 @@ class HomeFragment : Fragment() {
             else -> "$mtu"
         }
         val vpnRepo = com.mirage.android.data.repository.VpnRepository.getInstance(ctx)
+        val ipv6 = if (vpnRepo.isIpv6Enabled.value) "IPv6接管" else "IPv4单栈"
         val quic = if (vpnRepo.isBlockQuic.value) "屏蔽QUIC" else "放行QUIC"
         val mux = if (vpnRepo.isUdpMux.value) "UDP Mux" else "单流UDP"
-        binding.tvTunSummary.text = "MTU: $desc · 批处理: $batch · $quic · $mux"
+        binding.tvTunSummary.text = "MTU: $desc · 批处理: $batch · $ipv6 · $quic · $mux"
     }
 
     private fun showTunConfigDialog() {

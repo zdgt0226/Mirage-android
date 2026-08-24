@@ -38,6 +38,9 @@ class VpnRepository(private val context: Context) {
     val connections: StateFlow<List<com.mirage.android.data.model.ConnectionInfo>> = _connections.asStateFlow()
 
     private val prefs = context.getSharedPreferences("mirage_vpn_prefs", Context.MODE_PRIVATE)
+    private val _isIpv6Enabled = MutableStateFlow(com.mirage.android.core.TunConfigStore.isIpv6Enabled(context))
+    val isIpv6Enabled: StateFlow<Boolean> = _isIpv6Enabled.asStateFlow()
+
     private val _isBlockQuic = MutableStateFlow(prefs.getBoolean("block_quic", true))
     val isBlockQuic: StateFlow<Boolean> = _isBlockQuic.asStateFlow()
 
@@ -184,6 +187,11 @@ class VpnRepository(private val context: Context) {
             com.mirage.android.data.model.LogLevel.ERROR -> "error"
         }
         return CoreController.setLogLevel(levelStr)
+    }
+
+    fun setIpv6Enabled(enabled: Boolean) {
+        _isIpv6Enabled.value = enabled
+        com.mirage.android.core.TunConfigStore.setIpv6Enabled(context, enabled)
     }
 
     fun setBlockQuic(block: Boolean): Boolean {

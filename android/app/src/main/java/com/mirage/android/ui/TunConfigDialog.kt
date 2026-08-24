@@ -98,8 +98,18 @@ class TunConfigDialog(
         })
 
         val vpnRepo = com.mirage.android.data.repository.VpnRepository.getInstance(context)
+        binding.switchEnableIpv6.isChecked = vpnRepo.isIpv6Enabled.value
         binding.switchBlockQuic.isChecked = vpnRepo.isBlockQuic.value
         binding.switchUdpMux.isChecked = vpnRepo.isUdpMux.value
+
+        binding.switchEnableIpv6.setOnCheckedChangeListener { _, isChecked ->
+            vpnRepo.setIpv6Enabled(isChecked)
+            Toast.makeText(
+                context,
+                if (isChecked) "已开启 IPv6 路由接管 (防 5G 旁路泄露，重连生效)" else "已关闭 IPv6 路由接管 (纯 IPv4 模式，重连生效)",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
 
         binding.switchBlockQuic.setOnCheckedChangeListener { _, isChecked ->
             vpnRepo.setBlockQuic(isChecked)
@@ -123,6 +133,7 @@ class TunConfigDialog(
             binding.etMtu.setText(TunConfigStore.DEFAULT_MTU.toString())
             binding.etTcpIdle.setText(TunConfigStore.DEFAULT_TCP_IDLE_SEC.toString())
             syncBatchChips(TunConfigStore.DEFAULT_BATCH_SIZE)
+            binding.switchEnableIpv6.isChecked = true
             binding.switchBlockQuic.isChecked = true
             binding.switchUdpMux.isChecked = true
         }
