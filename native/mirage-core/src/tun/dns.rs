@@ -170,19 +170,23 @@ fn parse_a_answer(buf: &[u8], qname_len: usize) -> Option<[u8; 4]> {
     None
 }
 
-/// 异步向上游查询真实 IP (protect UDP socket, 自动重试与兜底)。
+/// 异步向上游查询真实 IP (采用双上游并发竞速解析与极速兜底)。
 pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
     {
         let map = direct_cache().lock().unwrap_or_else(|e| e.into_inner());
         if let Some((ip, at)) = map.get(domain) {
             if at.elapsed() < CACHE_TTL {
+                tracing::info!("[TUN-DNS] 命中直连 DNS 缓存: {} → {}", domain, ip);
                 return Some(*ip);
             }
         }
     }
     let sock = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => s,
-        Err(_) => return None,
+        Err(e) => {
+            tracing::warn!("[TUN-DNS] 上游 UDP socket 创建失败: {e}");
+            return None;
+        }
     };
     // protect: 走真实网络 (否则被 TUN 卷回)
     crate::protect::protect(std::os::unix::io::AsRawFd::as_raw_fd(&sock));
@@ -190,46 +194,67 @@ pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let query = build_a_query(domain, id);
     let primary_dns = get_direct_dns();
-    let up: std::net::SocketAddr =
-        std::net::SocketAddr::from((primary_dns, 53));
-    if sock.send_to(&query, up).await.is_err() {
-        return None;
-    }
+    let fallback_ip = if primary_dns != std::net::Ipv4Addr::new(223, 5, 5, 5) {
+        std::net::Ipv4Addr::new(223, 5, 5, 5)
+    } else {
+        std::net::Ipv4Addr::new(119, 29, 29, 29)
+    };
+
+    let up1 = std::net::SocketAddr::from((primary_dns, 53));
+    let up2 = std::net::SocketAddr::from((fallback_ip, 53));
+
+    // 并发向主上游和备用上游发送请求 (竞速消除 DNS 解析抖动与卡顿)
+    let _ = sock.send_to(&query, up1).await;
+    let _ = sock.send_to(&query, up2).await;
 
     let mut buf = [0u8; 1024];
-    let (n, _) = match tokio::time::timeout(Duration::from_millis(1500), sock.recv_from(&mut buf)).await {
-        Ok(Ok(v)) => v,
-        _ => {
-            // 主 DNS 超时 → 立即向备用公共 DNS (223.5.5.5 或 119.29.29.29) 兜底重试
-            let fallback_ip = if primary_dns != std::net::Ipv4Addr::new(223, 5, 5, 5) {
-                std::net::Ipv4Addr::new(223, 5, 5, 5)
-            } else {
-                std::net::Ipv4Addr::new(119, 29, 29, 29)
-            };
-            let fallback_up: std::net::SocketAddr = std::net::SocketAddr::from((fallback_ip, 53));
-            let _ = sock.send_to(&query, fallback_up).await;
-            match tokio::time::timeout(Duration::from_millis(1500), sock.recv_from(&mut buf)).await {
-                Ok(Ok(v)) => v,
-                _ => return None,
+    let start_time = std::time::Instant::now();
+    match tokio::time::timeout(Duration::from_millis(1000), sock.recv_from(&mut buf)).await {
+        Ok(Ok((v, from))) => {
+            if v >= 2 && u16::from_be_bytes([buf[0], buf[1]]) == id {
+                let qname_end = skip_dns_name(&buf[..v], 12).map(|end| end - 12);
+                if let Some(qlen) = qname_end {
+                    if let Some(ip) = parse_a_answer(&buf[..v], qlen) {
+                        let direct_v4 = std::net::Ipv4Addr::from(ip);
+                        insert_direct_cache(domain.to_string(), direct_v4);
+                        crate::direct::mark_direct_ip(std::net::IpAddr::V4(direct_v4));
+                        tracing::info!(
+                            "[TUN-DNS] 上游直连解析成功: {} → {} (耗时: {}ms, 上游: {})",
+                            domain, direct_v4, start_time.elapsed().as_millis(), from
+                        );
+                        return Some(direct_v4);
+                    }
+                }
+            }
+            // 若第一个包 ID 不匹配或无 A 记录，尝试再读一个包
+            match tokio::time::timeout(Duration::from_millis(500), sock.recv_from(&mut buf)).await {
+                Ok(Ok((v2, from2))) if v2 >= 2 && u16::from_be_bytes([buf[0], buf[1]]) == id => {
+                    let qname_end = skip_dns_name(&buf[..v2], 12).map(|end| end - 12);
+                    if let Some(qlen) = qname_end {
+                        if let Some(ip) = parse_a_answer(&buf[..v2], qlen) {
+                            let direct_v4 = std::net::Ipv4Addr::from(ip);
+                            insert_direct_cache(domain.to_string(), direct_v4);
+                            crate::direct::mark_direct_ip(std::net::IpAddr::V4(direct_v4));
+                            tracing::info!(
+                                "[TUN-DNS] 上游直连解析成功 (备选包): {} → {} (耗时: {}ms, 上游: {})",
+                                domain, direct_v4, start_time.elapsed().as_millis(), from2
+                            );
+                            return Some(direct_v4);
+                        }
+                    }
+                    None
+                }
+                _ => None,
             }
         }
-    };
-    if n < 2 || u16::from_be_bytes([buf[0], buf[1]]) != id {
-        return None;
+        _ => {
+            tracing::warn!(
+                "[TUN-DNS] 上游直连解析超时 ({}ms): {} (主: {}, 备: {})",
+                start_time.elapsed().as_millis(), domain, primary_dns, fallback_ip
+            );
+            None
+        }
     }
-    // qname 长度 (兼容 RFC 1035 指针压缩 0xC0)
-    let qname_end = match skip_dns_name(&buf[..n], 12) {
-        Some(end) => end - 12,
-        None => return None,
-    };
-    if let Some(ip) = parse_a_answer(&buf[..n], qname_end) {
-        let direct_v4 = std::net::Ipv4Addr::from(ip);
-        insert_direct_cache(domain.to_string(), direct_v4);
-        // 标记该 IP 为直连 (TCP 层对裸 IP 判定用, 保证 DNS/TCP 分流一致)
-        crate::direct::mark_direct_ip(std::net::IpAddr::V4(direct_v4));
-        return Some(direct_v4);
-    }
-    None
 }
 
 /// 构造应答: A → 给定 IP; AAAA/其他 → 空 answer (NOERROR); rcode=3 → SERVFAIL
@@ -329,7 +354,6 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, serv
     use crate::direct;
     let Some((domain, qtype, question_len)) = parse_query(query) else { return };
     DNS_QUERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    debug!("[TUN-DNS] 查询 {} (type {}) from {} to {}", domain, qtype, client, server);
 
     let decision = direct::route_decision(Some(&domain), None, Some(53), Some("udp"));
 
@@ -339,59 +363,74 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, serv
             &format!("{domain}:53"),
             "规则拦截 (Block)",
         );
+        tracing::info!("[TUN-DNS] 规则拦截 (Block): {} (qtype={}) from {}", domain, qtype, client);
         let a = if qtype == 1 { Some([0, 0, 0, 0]) } else { None };
         send_dns_reply(&stack, client, server, query, &domain, qtype, a, question_len);
         crate::monitor::record_conn_close(cid, query.len() as u64, 64);
         return;
     }
 
-    let is_direct = qtype == 1 && decision == direct::RuleAction::Direct;
+    if decision == direct::RuleAction::Direct {
+        if qtype == 1 {
+            // A 记录: 直连上游解析真实 IP
+            let (cid, _conn_up, _conn_down) = crate::monitor::record_conn_start(
+                "DNS",
+                &format!("{domain}:53"),
+                "国内直连解析",
+            );
+            tracing::info!("[TUN-DNS] 直连 DNS 查询: {} (A) from {} (目标 DNS: {})", domain, client, server);
+            let stack2 = stack.clone();
+            let query2 = query.to_vec();
+            let qlen = query.len() as u64;
+            tokio::spawn(async move {
+                match resolve_upstream(&domain).await {
+                    Some(ip) => {
+                        send_dns_reply(&stack2, client, server, &query2, &domain, qtype, Some(ip.octets()), question_len);
+                        crate::monitor::record_conn_close(cid, qlen, 64);
+                    }
+                    None => {
+                        let engine = stack2.engine();
+                        if engine.is_healthy() {
+                            if let Some(a) = engine.fake_ip_allocate(&domain).map(|i| i.octets()) {
+                                tracing::warn!("[TUN-DNS] 直连解析超时，自动降级 Fake-IP 代理: {} → 198.18.{}.{}", domain, a[2], a[3]);
+                                send_dns_reply(&stack2, client, server, &query2, &domain, qtype, Some(a), question_len);
+                                crate::monitor::record_conn_close(cid, qlen, 64);
+                            } else {
+                                crate::monitor::record_conn_close(cid, qlen, 0);
+                            }
+                        } else {
+                            tracing::warn!("[TUN-DNS] 直连解析失败且隧道不健康, 返回 SERVFAIL ({}), 避免 fake-IP 白等", domain);
+                            send_dns_reply_rcode(&stack2, client, server, &query2, &domain, qtype, None, question_len, 3);
+                            crate::monitor::record_conn_close(cid, qlen, 0);
+                        }
+                    }
+                }
+            });
+            return;
+        } else {
+            // 非 A 记录 (AAAA/HTTPS/TXT): 直连域名直接返回 NOERROR 空应答，避免客户端反复重试或创建冗余 Fake-IP
+            tracing::info!("[TUN-DNS] 直连 DNS 空应答 (type={}): {} from {}", qtype, domain, client);
+            send_dns_reply(&stack, client, server, query, &domain, qtype, None, question_len);
+            return;
+        }
+    }
+
+    // 默认: 海外/代理域名分配 Fake-IP
+    let a = if qtype == 1 {
+        let allocated = stack.engine().fake_ip_allocate(&domain).map(|ip| ip.octets());
+        if let Some(ref oct) = allocated {
+            tracing::info!("[TUN-DNS] 代理 Fake-IP 分配: {} → 198.18.{}.{} (qtype=1) from {}", domain, oct[2], oct[3], client);
+        }
+        allocated
+    } else {
+        tracing::debug!("[TUN-DNS] 代理非 A 记录查询: {} (type={}) from {} → 返回空应答", domain, qtype, client);
+        None
+    };
     let (cid, _conn_up, _conn_down) = crate::monitor::record_conn_start(
         "DNS",
         &format!("{domain}:53"),
-        if is_direct { "直连解析" } else { "Fake-IP 代理" },
+        "Fake-IP 代理",
     );
-
-    if is_direct {
-        // 直连域名 (内置国内 或 用户自定义规则) → 异步上游真实解析 (返回真实 IP, 直连用)
-        let stack2 = stack.clone();
-        let query2 = query.to_vec();
-        let qlen = query.len() as u64;
-        tokio::spawn(async move {
-            match resolve_upstream(&domain).await {
-                Some(ip) => {
-                    send_dns_reply(&stack2, client, server, &query2, &domain, qtype, Some(ip.octets()), question_len);
-                    crate::monitor::record_conn_close(cid, qlen, 64);
-                }
-                // 上游失败 → 兜底策略: 隧道健康则 fake-IP (服务端远程解析, 合理降级);
-                // 隧道也不健康 (如 fd 耗尽/上游失联) 则 SERVFAIL 快速失败 —— 否则客户端
-                // 连 fake-IP 后走隧道 pool.get() 白等 10s+, 且制造"国内也依赖隧道"的假象。
-                None => {
-                    let engine = stack2.engine();
-                    if engine.is_healthy() {
-                        if let Some(a) = engine.fake_ip_allocate(&domain).map(|i| i.octets()) {
-                            send_dns_reply(&stack2, client, server, &query2, &domain, qtype, Some(a), question_len);
-                            crate::monitor::record_conn_close(cid, qlen, 64);
-                        } else {
-                            crate::monitor::record_conn_close(cid, qlen, 0);
-                        }
-                    } else {
-                        tracing::warn!("[TUN-DNS] 直连解析失败且隧道不健康, 返回 SERVFAIL ({}), 避免 fake-IP 白等", domain);
-                        send_dns_reply_rcode(&stack2, client, server, &query2, &domain, qtype, None, question_len, 3);
-                        crate::monitor::record_conn_close(cid, qlen, 0);
-                    }
-                }
-            }
-        });
-        return;
-    }
-
-    // 默认: fake-IP
-    let a = if qtype == 1 {
-        stack.engine().fake_ip_allocate(&domain).map(|ip| ip.octets())
-    } else {
-        None
-    };
     send_dns_reply(&stack, client, server, query, &domain, qtype, a, question_len);
     crate::monitor::record_conn_close(cid, query.len() as u64, 64);
 }

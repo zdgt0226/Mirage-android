@@ -65,7 +65,7 @@ pub fn set_offset_from_server_time(server_time: u64) {
             old, offset, delta, SIGNIFICANT_DELTA
         );
     } else {
-        tracing::debug!("TIME_SYNC: offset maintained at {}s", offset);
+        tracing::trace!("TIME_SYNC: offset maintained at {}s", offset);
     }
 }
 

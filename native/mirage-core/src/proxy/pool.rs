@@ -404,7 +404,7 @@ impl WarmPool {
                 for mut tunnel in to_drop {
                     tokio::spawn(async move {
                         let _ = tunnel.writer.send_close_notify().await;
-                        debug!("WarmPool Manager: Closed max_age-expired tunnel.");
+                        tracing::trace!("WarmPool Manager: Closed max_age-expired tunnel.");
                     });
                 }
 
@@ -497,7 +497,7 @@ impl WarmPool {
                             q_task.lock().await.push_back(tunnel);
                             n_task.notify_one();
                             in_flight_task.fetch_sub(1, Ordering::Relaxed);
-                            debug!("WarmPool: 预热连接就绪 ({}ms)", elapsed);
+                            tracing::trace!("WarmPool: 预热连接就绪 ({}ms)", elapsed);
                         }
                         Err(e) => {
                             stats_task.write().unwrap_or_else(|e| e.into_inner()).record_failure();
