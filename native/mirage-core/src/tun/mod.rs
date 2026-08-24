@@ -333,9 +333,9 @@ impl TunStack {
     fn handle_rx_packet(self: &Arc<Self>, pkt: Vec<u8>) {
         // UDP: 直接数据报路径 (按 (client,dst) 建流, 回程伪源构包)
         if let Some((src, dst, payload)) = crate::tun::udp::parse_udp_datagram(&pkt) {
-            if dst == SocketAddr::new(IpAddr::V4(self.cfg.dns_addr), 53) {
-                // DNS 分流 (国内→真实 IP 直连 / 国外→fake-IP 代理)
-                crate::tun::dns::handle_dns_query(Arc::clone(self), src, &payload);
+            if dst.port() == 53 {
+                // Anycast DNS 劫持: 拦截发往任何目标 IP 的 53 端口 UDP DNS 查询，伪源原路应答，彻底消除 DNS 泄漏
+                crate::tun::dns::handle_dns_query(Arc::clone(self), src, dst, &payload);
                 return;
             }
             self.udp.feed(Arc::clone(self), src, dst, payload, &pkt);
@@ -489,7 +489,7 @@ impl TunStack {
             return;
         }
 
-        let is_dns = dst == IpAddress::Ipv4(self.cfg.dns_addr) && dst_port == 53;
+        let is_dns = dst_port == 53;
         let buf_size = if is_dns { 4 * 1024 } else { SOCK_BUF };
 
         // 建 catcher (普通数据流 512KB 极速滑动窗口，DNS 流 4KB 精简缓冲)

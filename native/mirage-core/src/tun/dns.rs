@@ -306,18 +306,16 @@ fn parse_query(buf: &[u8]) -> Option<(String, u16, usize)> {
 }
 
 /// 把应答写回 TUN 的公共封装。
-fn send_dns_reply(stack: &TunStack, client: std::net::SocketAddr, query: &[u8],
+fn send_dns_reply(stack: &TunStack, client: std::net::SocketAddr, server: std::net::SocketAddr, query: &[u8],
                   domain: &str, qtype: u16, a: Option<[u8; 4]>, question_len: usize) {
-    send_dns_reply_rcode(stack, client, query, domain, qtype, a, question_len, 0);
+    send_dns_reply_rcode(stack, client, server, query, domain, qtype, a, question_len, 0);
 }
 
 /// 带 RCODE 的应答封装 (rcode=3 用于 SERVFAIL)。
-fn send_dns_reply_rcode(stack: &TunStack, client: std::net::SocketAddr, query: &[u8],
+fn send_dns_reply_rcode(stack: &TunStack, client: std::net::SocketAddr, server: std::net::SocketAddr, query: &[u8],
                         domain: &str, qtype: u16, a: Option<[u8; 4]>, question_len: usize, rcode: u8) {
     if let Some(resp) = build_response(query, domain, qtype, a, question_len, rcode) {
-        let dns_addr = stack.dns_addr_std();
-        let src = std::net::SocketAddr::new(std::net::IpAddr::V4(dns_addr), 53);
-        if let Some(pkt) = crate::tun::udp::build_reply_ip_public(src, client, &resp) {
+        if let Some(pkt) = crate::tun::udp::build_reply_ip_public(server, client, &resp) {
             stack.write_raw(&pkt);
         }
     }
@@ -326,12 +324,12 @@ fn send_dns_reply_rcode(stack: &TunStack, client: std::net::SocketAddr, query: &
 /// DNS 查询计数 (流量监测用)。
 pub static DNS_QUERIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// DNS 查询入口 (mod.rs 调用): 分流 (国内→真实 IP, 国外→fake-IP)。
-pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, query: &[u8]) {
+/// DNS 查询入口 (mod.rs 调用): Anycast 劫持与分流 (国内→真实 IP, 国外→fake-IP)。
+pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, server: std::net::SocketAddr, query: &[u8]) {
     use crate::direct;
     let Some((domain, qtype, question_len)) = parse_query(query) else { return };
     DNS_QUERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    debug!("[TUN-DNS] 查询 {} (type {})", domain, qtype);
+    debug!("[TUN-DNS] 查询 {} (type {}) from {} to {}", domain, qtype, client, server);
 
     let decision = direct::route_decision(Some(&domain), None, Some(53), Some("udp"));
 
@@ -342,7 +340,7 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, quer
             "规则拦截 (Block)",
         );
         let a = if qtype == 1 { Some([0, 0, 0, 0]) } else { None };
-        send_dns_reply(&stack, client, query, &domain, qtype, a, question_len);
+        send_dns_reply(&stack, client, server, query, &domain, qtype, a, question_len);
         crate::monitor::record_conn_close(cid, query.len() as u64, 64);
         return;
     }
@@ -362,7 +360,7 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, quer
         tokio::spawn(async move {
             match resolve_upstream(&domain).await {
                 Some(ip) => {
-                    send_dns_reply(&stack2, client, &query2, &domain, qtype, Some(ip.octets()), question_len);
+                    send_dns_reply(&stack2, client, server, &query2, &domain, qtype, Some(ip.octets()), question_len);
                     crate::monitor::record_conn_close(cid, qlen, 64);
                 }
                 // 上游失败 → 兜底策略: 隧道健康则 fake-IP (服务端远程解析, 合理降级);
@@ -372,14 +370,14 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, quer
                     let engine = stack2.engine();
                     if engine.is_healthy() {
                         if let Some(a) = engine.fake_ip_allocate(&domain).map(|i| i.octets()) {
-                            send_dns_reply(&stack2, client, &query2, &domain, qtype, Some(a), question_len);
+                            send_dns_reply(&stack2, client, server, &query2, &domain, qtype, Some(a), question_len);
                             crate::monitor::record_conn_close(cid, qlen, 64);
                         } else {
                             crate::monitor::record_conn_close(cid, qlen, 0);
                         }
                     } else {
                         tracing::warn!("[TUN-DNS] 直连解析失败且隧道不健康, 返回 SERVFAIL ({}), 避免 fake-IP 白等", domain);
-                        send_dns_reply_rcode(&stack2, client, &query2, &domain, qtype, None, question_len, 3);
+                        send_dns_reply_rcode(&stack2, client, server, &query2, &domain, qtype, None, question_len, 3);
                         crate::monitor::record_conn_close(cid, qlen, 0);
                     }
                 }
@@ -394,7 +392,7 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, quer
     } else {
         None
     };
-    send_dns_reply(&stack, client, query, &domain, qtype, a, question_len);
+    send_dns_reply(&stack, client, server, query, &domain, qtype, a, question_len);
     crate::monitor::record_conn_close(cid, query.len() as u64, 64);
 }
 
