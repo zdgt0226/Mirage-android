@@ -119,7 +119,7 @@ class VpnRepository(private val context: Context) {
 
     fun checkCurrentState() {
         val isRunning = CoreController.isRunning()
-        android.util.Log.i("Mirage", "[vpn] checkCurrentState: isRunning=$isRunning bound=${com.mirage.android.core.CoreController.isBound()}")
+        android.util.Log.d("Mirage", "[vpn] checkCurrentState: isRunning=$isRunning bound=${com.mirage.android.core.CoreController.isBound()}")
         if (isRunning) {
             _vpnState.value = VpnState.Connected(nodeRepo.getSelectedNode())
             startTelemetry()

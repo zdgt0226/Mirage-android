@@ -182,7 +182,7 @@ class HomeFragment : Fragment() {
     }
 
     private fun updateVpnUi(state: VpnState) {
-        android.util.Log.i("Mirage", "[ui] updateVpnUi state=${state}")
+        android.util.Log.d("Mirage", "[ui] updateVpnUi state=${state}")
         val running = state.isRunning
         if (binding.connectSwitch.isChecked != running) {
             binding.connectSwitch.isChecked = running

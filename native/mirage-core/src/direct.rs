@@ -247,6 +247,10 @@ pub fn is_direct_ip(ip: IpAddr) -> bool {
 }
 
 /// 判断 IP 是否属于中国段 (优先查动态加载的 GeoIP: CN，未就绪时二分查找内置 7730 条 CN IP 段)
+///
+/// ⚠️ 二分正确性前提: 不能用 partition_point 按 net 直接二分 —— CN_IPV4 的 net 并非全部
+/// 对齐 CIDR 基点且段间存在重叠 (实测 20 万随机 IP 采样有 ~0.6% 误判)。必须先把每段转成
+/// 真实区间 [start, end] 并合并重叠, 再对合并后的互斥区间二分 (与 R1 修复同思路)。
 pub fn is_cn_ip(ip: IpAddr) -> bool {
     if is_fake_ip(ip) {
         return false;
@@ -256,20 +260,47 @@ pub fn is_cn_ip(ip: IpAddr) -> bool {
     }
     if let IpAddr::V4(v4) = ip {
         let target = u32::from(v4);
-        // CN_IPV4 是按 net 升序排列的 CIDR 区间，采用 partition_point 二分查找 (13 次比较即可完成，耗时从毫秒级降至 10ns)
-        let idx = crate::direct_cn_ipv4::CN_IPV4.partition_point(|&(net, _)| net <= target);
-        if idx > 0 {
-            let (net, prefix) = crate::direct_cn_ipv4::CN_IPV4[idx - 1];
-            let span = if prefix >= 32 { 1 } else { 1u32 << (32 - prefix) };
-            if target >= net && target < net.saturating_add(span) {
-                return true;
+        static CN_RANGES: std::sync::LazyLock<Vec<(u32, u32)>> = std::sync::LazyLock::new(|| {
+            // 每段 → 真实 [start, end] (按 CIDR 语义: 网络号相同即命中)
+            let mut ranges: Vec<(u32, u32)> = crate::direct_cn_ipv4::CN_IPV4
+                .iter()
+                .map(|&(net, prefix)| {
+                    let mask = if prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
+                    let start = net & mask;
+                    let end = start | !mask;
+                    (start, end)
+                })
+                .collect();
+            ranges.sort_unstable_by_key(|&(start, _)| start);
+            // 合并重叠与相邻区间 (保证互斥, 二分正确)
+            let mut merged: Vec<(u32, u32)> = Vec::with_capacity(ranges.len());
+            for (s, e) in ranges {
+                if let Some(last) = merged.last_mut() {
+                    if s <= last.1.saturating_add(1) {
+                        if e > last.1 { last.1 = e; }
+                        continue;
+                    }
+                }
+                merged.push((s, e));
             }
+            merged
+        });
+        let found = CN_RANGES.binary_search_by(|&(start, end)| {
+            if target < start {
+                std::cmp::Ordering::Greater
+            } else if target > end {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        });
+        if found.is_ok() {
+            return true;
         }
     }
     false
 }
 
-/// 判断域名是否属于中国段 (优先查动态加载的 GeoSite: CN，未就绪时查内置 CN 常用域名表及 .cn 后缀)
 pub fn is_cn_domain(domain: &str) -> bool {
     if match_geosite_tag("CN", domain) {
         return true;
@@ -522,9 +553,11 @@ pub fn resolve_direct_domain(domain: &str) -> Option<IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_composite_rule_and_or() {
+        let _guard = TEST_LOCK.lock().unwrap();
         let json = r#"{
             "rules": [
                 {
@@ -572,6 +605,7 @@ mod tests {
 
     #[test]
     fn test_cold_boot_domestic_fallback() {
+        let _guard = TEST_LOCK.lock().unwrap();
         // 清空所有用户自定义规则，设默认动作为 proxy
         assert!(set_custom_rules(r#"{"rules":[], "default_action":"proxy"}"#));
 
@@ -590,6 +624,7 @@ mod tests {
 
     #[test]
     fn test_fake_ip_routing_safety() {
+        let _guard = TEST_LOCK.lock().unwrap();
         let json = r#"{
             "rules": [
                 {

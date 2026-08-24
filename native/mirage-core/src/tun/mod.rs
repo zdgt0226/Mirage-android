@@ -38,7 +38,6 @@ pub mod tcp;
 pub mod udp;
 
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};

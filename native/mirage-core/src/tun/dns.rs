@@ -10,7 +10,6 @@
 
 use smoltcp::iface::SocketHandle;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::debug;
@@ -190,8 +189,7 @@ pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
     };
     // protect: 走真实网络 (否则被 TUN 卷回)
     crate::protect::protect(std::os::unix::io::AsRawFd::as_raw_fd(&sock));
-    static NEXT_ID: AtomicU16 = AtomicU16::new(0x9000);
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let id = fastrand::u16(..);
     let query = build_a_query(domain, id);
     let primary_dns = get_direct_dns();
     let fallback_ip = if primary_dns != std::net::Ipv4Addr::new(223, 5, 5, 5) {
@@ -211,7 +209,8 @@ pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
     let start_time = std::time::Instant::now();
     match tokio::time::timeout(Duration::from_millis(1000), sock.recv_from(&mut buf)).await {
         Ok(Ok((v, from))) => {
-            if v >= 2 && u16::from_be_bytes([buf[0], buf[1]]) == id {
+            // S2 安全加固: 严格校验回包来源与随机化 ID，杜绝局域网恶意注入欺骗
+            if (from == up1 || from == up2) && v >= 2 && u16::from_be_bytes([buf[0], buf[1]]) == id {
                 let qname_end = skip_dns_name(&buf[..v], 12).map(|end| end - 12);
                 if let Some(qlen) = qname_end {
                     if let Some(ip) = parse_a_answer(&buf[..v], qlen) {
@@ -226,9 +225,9 @@ pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
                     }
                 }
             }
-            // 若第一个包 ID 不匹配或无 A 记录，尝试再读一个包
+            // 若第一个包 ID 不匹配或无 A 记录，尝试再读一个备选包
             match tokio::time::timeout(Duration::from_millis(500), sock.recv_from(&mut buf)).await {
-                Ok(Ok((v2, from2))) if v2 >= 2 && u16::from_be_bytes([buf[0], buf[1]]) == id => {
+                Ok(Ok((v2, from2))) if (from2 == up1 || from2 == up2) && v2 >= 2 && u16::from_be_bytes([buf[0], buf[1]]) == id => {
                     let qname_end = skip_dns_name(&buf[..v2], 12).map(|end| end - 12);
                     if let Some(qlen) = qname_end {
                         if let Some(ip) = parse_a_answer(&buf[..v2], qlen) {
