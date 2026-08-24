@@ -688,4 +688,27 @@ mod tests {
         let dec4 = route_decision(Some("twitter.com"), Some(fake_ip), Some(443), Some("tcp"));
         assert_eq!(dec4, RuleAction::Proxy);
     }
+
+    #[test]
+    fn test_is_cn_ip_accuracy_and_boundary_cases() {
+        // 1. 经典国内公共 DNS 与真实国内 IP 必中 (包括旧版线性遍历曾漏判的 114.114.114.114)
+        assert!(is_cn_ip("114.114.114.114".parse().unwrap()), "114.114.114.114 必须命中 CN IP");
+        assert!(is_cn_ip("223.5.5.5".parse().unwrap()), "223.5.5.5 必须命中 CN IP");
+        assert!(is_cn_ip("180.76.76.76".parse().unwrap()), "180.76.76.76 必须命中 CN IP");
+        assert!(is_cn_ip("110.242.74.102".parse().unwrap()), "Baidu IP 必须命中 CN IP");
+
+        // 2. 境外公共 IP 绝不命中
+        assert!(!is_cn_ip("8.8.8.8".parse().unwrap()), "Google 8.8.8.8 绝不能误判为 CN");
+        assert!(!is_cn_ip("1.1.1.1".parse().unwrap()), "Cloudflare 1.1.1.1 绝不能误判为 CN");
+        assert!(!is_cn_ip("142.250.190.46".parse().unwrap()), "Google Web IP 绝不能误判为 CN");
+
+        // 3. Fake-IP (198.18.0.0/15) 必须在入口短路拦截为 false，防止代理流量倒灌
+        assert!(!is_cn_ip("198.18.0.1".parse().unwrap()));
+        assert!(!is_cn_ip("198.18.254.254".parse().unwrap()));
+        assert!(!is_cn_ip("198.19.255.255".parse().unwrap()));
+
+        // 4. 边界地址
+        assert!(!is_cn_ip("0.0.0.0".parse().unwrap()));
+        assert!(!is_cn_ip("255.255.255.255".parse().unwrap()));
+    }
 }
