@@ -83,6 +83,9 @@ impl ConditionKind {
             }
             ConditionKind::GeoIp(code) => {
                 if let Some(ip_addr) = ip {
+                    if is_fake_ip(ip_addr) {
+                        return false;
+                    }
                     match_geoip_code(code, ip_addr)
                 } else {
                     false
@@ -123,6 +126,9 @@ impl ConditionKind {
             }
             ConditionKind::IpCidr(_, cidr) => {
                 if let (Some(IpAddr::V4(v4)), Some(c)) = (ip, cidr) {
+                    if is_fake_ip(IpAddr::V4(v4)) {
+                        return false;
+                    }
                     c.contains(v4)
                 } else {
                     false
@@ -218,16 +224,33 @@ pub fn is_block_quic() -> bool {
     BLOCK_QUIC.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// 判断是否为 Fake-IP 虚拟保留地址 (198.18.0.0/15, 即 198.18.0.0 ~ 198.19.255.255)
+#[inline]
+pub fn is_fake_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => (u32::from(v4) & 0xFFFE0000) == 0xC6120000,
+        _ => false,
+    }
+}
+
 pub fn mark_direct_ip(ip: IpAddr) {
-    direct_ips().lock().unwrap_or_else(|e| e.into_inner()).insert(ip);
+    if !is_fake_ip(ip) {
+        direct_ips().lock().unwrap_or_else(|e| e.into_inner()).insert(ip);
+    }
 }
 
 pub fn is_direct_ip(ip: IpAddr) -> bool {
+    if is_fake_ip(ip) {
+        return false;
+    }
     direct_ips().lock().unwrap_or_else(|e| e.into_inner()).contains(&ip)
 }
 
 /// 判断 IP 是否属于中国段 (优先查动态加载的 GeoIP: CN，未就绪时二分查内置 CN IP 段)
 pub fn is_cn_ip(ip: IpAddr) -> bool {
+    if is_fake_ip(ip) {
+        return false;
+    }
     if match_geoip_code("CN", ip) {
         return true;
     }
@@ -564,5 +587,71 @@ mod tests {
 
         // 3. 境外域名 (如 google.com) 无规则时回退至 default_action (Proxy)
         assert_eq!(route_decision(Some("google.com"), None, Some(443), Some("tcp")), RuleAction::Proxy);
+    }
+
+    #[test]
+    fn test_fake_ip_routing_safety() {
+        let json = r#"{
+            "rules": [
+                {
+                    "id": "r_ads",
+                    "name": "Ads Block",
+                    "enabled": true,
+                    "logic": "OR",
+                    "conditions": [{ "type": "geosite", "pattern": "category-ads-all" }],
+                    "action": "block"
+                },
+                {
+                    "id": "r_priv",
+                    "name": "Private Direct",
+                    "enabled": true,
+                    "logic": "OR",
+                    "conditions": [
+                        { "type": "ip_cidr", "pattern": "192.168.0.0/16" },
+                        { "type": "geoip", "pattern": "private" }
+                    ],
+                    "action": "direct"
+                },
+                {
+                    "id": "r_cn",
+                    "name": "CN Direct",
+                    "enabled": true,
+                    "logic": "OR",
+                    "conditions": [{ "type": "geosite", "pattern": "cn" }],
+                    "action": "direct"
+                },
+                {
+                    "id": "r_google",
+                    "name": "Google Proxy",
+                    "enabled": true,
+                    "logic": "OR",
+                    "conditions": [{ "type": "domain_suffix", "pattern": "google.com" }],
+                    "action": "proxy"
+                }
+            ],
+            "default_action": "proxy"
+        }"#;
+
+        assert!(set_custom_rules(json));
+
+        let fake_ip: IpAddr = "198.18.0.3".parse().unwrap();
+        assert!(is_fake_ip(fake_ip));
+
+        // 1. Google connection through Fake-IP MUST NOT match geoip:private -> must be Proxy!
+        let dec1 = route_decision(Some("www.google.com"), Some(fake_ip), Some(443), Some("tcp"));
+        assert_eq!(dec1, RuleAction::Proxy, "Google over Fake-IP must be Proxy, not hijacked by geoip:private");
+
+        // 2. Real private LAN IP (192.168.1.1) MUST match geoip:private / LAN rule -> Direct
+        let lan_ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let dec2 = route_decision(None, Some(lan_ip), Some(80), Some("tcp"));
+        assert_eq!(dec2, RuleAction::Direct);
+
+        // 3. Domestic Baidu connection through Fake-IP MUST match CN rule / fallback -> Direct
+        let dec3 = route_decision(Some("www.baidu.com"), Some(fake_ip), Some(443), Some("tcp"));
+        assert_eq!(dec3, RuleAction::Direct);
+
+        // 4. Foreign domain without explicit rule over Fake-IP MUST fall back to default_action (Proxy)
+        let dec4 = route_decision(Some("twitter.com"), Some(fake_ip), Some(443), Some("tcp"));
+        assert_eq!(dec4, RuleAction::Proxy);
     }
 }

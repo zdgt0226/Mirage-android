@@ -76,6 +76,9 @@ impl GeoStore {
     }
 
     pub fn match_geoip(&self, code: &str, ip: IpAddr) -> bool {
+        if crate::direct::is_fake_ip(ip) {
+            return false;
+        }
         let code_upper = code.trim().to_ascii_uppercase();
         match ip {
             IpAddr::V4(v4) => {
