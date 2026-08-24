@@ -104,7 +104,8 @@ class CoreService : VpnService() {
             return START_NOT_STICKY
         }
         if (intent == null) {
-            // 系统在内存不足/停止后若尝试重启服务，无启动参数时不自启，直接停止
+            // 系统在内存不足/停止后若尝试重启服务，无启动参数时不自启，通知系统终止
+            stopSelf(startId)
             return START_NOT_STICKY
         }
         // startForegroundService 启动: 5 秒内必须 startForeground, 否则系统杀服务/崩溃
@@ -539,11 +540,13 @@ class CoreService : VpnService() {
     override fun onDestroy() {
         clearActive()
         log("[core] onDestroy()")
-        cancelAllJobs()
-        flushLogsAndStats()
-        runCatching { MirageNative.stop() }
-        runCatching { tunFd?.close() }
-        tunFd = null
+        synchronized(stateLock) {
+            cancelAllJobs()
+            flushLogsAndStats()
+            runCatching { MirageNative.stop() }
+            runCatching { tunFd?.close() }
+            tunFd = null
+        }
         scope.cancel()
         runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {

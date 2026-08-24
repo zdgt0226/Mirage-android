@@ -461,7 +461,12 @@ impl WarmPool {
                     continue;
                 }
 
-                in_flight_clone.fetch_add(1, Ordering::Relaxed);
+                // 失败自适应退避: 若近期发生网络中断或握手连续失败，主循环主动退避，防止高频空转耗尽 FD 与 CPU
+                let failures = stats_builder.read().unwrap_or_else(|e| e.into_inner()).consecutive_failures;
+                if failures > 0 {
+                    let backoff = Duration::from_millis((failures as u64 * 300).min(3000));
+                    tokio::time::sleep(backoff).await;
+                }
 
                 // SYN Staggering: 阶梯延迟防止暖池在平稳期一次性喷 SYN。
                 // 若池子处于饥饿状态 (current_idle == 0)，则缩短补货延迟，快速填满基础容量。
@@ -479,6 +484,8 @@ impl WarmPool {
                 let in_flight_task = in_flight_clone.clone();
                 let stats_task = stats_builder.clone();
                 let bs_task = brutal_state_builder.clone();
+
+                in_flight_clone.fetch_add(1, Ordering::Relaxed);
 
                 tokio::spawn(async move {
                     let start = Instant::now();

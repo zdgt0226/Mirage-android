@@ -70,6 +70,23 @@ pub fn clear_direct_cache() {
     tracing::info!("[TUN-DNS] 直连 DNS 缓存已清空");
 }
 
+const DIRECT_CACHE_MAX: usize = 1024;
+
+/// 安全写入直连 DNS 缓存 (带容量上限与过期淘汰, 防 OOM)
+fn insert_direct_cache(domain: String, ip: std::net::Ipv4Addr) {
+    let mut map = direct_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if map.len() >= DIRECT_CACHE_MAX {
+        let now = Instant::now();
+        map.retain(|_, (_, at)| now.duration_since(*at) < CACHE_TTL);
+        if map.len() >= DIRECT_CACHE_MAX {
+            if let Some(k) = map.keys().next().cloned() {
+                map.remove(&k);
+            }
+        }
+    }
+    map.insert(domain, (ip, Instant::now()));
+}
+
 /// 读直连 DNS 缓存 (同步, 兜底用)。
 pub fn direct_dns_lookup(domain: &str) -> Option<std::net::IpAddr> {
     let map = direct_cache().lock().unwrap_or_else(|e| e.into_inner());
@@ -200,20 +217,14 @@ pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
     if n < 2 || u16::from_be_bytes([buf[0], buf[1]]) != id {
         return None;
     }
-    // qname 长度
-    let qname_end = {
-        let mut p = 12usize;
-        while p < n && buf[p] != 0 {
-            p += 1 + buf[p] as usize;
-        }
-        p - 12 + 1
+    // qname 长度 (兼容 RFC 1035 指针压缩 0xC0)
+    let qname_end = match skip_dns_name(&buf[..n], 12) {
+        Some(end) => end - 12,
+        None => return None,
     };
     if let Some(ip) = parse_a_answer(&buf[..n], qname_end) {
         let direct_v4 = std::net::Ipv4Addr::from(ip);
-        direct_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(domain.to_string(), (direct_v4, Instant::now()));
+        insert_direct_cache(domain.to_string(), direct_v4);
         // 标记该 IP 为直连 (TCP 层对裸 IP 判定用, 保证 DNS/TCP 分流一致)
         crate::direct::mark_direct_ip(std::net::IpAddr::V4(direct_v4));
         return Some(direct_v4);

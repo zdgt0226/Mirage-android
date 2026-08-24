@@ -164,6 +164,14 @@ fn parse_domain_msg(buf: &[u8]) -> Option<SiteDomain> {
                 let (_, next_pos) = read_len_delim(buf, pos)?;
                 pos = next_pos;
             }
+            (_, 1) => {
+                if pos + 8 > buf.len() { break; }
+                pos += 8;
+            }
+            (_, 5) => {
+                if pos + 4 > buf.len() { break; }
+                pos += 4;
+            }
             _ => break,
         }
     }
@@ -218,6 +226,14 @@ fn parse_geosite_entry(buf: &[u8]) -> Option<(String, Vec<SiteDomain>)> {
                 let (_, next_pos) = read_len_delim(buf, pos)?;
                 pos = next_pos;
             }
+            (_, 1) => {
+                if pos + 8 > buf.len() { break; }
+                pos += 8;
+            }
+            (_, 5) => {
+                if pos + 4 > buf.len() { break; }
+                pos += 4;
+            }
             _ => break,
         }
     }
@@ -250,6 +266,12 @@ pub fn parse_geosite_file(data: &[u8]) -> HashMap<String, Vec<SiteDomain>> {
         } else if wire_type == 2 {
             let Some((_, next_pos)) = read_len_delim(data, pos) else { break };
             pos = next_pos;
+        } else if wire_type == 1 {
+            if pos + 8 > data.len() { break; }
+            pos += 8;
+        } else if wire_type == 5 {
+            if pos + 4 > data.len() { break; }
+            pos += 4;
         } else {
             break;
         }
@@ -288,6 +310,14 @@ fn parse_cidr_msg(buf: &[u8]) -> Option<Ipv4Cidr> {
             (_, 2) => {
                 let (_, next_pos) = read_len_delim(buf, pos)?;
                 pos = next_pos;
+            }
+            (_, 1) => {
+                if pos + 8 > buf.len() { break; }
+                pos += 8;
+            }
+            (_, 5) => {
+                if pos + 4 > buf.len() { break; }
+                pos += 4;
             }
             _ => break,
         }
@@ -333,6 +363,14 @@ fn parse_geoip_entry(buf: &[u8]) -> Option<(String, Vec<Ipv4Cidr>)> {
                 let (_, next_pos) = read_len_delim(buf, pos)?;
                 pos = next_pos;
             }
+            (_, 1) => {
+                if pos + 8 > buf.len() { break; }
+                pos += 8;
+            }
+            (_, 5) => {
+                if pos + 4 > buf.len() { break; }
+                pos += 4;
+            }
             _ => break,
         }
     }
@@ -365,6 +403,12 @@ pub fn parse_geoip_file(data: &[u8]) -> HashMap<String, Vec<Ipv4Cidr>> {
         } else if wire_type == 2 {
             let Some((_, next_pos)) = read_len_delim(data, pos) else { break };
             pos = next_pos;
+        } else if wire_type == 1 {
+            if pos + 8 > data.len() { break; }
+            pos += 8;
+        } else if wire_type == 5 {
+            if pos + 4 > data.len() { break; }
+            pos += 4;
         } else {
             break;
         }

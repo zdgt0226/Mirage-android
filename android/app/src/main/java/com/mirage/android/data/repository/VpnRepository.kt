@@ -11,6 +11,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
 /**
  * VPN 核心连接状态与遥测数据仓库。
@@ -62,9 +63,7 @@ class VpnRepository(private val context: Context) {
 
         override fun onLog(line: String?) {
             if (!line.isNullOrBlank()) {
-                val current = _logs.value.toMutableList()
-                current.add(line)
-                _logs.value = current.takeLast(150)
+                _logs.update { it.plus(line).takeLast(150) }
             }
         }
 
@@ -258,7 +257,6 @@ class VpnRepository(private val context: Context) {
         stopTelemetry()
         CoreController.unregisterCallback(callback)
         CoreController.unbind(context)
-        scope.cancel()
     }
 
     companion object {

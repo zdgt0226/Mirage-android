@@ -18,6 +18,18 @@ object CoreController {
     private var bound = false
     private var ctx: Context? = null
     private val callbacks = CopyOnWriteArraySet<ICoreCallback>()
+    private var currentBinder: IBinder? = null
+
+    private val deathRecipient: IBinder.DeathRecipient = object : IBinder.DeathRecipient {
+        override fun binderDied() {
+            currentBinder?.unlinkToDeath(this, 0)
+            currentBinder = null
+            service = null
+            bound = false
+            running.value = false
+            callbacks.forEach { cb -> runCatching { cb.onStateChanged(false) } }
+        }
+    }
 
     /** 内核运行状态 (UI 轮询/回调更新)。 */
     val running = MutableStateFlow(false)
@@ -27,6 +39,9 @@ object CoreController {
             val s = ICoreService.Stub.asInterface(binder)
             service = s
             bound = true
+            currentBinder = binder
+            runCatching { binder?.linkToDeath(deathRecipient, 0) }
+
             // 重新注册所有待生效回调
             callbacks.forEach { cb ->
                 runCatching { s.registerCallback(cb) }
@@ -40,6 +55,8 @@ object CoreController {
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
+            runCatching { currentBinder?.unlinkToDeath(deathRecipient, 0) }
+            currentBinder = null
             service = null
             bound = false
             running.value = false

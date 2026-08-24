@@ -243,9 +243,8 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_start(
     let class_for_protect = class_ref.clone();
     mirage_core::protect::set_protect_callback(Box::new(move |fd| {
         use jni::objects::JValue;
-        // 从 tokio worker 线程 attach JVM 并同步调用 Java 侧 protect。
-        // (attach_current_thread 每次 attach/detach, 建连频率低, 开销可接受)
-        let r = vm_for_protect.attach_current_thread().and_then(|mut env| {
+        // 从 tokio worker 线程 attach JVM (Daemon 模式, 避免反复分配/销毁 Java Thread 对象)
+        let r = vm_for_protect.attach_current_thread_as_daemon().and_then(|mut env| {
             // jni 0.21: call_static_method(class, name, sig, args)
             env.call_static_method(
                 &class_for_protect,

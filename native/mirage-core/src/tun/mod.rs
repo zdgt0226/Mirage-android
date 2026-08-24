@@ -101,8 +101,8 @@ pub struct TunStack {
     /// 泵的退出信号 (stop 时 notify)。
     stop_notify: Arc<Notify>,
     cfg: TunConfig,
-    /// 原始 TUN fd (stop 时关闭; 读线程持 dup 副本)。
-    fd: RawFd,
+    /// 原始 TUN fd (stop 时原子关闭; 读线程持 dup 副本)。
+    fd: std::sync::atomic::AtomicI32,
     /// UDP 直接数据报引擎 (按 (client,dst) 建流)。
     udp: Arc<crate::tun::udp::UdpEngine>,
 }
@@ -173,14 +173,18 @@ impl TunStack {
             stop_notify: Arc::new(Notify::new()),
             engine: Arc::new(arc_swap::ArcSwap::from(Arc::clone(&engine))),
             cfg,
-            fd,
+            fd: std::sync::atomic::AtomicI32::new(fd),
         });
 
         // 读线程: TUN fd → 内核 poll 阻塞唤醒(0 CPU自旋/0排队延迟) → 突发批读 → 泵
         let reader_stack = stack.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
         std::thread::spawn(move || {
-            let rfd = unsafe { libc::dup(reader_stack.fd) };
+            let cur_fd = reader_stack.fd.load(Ordering::SeqCst);
+            if cur_fd < 0 {
+                return;
+            }
+            let rfd = unsafe { libc::dup(cur_fd) };
             if rfd < 0 {
                 return;
             }
@@ -250,7 +254,10 @@ impl TunStack {
         if self.stopped.swap(true, Ordering::SeqCst) {
             return;
         }
-        unsafe { libc::close(self.fd) };
+        let raw_fd = self.fd.swap(-1, Ordering::SeqCst);
+        if raw_fd >= 0 {
+            unsafe { libc::close(raw_fd) };
+        }
         self.wake.notify_waiters();
         self.stop_notify.notify_waiters();
     }
@@ -357,17 +364,19 @@ impl TunStack {
 
     /// 直接把一个 IP 包写回 TUN fd (UDP 回程/DNS 应答用)。无锁内核直写。
     pub fn write_raw(&self, pkt: &[u8]) {
-        if self.stopped.load(Ordering::SeqCst) {
+        let fd = self.fd.load(Ordering::SeqCst);
+        if fd < 0 || self.stopped.load(Ordering::SeqCst) {
             return;
         }
         unsafe {
-            libc::write(self.fd, pkt.as_ptr() as *const libc::c_void, pkt.len());
+            libc::write(fd, pkt.as_ptr() as *const libc::c_void, pkt.len());
         }
     }
 
     /// 把 smoltcp 产出的出站包全部写回 TUN fd。**锁外无锁内核直写**。
     fn drain_tx(&self) {
-        if self.stopped.load(Ordering::SeqCst) {
+        let fd = self.fd.load(Ordering::SeqCst);
+        if fd < 0 || self.stopped.load(Ordering::SeqCst) {
             return;
         }
         let mut out = Vec::new();
@@ -382,7 +391,7 @@ impl TunStack {
         }
         for p in &out {
             unsafe {
-                libc::write(self.fd, p.as_ptr() as *const libc::c_void, p.len());
+                libc::write(fd, p.as_ptr() as *const libc::c_void, p.len());
             }
         }
     }

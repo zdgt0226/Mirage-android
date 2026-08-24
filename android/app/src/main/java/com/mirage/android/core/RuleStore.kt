@@ -16,32 +16,37 @@ object RuleStore {
     private const val KEY_RULES = "rules_json"
     private const val KEY_DEFAULT = "default_action"  // "proxy" | "direct" | "block"
 
+    fun createDefaultRules(): List<Rule> {
+        return listOf(
+            Rule(
+                id = java.util.UUID.randomUUID().toString(),
+                name = "国内域名直连 (GeoSite)",
+                enabled = true,
+                action = "direct",
+                conditions = listOf(RuleCondition("geosite", "cn"))
+            ),
+            Rule(
+                id = java.util.UUID.randomUUID().toString(),
+                name = "国内 IP 直连 (GeoIP)",
+                enabled = true,
+                action = "direct",
+                conditions = listOf(RuleCondition("geoip", "cn"))
+            ),
+            Rule(
+                id = java.util.UUID.randomUUID().toString(),
+                name = "广告拦截 (GeoSite Ads)",
+                enabled = true,
+                action = "block",
+                conditions = listOf(RuleCondition("geosite", "category-ads-all"))
+            )
+        )
+    }
+
+    @Synchronized
     fun getRules(ctx: Context): List<Rule> {
         val sp = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (!sp.contains(KEY_RULES)) {
-            val defaults = listOf(
-                Rule(
-                    id = java.util.UUID.randomUUID().toString(),
-                    name = "国内域名直连 (GeoSite)",
-                    enabled = true,
-                    action = "direct",
-                    conditions = listOf(RuleCondition("geosite", "cn"))
-                ),
-                Rule(
-                    id = java.util.UUID.randomUUID().toString(),
-                    name = "国内 IP 直连 (GeoIP)",
-                    enabled = true,
-                    action = "direct",
-                    conditions = listOf(RuleCondition("geoip", "cn"))
-                ),
-                Rule(
-                    id = java.util.UUID.randomUUID().toString(),
-                    name = "广告拦截 (GeoSite Ads)",
-                    enabled = true,
-                    action = "block",
-                    conditions = listOf(RuleCondition("geosite", "category-ads-all"))
-                )
-            )
+            val defaults = createDefaultRules()
             saveRules(ctx, defaults)
             return defaults
         }
@@ -86,15 +91,20 @@ object RuleStore {
                     hits = hits,
                 )
             }
-        }.getOrDefault(emptyList())
+        }.getOrElse {
+            LogStore.append("[store] 规则 JSON 解析异常, 启用容灾默认规则: ${it.message}")
+            createDefaultRules()
+        }
     }
 
+    @Synchronized
     fun addRule(ctx: Context, rule: Rule) {
         val list = getRules(ctx).toMutableList()
         list.add(rule)
         saveRules(ctx, list)
     }
 
+    @Synchronized
     fun updateRule(ctx: Context, index: Int, rule: Rule) {
         val list = getRules(ctx).toMutableList()
         if (index in list.indices) {
@@ -104,6 +114,7 @@ object RuleStore {
     }
 
     /** 切换某条规则的启用状态 */
+    @Synchronized
     fun toggleRuleEnabled(ctx: Context, index: Int): Boolean {
         val list = getRules(ctx).toMutableList()
         if (index in list.indices) {
@@ -117,6 +128,7 @@ object RuleStore {
     }
 
     /** 拖动排序规则 (from -> to) */
+    @Synchronized
     fun moveRule(ctx: Context, from: Int, to: Int) {
         val list = getRules(ctx).toMutableList()
         if (from in list.indices && to in list.indices) {
@@ -126,6 +138,7 @@ object RuleStore {
         }
     }
 
+    @Synchronized
     fun removeRule(ctx: Context, index: Int) {
         val list = getRules(ctx).toMutableList()
         if (index in list.indices) {
@@ -134,6 +147,7 @@ object RuleStore {
         }
     }
 
+    @Synchronized
     fun saveRules(ctx: Context, list: List<Rule>) {
         val arr = JSONArray()
         for (r in list) {
