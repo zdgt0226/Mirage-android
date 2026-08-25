@@ -235,14 +235,29 @@ impl OutboundNode {
                 anyhow::bail!("outbound `{tag}` 是 block, 拒绝连接 {target}")
             }
             OutboundNode::Mirage { pool, .. } => {
-                let mut tunnel = pool.get().await?;
-                // 目标头: [2B len][host:port]; 服务端据此远程解析并连接 (Domain 保留域名交服务端
-                // 解析, 抗污染)。与 handler.rs 一致。
                 let hp = target.host_port();
                 let tb = hp.as_bytes();
                 if tb.len() > u16::MAX as usize {
                     anyhow::bail!("target 过长: {} 字节", tb.len());
                 }
+                // Model X 精简 (transport=quic): 共享连接开一条流, 写 [token(32B)][2B len][host:port],
+                // 之后裸转发 (QUIC 自加密, 无内层 fake-TLS/AEAD)。
+                #[cfg(feature = "quic")]
+                if pool.is_quic() {
+                    use tokio::io::AsyncWriteExt;
+                    let mux = pool.quic_mux().ok_or_else(|| anyhow::anyhow!("quic mux 未初始化"))?;
+                    let (send, recv) = mux.open_stream().await?;
+                    let token = crate::crypto::hello_auth::make_session_token(pool.password());
+                    let mut hdr = Vec::with_capacity(32 + 2 + tb.len());
+                    hdr.extend_from_slice(&token);
+                    hdr.extend_from_slice(&(tb.len() as u16).to_be_bytes());
+                    hdr.extend_from_slice(tb);
+                    let mut stream = crate::proxy::quic::QuicBiStream::new(send, recv);
+                    stream.write_all(&hdr).await?;
+                    return Ok(OutStream::Quic(stream));
+                }
+                // TCP (Model Y): fake-TLS 暖池隧道。目标头 [2B len][host:port], 服务端远程解析 (抗污染)。
+                let mut tunnel = pool.get().await?;
                 let mut hdr = Vec::with_capacity(2 + tb.len());
                 hdr.extend_from_slice(&(tb.len() as u16).to_be_bytes());
                 hdr.extend_from_slice(tb);
@@ -353,6 +368,9 @@ pub enum OutStream {
     Mirage(crate::proxy::mirage_stream::MirageStream),
     Wg(crate::proxy::wg::socket::WgTcpStream),
     Ss(crate::proxy::ss_stream::SsStream),
+    /// Model X 精简 QUIC 裸流 (无内层 AEAD, QUIC 自加密)。
+    #[cfg(feature = "quic")]
+    Quic(crate::proxy::quic::QuicBiStream),
 }
 
 impl tokio::io::AsyncRead for OutStream {
@@ -366,6 +384,8 @@ impl tokio::io::AsyncRead for OutStream {
             OutStream::Mirage(s) => std::pin::Pin::new(s).poll_read(cx, buf),
             OutStream::Wg(s) => std::pin::Pin::new(s).poll_read(cx, buf),
             OutStream::Ss(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            #[cfg(feature = "quic")]
+            OutStream::Quic(s) => std::pin::Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -381,6 +401,8 @@ impl tokio::io::AsyncWrite for OutStream {
             OutStream::Mirage(s) => std::pin::Pin::new(s).poll_write(cx, buf),
             OutStream::Wg(s) => std::pin::Pin::new(s).poll_write(cx, buf),
             OutStream::Ss(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            #[cfg(feature = "quic")]
+            OutStream::Quic(s) => std::pin::Pin::new(s).poll_write(cx, buf),
         }
     }
     fn poll_flush(
@@ -392,6 +414,8 @@ impl tokio::io::AsyncWrite for OutStream {
             OutStream::Mirage(s) => std::pin::Pin::new(s).poll_flush(cx),
             OutStream::Wg(s) => std::pin::Pin::new(s).poll_flush(cx),
             OutStream::Ss(s) => std::pin::Pin::new(s).poll_flush(cx),
+            #[cfg(feature = "quic")]
+            OutStream::Quic(s) => std::pin::Pin::new(s).poll_flush(cx),
         }
     }
     fn poll_shutdown(
@@ -403,6 +427,8 @@ impl tokio::io::AsyncWrite for OutStream {
             OutStream::Mirage(s) => std::pin::Pin::new(s).poll_shutdown(cx),
             OutStream::Wg(s) => std::pin::Pin::new(s).poll_shutdown(cx),
             OutStream::Ss(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            #[cfg(feature = "quic")]
+            OutStream::Quic(s) => std::pin::Pin::new(s).poll_shutdown(cx),
         }
     }
 }
@@ -417,7 +443,8 @@ impl OutboundManager {
     fn build_mirage(oc: &OutboundConfig, underlying: Option<Arc<OutboundNode>>) -> Arc<OutboundNode> {
         let OutboundConfig::Mirage {
             tag, server, server_port, password, camouflage_host, pool_size,
-            brutal_rate_mbps, brutal_base_rtt_ms, pfs, ..
+            brutal_rate_mbps, brutal_base_rtt_ms, pfs, transport, quic_window_mb, quic_erasure_cc,
+            quic_sni, quic_low_src_port, quic_pre_packet, quic_obfs, ..
         } = oc else { unreachable!("build_mirage 只接受 Mirage 配置") };
         let pool_cfg = Arc::new(PoolConfig {
             server_host: server.clone(),
@@ -427,6 +454,14 @@ impl OutboundManager {
             pool_size: *pool_size,
             underlying,
             pfs: *pfs,
+            transport: *transport,
+            quic_window_mb: quic_window_mb.unwrap_or(2),
+            quic_erasure_cc: quic_erasure_cc.unwrap_or(true),
+            // SNI 默认 = camouflage_host (良性域名, 与 TCP fake-TLS 一致)。
+            quic_sni: quic_sni.clone().unwrap_or_else(|| camouflage_host.clone()),
+            quic_low_src_port: quic_low_src_port.unwrap_or(false),
+            quic_pre_packet: quic_pre_packet.unwrap_or(false),
+            quic_obfs: quic_obfs.clone(),
         });
         let bytes_per_sec = brutal_rate_mbps.map(|m| m * 125_000);
         let brutal_state = Arc::new(crate::proxy::pool::BrutalState {

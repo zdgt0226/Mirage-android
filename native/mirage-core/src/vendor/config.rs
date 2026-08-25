@@ -189,6 +189,16 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 /// 解析 —— 校验器在有 transparent 开启 dns_hijack 时会把它登记为已知 tag。
 pub const DNS_HIJACK_INBOUND_TAG: &str = "dns-hijack";
 
+/// Mirage 隧道的底层传输。默认 `tcp` (fake-TLS-over-TCP, 主链路)。`quic` 为实验传输
+/// (P0, 需 `--features quic` 编译; 见 docs/quic-transport-design.md)。两端须同设。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Transport {
+    #[default]
+    Tcp,
+    Quic,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InboundConfig {
@@ -240,6 +250,22 @@ pub enum InboundConfig {
         /// **两端必须同开** (改了会话密钥派生, 一端开一端没开会解密失败)。默认关 (向后兼容)。
         #[serde(default)]
         pfs: bool,
+        /// 底层传输 (默认 tcp)。`quic` 为实验传输, 需 `--features quic` 编译, 两端须同设。
+        #[serde(default)]
+        transport: Transport,
+        /// QUIC 流控窗口 (MB, 默认 2)。⚠️ **重排序线路 (部分 CN2 优化线路) 要小窗口** —— 大窗口在途包
+        /// 多、并发乱序 gap 超 quinn MAX_CHUNKS(1024) 会被关连接 (真机: 16MB×重排序→~1MB 就断; 2MB 下完)。
+        /// 干净长肥路径可调大 (16-64) 榨单流吞吐。仅 transport=quic 生效。`MIRAGE_QUIC_WND` 环境变量可覆盖。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quic_window_mb: Option<u64>,
+        /// QUIC erasure-aware 拥塞控制 (默认开)。丢包路径上无视信道 erasure、补偿窗口 (实测 27% 丢包
+        /// 75x)。仅 transport=quic 生效。`MIRAGE_QUIC_CC=off` 环境变量可覆盖。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quic_erasure_cc: Option<bool>,
+        /// QUIC Salamander 混淆密码 (藏成随机 UDP, 抗 GFW QUIC/SNI 封锁)。**须与客户端出站的 quic_obfs
+        /// 一致**。默认关。仅 transport=quic。见 docs §7。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quic_obfs: Option<String>,
     },
     Mixed {
         tag: String,
@@ -298,6 +324,32 @@ pub enum OutboundConfig {
         /// 会话密钥派生, 失配会解密失败)。默认关 (向后兼容)。
         #[serde(default)]
         pfs: bool,
+        /// 底层传输 (默认 tcp)。`quic` 为实验传输, 需 `--features quic` 编译, 两端须同设。
+        #[serde(default)]
+        transport: Transport,
+        /// QUIC 流控窗口 (MB, 默认 2)。⚠️ 重排序线路要小 (2); 大窗口在途多、乱序 gap 超 quinn
+        /// MAX_CHUNKS 会断连。干净长肥可调大 (16-64)。仅 transport=quic。`MIRAGE_QUIC_WND` 可覆盖。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quic_window_mb: Option<u64>,
+        /// QUIC erasure-aware CC (默认开)。仅 transport=quic。`MIRAGE_QUIC_CC=off` 可覆盖。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quic_erasure_cc: Option<bool>,
+        /// QUIC ClientHello 的 SNI (良性域名)。GFW 解密 QUIC Initial 读 SNI 按黑名单封
+        /// (USENIX Security 2025); 用良性 SNI 规避。默认 = camouflage_host。仅 transport=quic。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quic_sni: Option<String>,
+        /// 尝试把源端口绑到 ≤ 目标端口 (GFW "仅 src>dst 才查 QUIC" 规则的规避, best-effort)。
+        /// dst≤1024 需特权口, 无 root 回落临时口。默认 false (良性 SNI 已是主防御)。仅 transport=quic。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quic_low_src_port: Option<bool>,
+        /// QUIC 握手前先发随机 UDP 包, desync GFW 的 UDP 四元组追踪 (USENIX Security 2025 规避法)。
+        /// 默认 false。仅 transport=quic。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quic_pre_packet: Option<bool>,
+        /// QUIC Salamander 混淆密码 (设了则把 QUIC 藏成随机 UDP, 抗 GFW 的 QUIC/SNI 封锁)。**两端须一致**
+        /// (客户端出站 + 服务端入站同填)。默认关。仅 transport=quic。见 docs §7。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quic_obfs: Option<String>,
     },
     /// Shadowsocks 出站: 选中流量经 SS 加密发往 SS 服务器。配 `underlying` 即 SS-over-X
     /// (如 underlying=mirage → SS 连接骑 Mirage 隧道 = 类 shadow-tls+ss 嵌套)。
@@ -402,6 +454,33 @@ pub struct RoutingConfig {
     #[serde(default)]
     pub geo_alias: std::collections::HashMap<String, String>,
     pub rules: Vec<RuleConfig>,
+    /// 命名策略 (「不同用户匹配不同规则」): profile 名 → 一组规则 (各规则不写 source_ip_cidr,
+    /// 由分配到该 profile 的设备网段注入)。见 device_profiles。build 时展开成扁平 source_ip_cidr
+    /// 规则前插 (设备规则首命中优先于全局 rules)。
+    #[serde(default)]
+    pub profiles: std::collections::HashMap<String, Vec<RuleConfig>>,
+    /// 设备 (源网段) → profile 分配。命中的连接先走该 profile 的规则, 未命中再落全局 rules → default。
+    #[serde(default)]
+    pub device_profiles: Vec<DeviceProfile>,
+}
+
+/// 把一组设备/源网段绑定到某命名 profile。
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct DeviceProfile {
+    /// 该 profile 作用的源网段 (设备)。支持单值或数组; 裸 IP 自动补 /32 (v4) / /128 (v6)。
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub source_ip_cidr: Vec<String>,
+    /// 引用 routing.profiles 里的 profile 名。
+    pub profile: String,
+    /// 可选设备别名 (WebUI 展示; 不影响路由)。
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 可选带宽上限 (kbps, 1 kbps = 1000 bit/s)。设了则对该设备/源网段的 TCP relay 字节流做
+    /// 用户态 token bucket 整形 (上/下行各独立此上限, 按源 IP 聚合、跨该 IP 全部连接共享)。
+    /// 客户端侧 = 按 LAN 设备限速; 服务端侧 = 按连接的客户端 IP 限速 (device_profiles 同一套配置,
+    /// 服务端的"设备"= 连来的客户端)。None/0 = 不限速。仅 TCP (UDP 后续)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_kbps: Option<u64>,
 }
 
 /// 规则内**多类条件**的组合方式。
@@ -418,7 +497,7 @@ pub enum RuleMode {
     Or,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, Clone)]
 pub struct RuleConfig {
     #[serde(default)]
     pub mode: Option<RuleMode>,
@@ -734,6 +813,12 @@ pub struct TuningConfig {
     /// content_type 解析失败断连) —— 与 cipher_agility 同类约束。ClientHello 不受影响。
     #[serde(default)]
     pub tls_padding: bool,
+    /// 客户端版本识别 (默认 false)。两端同开时, 客户端在握手后于加密信道内上报自身版本, 服务端
+    /// WebUI「连接的客户端」显示各客户端版本 (便于运维知道谁该升级)。**两端必须同开** —— 与
+    /// cipher_agility/tls_padding 同类约束 (单边开会多发/漏读一帧致该连接失败)。ClientHello 一字
+    /// 不改, 帧在加密信道内, 零指纹影响。
+    #[serde(default)]
+    pub client_info: bool,
     /// **客户端** UDP 多路复用开关 (默认 false)。开了则透明 UDP 的 Mirage 流不再一流一隧道,
     /// 而是按 flowkey 散列到少量 (udp_mux_tunnels) 长命共享隧道复用, 拿掉"并发 UDP 流 ≤ pool_size"
     /// 的带机量硬伤。**仅在服务端也已升到支持 mux 的版本时开** (老服务端不认 0x01 sentinel, 那些
@@ -976,6 +1061,27 @@ impl Config {
             }
         }
 
+        // 命名 profile ("不同用户匹配不同规则"): 每条 profile 规则的出站必须存在。
+        for (pname, prules) in &self.routing.profiles {
+            for (i, rule) in prules.iter().enumerate() {
+                if !known(&rule.outbound) {
+                    issues.push(format!(
+                        "routing.profiles[{pname}][{i}].outbound = `{}` 不存在于 outbounds (该规则永远不会正确生效)",
+                        rule.outbound
+                    ));
+                }
+            }
+        }
+        // 设备分配引用的 profile 必须存在, 否则该设备的分配形同虚设 (静默不生效)。
+        for (i, dp) in self.routing.device_profiles.iter().enumerate() {
+            if !self.routing.profiles.contains_key(&dp.profile) {
+                issues.push(format!(
+                    "routing.device_profiles[{i}].profile = `{}` 不存在于 routing.profiles (该设备分配不生效)",
+                    dp.profile
+                ));
+            }
+        }
+
         // 出站组的成员必须存在, 且组不能为空
         for ob in &self.outbounds {
             let (tag, children, kind) = match ob {
@@ -1008,9 +1114,21 @@ impl Config {
 
         // Mirage 出站的必填项非空
         for ob in &self.outbounds {
-            if let OutboundConfig::Mirage { tag, server, server_port, password, underlying, .. } = ob {
+            if let OutboundConfig::Mirage { tag, server, server_port, password, underlying, transport, quic_window_mb, .. } = ob {
                 if server.trim().is_empty() {
                     issues.push(format!("mirage 出站 `{tag}` 的 server 为空"));
+                }
+                // transport=quic fail-fast: 没编 quic 特性 → check 阶段就拦, 别等运行时每连接报错。
+                #[cfg(not(feature = "quic"))]
+                if *transport == Transport::Quic {
+                    issues.push(format!("mirage 出站 `{tag}` 配了 transport=quic, 但本二进制未以 `--features quic` 编译"));
+                }
+                if *transport == Transport::Quic {
+                    if let Some(mb) = quic_window_mb {
+                        if *mb == 0 || *mb > 256 {
+                            issues.push(format!("mirage 出站 `{tag}` 的 quic_window_mb={mb} 不合理 (荐 2~64; 重排序线路用 2, 干净长肥用 16-64)"));
+                        }
+                    }
                 }
                 if *server_port == 0 {
                     issues.push(format!("mirage 出站 `{tag}` 的 server_port 为 0"));
@@ -1079,9 +1197,17 @@ impl Config {
                     Err(e) => issues.push(format!("shadowsocks 入站 `{tag}` 的 method 非法: {e}")),
                 }
             }
-            if let InboundConfig::MirageServer { tag, password, upstream, .. } = ib {
+            if let InboundConfig::MirageServer { tag, password, upstream, transport, .. } = ib {
                 if password.is_empty() {
                     issues.push(format!("mirage_server 入站 `{tag}` 的 password 为空 (任何人都能连)"));
+                }
+                #[cfg(not(feature = "quic"))]
+                if *transport == Transport::Quic {
+                    issues.push(format!("mirage_server 入站 `{tag}` 配了 transport=quic, 但本二进制未以 `--features quic` 编译"));
+                }
+                // Model X 精简路 (quic) 只支持直连出口; 配了 SS/WG 上游会被拒 → check 阶段就提示。
+                if *transport == Transport::Quic && upstream.is_some() {
+                    issues.push(format!("mirage_server 入站 `{tag}` transport=quic 暂不支持 upstream 中继 (SS/WG); 用 transport=tcp 或去掉 upstream"));
                 }
                 // 上游出口配错会让服务端**拒绝启动**, 必须在 check 阶段就拦住 ——
                 // 否则 `check && systemctl restart` 这个闸门对这条路径形同虚设。
@@ -1819,6 +1945,54 @@ mod inbound_rule_tests {
     fn known_inbound_tag_passes_single_or_array() {
         assert!(cfg(r#""in-a""#).semantic_issues().is_empty(), "单值应通过");
         assert!(cfg(r#"["in-a"]"#).semantic_issues().is_empty(), "数组应通过");
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    fn cfg(profiles: &str, device_profiles: &str) -> Config {
+        let s = format!(r#"{{
+          "inbounds": [{{ "type": "socks", "tag": "in", "listen": "127.0.0.1", "port": 1080 }}],
+          "outbounds": [{{ "type": "direct", "tag": "direct" }}, {{ "type": "block", "tag": "block" }}],
+          "routing": {{ "default_outbound": "direct", "rules": [],
+            "profiles": {profiles}, "device_profiles": {device_profiles} }}
+        }}"#);
+        serde_json::from_str(&s).expect("配置应能解析")
+    }
+
+    /// 合法 profile + 设备分配: 无 issue。
+    #[test]
+    fn valid_profile_passes() {
+        let c = cfg(
+            r#"{ "kids": [{ "domain_suffix": "ads.com", "outbound": "block" }] }"#,
+            r#"[{ "source_ip_cidr": "192.168.1.20/32", "profile": "kids", "name": "iPad" }]"#,
+        );
+        assert!(c.semantic_issues().is_empty(), "合法 profile 不该报错: {:?}", c.semantic_issues());
+    }
+
+    /// 设备分配引用不存在的 profile → 拦下。
+    #[test]
+    fn unknown_profile_ref_is_caught() {
+        let c = cfg(r#"{}"#, r#"[{ "source_ip_cidr": "10.0.0.5/32", "profile": "ghost" }]"#);
+        assert!(
+            c.semantic_issues().iter().any(|i| i.contains("ghost") && i.contains("profiles")),
+            "未知 profile 引用未被拦: {:?}", c.semantic_issues()
+        );
+    }
+
+    /// profile 规则引用不存在的出站 → 拦下。
+    #[test]
+    fn profile_rule_unknown_outbound_is_caught() {
+        let c = cfg(
+            r#"{ "kids": [{ "domain_suffix": "x.com", "outbound": "nope" }] }"#,
+            r#"[]"#,
+        );
+        assert!(
+            c.semantic_issues().iter().any(|i| i.contains("nope") && i.contains("profiles")),
+            "profile 规则未知出站未被拦: {:?}", c.semantic_issues()
+        );
     }
 }
 
