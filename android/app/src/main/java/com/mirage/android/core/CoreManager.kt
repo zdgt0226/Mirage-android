@@ -2,6 +2,7 @@ package com.mirage.android.core
 
 import android.content.Context
 import android.os.Build
+import android.util.Log
 import com.mirage.android.data.model.CoreInfo
 import com.mirage.android.data.model.OnlineReleaseInfo
 import kotlinx.coroutines.Dispatchers
@@ -13,46 +14,53 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.InputStream
+import java.security.MessageDigest
 import java.util.UUID
 
 /**
- * Mirage 内核管理器: 管理内置内核与自定义导入的 .so 内核。
+ * 内核管理与动态加载器。
+ * 支持用户导入自定义 libmirage_jni.so 内核或从 GitHub Releases 下载，
+ * 并支持动态切换、回滚到内置默认内核。
  */
 class CoreManager private constructor(private val context: Context) {
 
-    private val coresDir = File(context.filesDir, "cores").apply { mkdirs() }
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val coresDir = File(context.filesDir, "cores").apply { if (!exists()) mkdirs() }
 
     private val _cores = MutableStateFlow<List<CoreInfo>>(emptyList())
     val cores: StateFlow<List<CoreInfo>> = _cores.asStateFlow()
 
-    private val _activeCoreId = MutableStateFlow(CoreInfo.BUILTIN_ID)
+    private val _activeCoreId = MutableStateFlow<String>(CoreInfo.BUILTIN_ID)
     val activeCoreId: StateFlow<String> = _activeCoreId.asStateFlow()
 
     init {
-        loadCores()
+        loadCustomCores()
     }
 
-    private fun loadCores() {
-        val raw = prefs.getString(KEY_CORES_JSON, "[]") ?: "[]"
+    private fun loadCustomCores() {
+        val jsonStr = prefs.getString(KEY_CORES_JSON, null)
         val customList = runCatching {
-            val arr = JSONArray(raw)
-            (0 until arr.length()).mapNotNull { i ->
-                val o = arr.getJSONObject(i)
-                val path = o.getString("file_path")
-                val file = File(path)
-                if (file.exists()) {
-                    CoreInfo(
-                        id = o.getString("id"),
-                        name = o.getString("name"),
-                        version = o.optString("version", "自定义版本"),
-                        abi = o.optString("abi", "arm64-v8a"),
-                        filePath = path,
-                        fileSize = file.length(),
-                        isBuiltin = false,
-                        addedTime = o.optLong("added_time", System.currentTimeMillis())
-                    )
-                } else null
+            if (jsonStr.isNullOrBlank()) emptyList<CoreInfo>()
+            else {
+                val arr = JSONArray(jsonStr)
+                (0 until arr.length()).mapNotNull { i ->
+                    val o = arr.getJSONObject(i)
+                    val path = o.getString("file_path")
+                    val file = File(path)
+                    if (file.exists()) {
+                        CoreInfo(
+                            id = o.getString("id"),
+                            name = o.getString("name"),
+                            version = o.optString("version", "自定义版本"),
+                            abi = o.optString("abi", "arm64-v8a"),
+                            filePath = path,
+                            fileSize = file.length(),
+                            sha256 = o.optString("sha256").takeIf { it.isNotBlank() },
+                            isBuiltin = false,
+                            addedTime = o.optLong("added_time", System.currentTimeMillis())
+                        )
+                    } else null
+                }
             }
         }.getOrDefault(emptyList())
 
@@ -73,6 +81,7 @@ class CoreManager private constructor(private val context: Context) {
                     .put("version", c.version)
                     .put("abi", c.abi)
                     .put("file_path", c.filePath)
+                    .put("sha256", c.sha256 ?: "")
                     .put("added_time", c.addedTime)
             )
         }
@@ -94,13 +103,48 @@ class CoreManager private constructor(private val context: Context) {
     }
 
     /**
+     * 计算文件的 SHA-256 哈希值
+     */
+    private fun calculateSha256(file: File): String {
+        return file.inputStream().use { input ->
+            val md = MessageDigest.getInstance("SHA-256")
+            val buf = ByteArray(8192)
+            var len: Int
+            while (input.read(buf).also { len = it } != -1) {
+                md.update(buf, 0, len)
+            }
+            md.digest().joinToString("") { "%02x".format(it) }
+        }
+    }
+
+    /**
      * 导入外部 .so 文件。
      */
-    fun importCore(inputStream: InputStream, displayName: String): Result<CoreInfo> {
+    fun importCore(
+        inputStream: InputStream,
+        displayName: String,
+        expectedSha256: String? = null
+    ): Result<CoreInfo> {
         val tempFile = File(coresDir, "temp_${System.currentTimeMillis()}.so")
         try {
             tempFile.outputStream().use { output ->
                 inputStream.copyTo(output)
+            }
+
+            // 完整性校验: 若传入 expectedSha256, 严格比对
+            val computedSha256 = calculateSha256(tempFile)
+            if (!expectedSha256.isNullOrBlank()) {
+                if (!computedSha256.equals(expectedSha256, ignoreCase = true)) {
+                    tempFile.delete()
+                    Log.e("Mirage", "[loader] 内核 SHA-256 完整性校验失败! 期望: $expectedSha256, 实际: $computedSha256")
+                    return Result.failure(
+                        SecurityException(
+                            "内核 SHA-256 完整性校验失败 (文件可能损坏或被篡改)！\n" +
+                            "期望: ${expectedSha256.take(16)}...\n实际: ${computedSha256.take(16)}..."
+                        )
+                    )
+                }
+                Log.i("Mirage", "[loader] 内核 SHA-256 完整性校验通过: $computedSha256")
             }
 
             // 检查 ELF ABI 兼容性
@@ -133,6 +177,7 @@ class CoreManager private constructor(private val context: Context) {
                 abi = abi,
                 filePath = targetFile.absolutePath,
                 fileSize = targetFile.length(),
+                sha256 = computedSha256,
                 isBuiltin = false
             )
 
@@ -181,17 +226,20 @@ class CoreManager private constructor(private val context: Context) {
                 setRequestProperty("User-Agent", "Mirage-Android-Client")
                 setRequestProperty("Accept", "application/vnd.github.v3+json")
             }
+
             if (conn.responseCode !in 200..299) {
-                throw java.io.IOException("GitHub API 响应失败: HTTP ${conn.responseCode}")
+                throw java.io.IOException("GitHub API 响应错误: ${conn.responseCode} ${conn.responseMessage}")
             }
-            val responseText = conn.inputStream.bufferedReader().use { it.readText() }
-            val jsonArray = JSONArray(responseText)
+
+            val bodyText = conn.inputStream.bufferedReader().use { it.readText() }
+            val releasesJson = JSONArray(bodyText)
+            val list = mutableListOf<OnlineReleaseInfo>()
+
             val supportedAbis = Build.SUPPORTED_ABIS.toList()
 
-            val list = mutableListOf<OnlineReleaseInfo>()
-            for (i in 0 until jsonArray.length()) {
-                val rel = jsonArray.getJSONObject(i)
-                val tagName = rel.optString("tag_name")
+            for (i in 0 until releasesJson.length()) {
+                val rel = releasesJson.getJSONObject(i)
+                val tagName = rel.optString("tag_name", "")
                 val releaseName = rel.optString("name", tagName)
                 val body = rel.optString("body", "")
                 val publishedAt = rel.optString("published_at", "")
@@ -225,6 +273,13 @@ class CoreManager private constructor(private val context: Context) {
                 }
 
                 if (matchedAsset != null) {
+                    val rawDigest = matchedAsset.optString("digest", "")
+                    val sha256 = when {
+                        rawDigest.startsWith("sha256:", ignoreCase = true) -> rawDigest.substringAfter(":").trim()
+                        rawDigest.isNotBlank() -> rawDigest.trim()
+                        else -> null
+                    }
+
                     list.add(
                         OnlineReleaseInfo(
                             tagName = tagName,
@@ -234,7 +289,8 @@ class CoreManager private constructor(private val context: Context) {
                             assetName = matchedAsset.getString("name"),
                             downloadUrl = matchedAsset.getString("browser_download_url"),
                             sizeBytes = matchedAsset.optLong("size", 0L),
-                            targetAbi = matchedAbi
+                            targetAbi = matchedAbi,
+                            expectedSha256 = sha256
                         )
                     )
                 }
@@ -300,9 +356,13 @@ class CoreManager private constructor(private val context: Context) {
                 }
             }
 
-            // 导入下载好的 SO
+            // 导入并校验下载好的 SO
             val importRes = tempFile.inputStream().use { input ->
-                importCore(input, "Mirage-rs ${release.tagName}")
+                importCore(
+                    inputStream = input,
+                    displayName = "Mirage-rs ${release.tagName}",
+                    expectedSha256 = release.expectedSha256
+                )
             }
             tempFile.delete()
             importRes

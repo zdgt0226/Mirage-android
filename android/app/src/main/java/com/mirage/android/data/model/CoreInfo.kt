@@ -12,6 +12,7 @@ data class CoreInfo(
     val abi: String,
     val filePath: String? = null,
     val fileSize: Long = 0L,
+    val sha256: String? = null,
     val isBuiltin: Boolean = false,
     val addedTime: Long = System.currentTimeMillis()
 ) {
@@ -26,6 +27,8 @@ data class CoreInfo(
         }
     }
 
+    val shortSha256: String? get() = sha256?.take(10)
+
     companion object {
         const val BUILTIN_ID = "builtin"
 
@@ -36,6 +39,7 @@ data class CoreInfo(
                 version = version,
                 abi = "系统原生",
                 filePath = null,
+                sha256 = null,
                 isBuiltin = true
             )
         }
@@ -53,7 +57,8 @@ data class OnlineReleaseInfo(
     val assetName: String,
     val downloadUrl: String,
     val sizeBytes: Long,
-    val targetAbi: String
+    val targetAbi: String,
+    val expectedSha256: String? = null
 ) {
     val formattedSize: String get() {
         return when {
@@ -62,4 +67,6 @@ data class OnlineReleaseInfo(
             else -> "$sizeBytes B"
         }
     }
+
+    val shortDigest: String? get() = expectedSha256?.take(12)
 }

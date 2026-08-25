@@ -46,7 +46,8 @@ class CoreAdapter(
 
             binding.tvCoreName.text = item.name
             binding.tvAbi.text = item.abi
-            binding.tvCoreDetails.text = "${item.version} · ${item.formattedSize}"
+            val shaStr = if (!item.isBuiltin && item.shortSha256 != null) " · SHA:${item.shortSha256}" else ""
+            binding.tvCoreDetails.text = "${item.version} · ${item.formattedSize}$shaStr"
             binding.radioActive.isChecked = isSelected
 
             if (isSelected) {

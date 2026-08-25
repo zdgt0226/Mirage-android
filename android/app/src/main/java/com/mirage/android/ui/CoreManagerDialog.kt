@@ -125,14 +125,15 @@ class CoreManagerDialog(
         val scope = (context as? androidx.lifecycle.LifecycleOwner)?.lifecycleScope 
             ?: kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
 
+        val digestHint = if (release.shortDigest != null) " [SHA-256: ${release.shortDigest}]" else ""
         b.layoutDownloadProgress.visibility = android.view.View.VISIBLE
         b.progressBarDownload.progress = 0
-        b.tvDownloadStatus.text = "正在下载 ${release.tagName} (${release.formattedSize})..."
+        b.tvDownloadStatus.text = "正在下载并校验 ${release.tagName} (${release.formattedSize})$digestHint..."
         b.tvDownloadPercent.text = "0%"
         b.btnCheckOnlineCore.isEnabled = false
-        b.btnCheckOnlineCore.text = "正在下载内核 ${release.tagName}..."
+        b.btnCheckOnlineCore.text = "正在下载并校验内核 ${release.tagName}..."
 
-        android.util.Log.i("Mirage", "[loader] 开始下载在线内核: ${release.tagName} from ${release.downloadUrl}")
+        android.util.Log.i("Mirage", "[loader] 开始下载在线内核: ${release.tagName} from ${release.downloadUrl} (期望SHA256: ${release.expectedSha256 ?: "未指定"})")
         scope.launch {
             val result = coreManager.downloadAndImportRelease(release) { percent ->
                 b.root.post {
@@ -146,15 +147,16 @@ class CoreManagerDialog(
             b.btnCheckOnlineCore.text = "检查 GitHub 在线内核 (Releases)"
 
             result.onSuccess { core ->
-                android.util.Log.i("Mirage", "[loader] 在线内核下载并导入成功: ${core.name} (${core.filePath})")
+                android.util.Log.i("Mirage", "[loader] 在线内核下载并校验通过: ${core.name} (SHA: ${core.sha256})")
                 coreManager.setActiveCore(core.id)
                 refreshList()
                 updateCurrentCoreView()
                 onCoreChanged()
-                Toast.makeText(context, "成功下载并激活内核: ${core.name}\n(若已连接VPN请重新连接生效)", Toast.LENGTH_LONG).show()
+                val shaInfo = core.shortSha256?.let { " (SHA: $it)" } ?: ""
+                Toast.makeText(context, "成功下载并通过完整性校验: ${core.name}$shaInfo\n(若已连接VPN请重新连接生效)", Toast.LENGTH_LONG).show()
             }.onFailure { e ->
-                android.util.Log.e("Mirage", "[loader] 在线内核下载或导入失败: ${e.message}", e)
-                Toast.makeText(context, "下载失败: ${e.message}", Toast.LENGTH_LONG).show()
+                android.util.Log.e("Mirage", "[loader] 在线内核下载或校验失败: ${e.message}", e)
+                Toast.makeText(context, "下载或校验失败: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
