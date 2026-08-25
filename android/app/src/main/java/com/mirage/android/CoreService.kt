@@ -57,6 +57,8 @@ class CoreService : VpnService() {
     private var watchdogJob: Job? = null
     private var failoverRestartJob: Job? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    @Volatile
+    var currentPhysicalNetwork: Network? = null
     private var lastRecordedUp = -1L
     private var lastRecordedDown = -1L
 
@@ -88,6 +90,10 @@ class CoreService : VpnService() {
         networkCallback?.let { cb ->
             runCatching { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) }
             networkCallback = null
+        }
+        currentPhysicalNetwork = null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            runCatching { setUnderlyingNetworks(null) }
         }
     }
 
@@ -204,29 +210,41 @@ class CoreService : VpnService() {
         notifyState()
         runCatching { sendBroadcast(Intent(ACTION_VPN_STARTED).setPackage(packageName)) }
 
-        // 注册底层网络监听 (Wi-Fi <-> 蜂窝移动网络切换时即时冲刷暖池坏死连接)
+        // 注册底层物理网络监听 (Wi-Fi <-> 蜂窝移动网络切换时即时冲刷暖池坏死连接，并绑定底层物理网络)
         val cm = getSystemService(ConnectivityManager::class.java)
         if (cm != null && networkCallback == null) {
             val cb = object : ConnectivityManager.NetworkCallback() {
-                private var activeNet: Network? = null
                 override fun onAvailable(network: Network) {
-                    if (activeNet != null && activeNet != network) {
-                        LogStore.append("[core] 底层网络切换: $activeNet -> $network, 冲刷暖池与失效连接")
+                    val caps = cm.getNetworkCapabilities(network)
+                    if (caps == null || caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) {
+                        return
+                    }
+                    val old = currentPhysicalNetwork
+                    if (old != null && old != network) {
+                        LogStore.append("[core] 底层物理网络切换: $old -> $network, 冲刷暖池与失效连接")
                         runCatching { MirageNative.flushPool() }
                     }
-                    activeNet = network
+                    currentPhysicalNetwork = network
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        runCatching { setUnderlyingNetworks(arrayOf(network)) }
+                    }
                 }
                 override fun onLost(network: Network) {
-                    LogStore.append("[core] 底层网络断开: $network, 冲刷空闲连接池")
-                    runCatching { MirageNative.flushPool() }
-                    if (activeNet == network) activeNet = null
+                    if (currentPhysicalNetwork == network) {
+                        currentPhysicalNetwork = null
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                            runCatching { setUnderlyingNetworks(null) }
+                        }
+                        LogStore.append("[core] 底层物理网络断开: $network, 冲刷空闲连接池")
+                        runCatching { MirageNative.flushPool() }
+                    }
                 }
             }
             networkCallback = cb
             runCatching {
                 val req = NetworkRequest.Builder()
                     .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
                     .build()
                 cm.registerNetworkCallback(req, cb)
             }
@@ -659,7 +677,7 @@ class CoreService : VpnService() {
             var netOk = false
             runCatching {
                 val cm = inst.getSystemService(android.net.ConnectivityManager::class.java)
-                val realNet = cm.allNetworks.firstOrNull { net ->
+                val realNet = inst.currentPhysicalNetwork ?: cm.allNetworks.firstOrNull { net ->
                     val caps = cm.getNetworkCapabilities(net)
                     caps != null
                         && !caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
