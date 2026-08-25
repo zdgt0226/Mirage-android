@@ -115,11 +115,11 @@ impl TunStack {
         self.engine.load_full()
     }
 
-    /// 运行时热切换引擎 (节点切换): 替换引用, 后续连接走新节点。
-    /// 现有隧道保留到自然断开; 新连接/新流用新引擎。
+    /// 运行时热切换引擎 (节点切换): 替换引用并安全终止旧引擎后台协程。
     pub fn swap_engine(&self, new: Arc<Engine>) {
-        self.engine.store(new);
-        tracing::info!("[TUN] 引擎已热切换 (节点/规则更新)");
+        let old = self.engine.swap(new);
+        old.shutdown();
+        tracing::info!("[TUN] 引擎已热切换 (旧引擎后台协程已安全终止)");
     }
 
     /// 移动端网络切换/唤醒冲刷空闲池
@@ -248,11 +248,12 @@ impl TunStack {
         Ok(stack)
     }
 
-    /// 停止引擎 (关闭 fd, 泵退出)。幂等。
+    /// 停止引擎 (关闭 fd, 终止出站后台协程, 泵退出)。幂等。
     pub fn stop(&self) {
         if self.stopped.swap(true, Ordering::SeqCst) {
             return;
         }
+        self.engine.load_full().shutdown();
         let raw_fd = self.fd.swap(-1, Ordering::SeqCst);
         if raw_fd >= 0 {
             unsafe { libc::close(raw_fd) };

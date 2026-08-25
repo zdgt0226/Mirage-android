@@ -139,6 +139,22 @@ impl OutboundNode {
         }
     }
 
+    /// 安全终止节点后台协程并清空连接池 (防 FD 泄漏)
+    pub fn shutdown(&self) {
+        match self {
+            Self::Mirage { pool, .. } => pool.shutdown(),
+            Self::Direct { .. } | Self::Block { .. } => {},
+            Self::Urltest { children, .. }
+            | Self::Fallback { children, .. }
+            | Self::Selector { children, .. }
+            | Self::LoadBalance { children, .. } => {
+                for c in children {
+                    c.shutdown();
+                }
+            }
+        }
+    }
+
     pub fn resolve_leaf(self: &Arc<Self>) -> Arc<OutboundNode> {
         match &**self {
             Self::Urltest { tag, children, tolerance_ms, test_type, current } => {
@@ -554,6 +570,19 @@ impl OutboundManager {
         for node in self.outbounds.values() {
             node.set_pool_size(new_size);
         }
+    }
+
+    /// 安全终止所有出站节点的后台协程并清空连接池
+    pub fn shutdown(&self) {
+        for node in self.outbounds.values() {
+            node.shutdown();
+        }
+    }
+}
+
+impl Drop for OutboundManager {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 

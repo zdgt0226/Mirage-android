@@ -562,10 +562,12 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_testNode(
             return -1;
         };
         let t0 = std::time::Instant::now();
-        match tokio::time::timeout(timeout, pool.get()).await {
+        let r = match tokio::time::timeout(timeout, pool.get()).await {
             Ok(Ok(_)) => t0.elapsed().as_millis() as i64,
             _ => -1,
-        }
+        };
+        engine.shutdown();
+        r
     });
     result
 }

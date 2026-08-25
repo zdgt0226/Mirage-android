@@ -174,6 +174,17 @@ impl Engine {
     pub fn flush_pool(&self) {
         self.outbounds.purge_idle();
     }
+
+    /// 安全终止引擎所有出站连接池与后台协程
+    pub fn shutdown(&self) {
+        self.outbounds.shutdown();
+    }
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
 }
 
 /// 隧道卡死判定阈值: 活跃隧道连接存在但超过该秒数无隧道流量 → 不健康。

@@ -180,6 +180,16 @@ pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
             }
         }
     }
+    // 防 FD 耗尽: 限制同时进行的上游 DNS UDP Socket 并发总数不超过 16 个
+    static DNS_UPSTREAM_SEM: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
+    let _permit = match tokio::time::timeout(Duration::from_millis(600), DNS_UPSTREAM_SEM.acquire()).await {
+        Ok(Ok(p)) => p,
+        _ => {
+            tracing::warn!("[TUN-DNS] 上游直连解析并发达到上限 (16 并发)，触发快速降级");
+            return None;
+        }
+    };
+
     let sock = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => s,
         Err(e) => {

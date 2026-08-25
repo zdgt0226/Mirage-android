@@ -10,9 +10,9 @@ plugins {
 val propBuildTime = project.findProperty("buildTime") as? String 
     ?: SimpleDateFormat("yyyy.MM.dd", Locale.CHINA).format(Date())
 val propBuildTag = project.findProperty("buildTag") as? String 
-    ?: "Release 5 (TUN Opt + 1400 MTU)"
-val propVersionCode = (project.findProperty("versionCode") as? String)?.toIntOrNull() ?: 56
-val propVersionName = project.findProperty("versionName") as? String ?: "0.2.9"
+    ?: "Release 6 (WarmPool Lifecycle & DNS FD Fix)"
+val propVersionCode = (project.findProperty("versionCode") as? String)?.toIntOrNull() ?: 63
+val propVersionName = project.findProperty("versionName") as? String ?: "0.2.10"
 
 android {
     namespace = "com.mirage.android"

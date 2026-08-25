@@ -217,6 +217,31 @@ mod feedback_tests {
         pool.set_pool_size(4);
         assert_eq!(pool.get_pool_size(), 4);
     }
+
+    #[tokio::test]
+    async fn warm_pool_shutdown_stops_cleanly() {
+        let cfg = Arc::new(PoolConfig {
+            server_host: "127.0.0.1".to_string(),
+            server_port: 8443,
+            password: "test".to_string(),
+            camouflage_host: "example.com".to_string(),
+            pool_size: 4,
+            underlying: None,
+            pfs: false,
+        });
+        let bs = Arc::new(BrutalState {
+            configured_rate: None,
+            current_rate: Arc::new(AtomicU64::new(0)),
+            base_rtt: None,
+            active_fds: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        });
+        let pool = WarmPool::new(cfg, bs);
+        assert!(!pool.shutdown.load(Ordering::Relaxed));
+
+        pool.shutdown();
+        assert!(pool.shutdown.load(Ordering::Relaxed));
+        assert_eq!(pool.queue.lock().await.len(), 0);
+    }
 }
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -305,7 +330,7 @@ pub async fn read_server_handshake<R: tokio::io::AsyncRead + Unpin>(stream: &mut
     Ok(server_random)
 }
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// [弹性预热连接池 (WarmPool)]
 /// Mirage 的核心性能组件，用于零延迟转发。
@@ -323,6 +348,7 @@ pub struct WarmPool {
     target_size: Arc<AtomicUsize>,            // 动态目标容量 (支持热重载)
     max_size: Arc<AtomicUsize>,               // 动态最大容量 (支持热重载)
     cfg: Arc<PoolConfig>,                     // 节点配置 (支持饥饿时 On-Demand 即时并发拨号)
+    pub shutdown: Arc<AtomicBool>,            // 安全关闭标志 (节点切换/引擎替换时终止后台协程与建连)
     /// On-Demand 并发拨号限流信号量: 防止瞬时突发 (如 20 张图片) 同时发起 20 条 TLS
     /// 握手 (thundering herd)。上限取 clamp(pool_size, 4, 16), 兼顾图片秒开与平滑。
     on_demand_sem: Arc<tokio::sync::Semaphore>,
@@ -337,6 +363,7 @@ impl WarmPool {
         let metrics = Arc::new(PoolMetrics::new());
         let target_size = Arc::new(AtomicUsize::new(initial_size));
         let max_size = Arc::new(AtomicUsize::new(initial_size));
+        let shutdown = Arc::new(AtomicBool::new(false));
 
         // 并发拨号上限: 至少 8 (图片秒开), 至多 16 (防 thundering herd)。
         // 平滑靠回流 + notify (见 refill_or_take), 而非压低并发 —— 太低的并发
@@ -351,6 +378,7 @@ impl WarmPool {
             target_size: target_size.clone(),
             max_size: max_size.clone(),
             cfg: cfg.clone(),
+            shutdown: shutdown.clone(),
             on_demand_sem: Arc::new(tokio::sync::Semaphore::new(on_demand_limit)),
         };
 
@@ -363,9 +391,13 @@ impl WarmPool {
         let max_size_mgr = max_size.clone();
         let q_clone = queue.clone();
         let in_flight_clone_mgr = in_flight.clone();
+        let shutdown_mgr = shutdown.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(5)).await;
+                if shutdown_mgr.load(Ordering::Relaxed) {
+                    break;
+                }
 
                 // 读三个计数器并归零, 进入下一周期
                 let wait = metrics_clone.wait_events.swap(0, Ordering::Relaxed);
@@ -443,12 +475,17 @@ impl WarmPool {
         let max_size_builder = max_size.clone();
         let stats_builder = stats.clone();
         let brutal_state_builder = brutal_state.clone();
+        let shutdown_builder = shutdown.clone();
         
         tokio::spawn(async move {
             info!("WarmPool (Elastic) initialized. Capacity: {}", initial_size);
             let mut next_build_at = Instant::now();
 
             loop {
+                if shutdown_builder.load(Ordering::Relaxed) {
+                    break;
+                }
+
                 let current_target = target_clone_builder.load(Ordering::Relaxed);
                 let current_max = max_size_builder.load(Ordering::Relaxed);
                 let current_idle = q_clone_builder.lock().await.len();
@@ -483,17 +520,26 @@ impl WarmPool {
                 let n_task = n_clone_builder.clone();
                 let in_flight_task = in_flight_clone.clone();
                 let stats_task = stats_builder.clone();
-                let bs_task = brutal_state_builder.clone();
+                let brutal_state_builder = brutal_state_builder.clone();
+                let shutdown_task = shutdown_builder.clone();
 
                 in_flight_clone.fetch_add(1, Ordering::Relaxed);
 
                 tokio::spawn(async move {
+                    if shutdown_task.load(Ordering::Relaxed) {
+                        in_flight_task.fetch_sub(1, Ordering::Relaxed);
+                        return;
+                    }
                     let start = Instant::now();
-                    match Self::connect_upstream(&cfg_task, &bs_task).await {
+                    match Self::connect_upstream(&cfg_task, &brutal_state_builder).await {
                         Ok(tunnel) => {
                             let elapsed = start.elapsed().as_millis() as u64;
                             stats_task.write().unwrap_or_else(|e| e.into_inner()).record_latency(elapsed);
                             
+                            if shutdown_task.load(Ordering::Relaxed) {
+                                in_flight_task.fetch_sub(1, Ordering::Relaxed);
+                                return;
+                            }
                             q_task.lock().await.push_back(tunnel);
                             n_task.notify_one();
                             in_flight_task.fetch_sub(1, Ordering::Relaxed);
@@ -511,6 +557,19 @@ impl WarmPool {
         });
 
         pool
+    }
+
+    /// 安全终止连接池后台协程并清空所有未使用的预热连接 (防 FD 泄漏)
+    pub fn shutdown(&self) {
+        if self.shutdown.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if let Ok(mut q) = self.queue.try_lock() {
+            let n = q.len();
+            q.clear();
+            tracing::info!("WarmPool: 已安全终止后台建连并清空 {n} 条预热连接");
+        }
+        self.notify.notify_waiters();
     }
 
     /// 移动端网络切换或亮屏唤醒时，立即清空空闲队列中的所有旧连接，
@@ -991,5 +1050,11 @@ impl WarmPool {
 
     pub fn get_pool_size(&self) -> usize {
         self.max_size.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for WarmPool {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }

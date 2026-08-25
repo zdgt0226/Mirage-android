@@ -272,13 +272,19 @@ class CoreService : VpnService() {
     /** 断线检测 + 自动重连 + failover watchdog。 */
     private fun startFailoverWatchdog(): Job = scope.launch {
         var consecutiveFailures = 0
+        var failoverBackoffSec = 0L
         while (isActive) {
-            val interval = SettingsStore.getCheckIntervalSec(this@CoreService).toLong().coerceAtLeast(5)
+            val baseInterval = SettingsStore.getCheckIntervalSec(this@CoreService).toLong().coerceAtLeast(5)
+            val interval = baseInterval + failoverBackoffSec
             delay(interval * 1000)
             if (!MirageNative.isRunning()) continue
             // 修复 M1: Fail-Closed (异常/JNI失败时视为不健康，防止假死与自愈失效)
             val healthy = runCatching { MirageNative.isHealthy() }.getOrDefault(false)
-            if (healthy) { consecutiveFailures = 0; continue }
+            if (healthy) {
+                consecutiveFailures = 0
+                failoverBackoffSec = 0L
+                continue
+            }
 
             consecutiveFailures++
             LogStore.append("[failover] 检测到连接异常 (第 $consecutiveFailures 次)")
@@ -286,14 +292,20 @@ class CoreService : VpnService() {
 
             // 连续 2 次异常才触发 failover (避免瞬时抖动)
             if (consecutiveFailures >= 2) {
-                doFailover()
+                val switched = doFailover()
                 consecutiveFailures = 0
+                if (!switched) {
+                    // 全网不可达/所有节点离线，梯度退避 (最多 30s)，避免高频空转与耗电
+                    failoverBackoffSec = (failoverBackoffSec + 5).coerceAtMost(30)
+                } else {
+                    failoverBackoffSec = 0L
+                }
             }
         }
     }
 
-    /** failover: 测活选最优节点 (best) 或换下一个 (next), 然后热切换。 */
-    private suspend fun doFailover() {
+    /** failover: 测活选最优节点 (best) 或换下一个 (next), 然后热切换。返回是否成功选中可用节点。 */
+    private suspend fun doFailover(): Boolean {
         val nodes = NodeStore.getNodes(this)
         if (nodes.size <= 1) {
             // 单节点: 完整重启连接 (撤 TUN 后重建, 清 stale 隧道)
@@ -306,7 +318,7 @@ class CoreService : VpnService() {
                 delay(3000)
                 if (isActive && !MirageNative.isRunning()) startInternal()
             }
-            return
+            return true
         }
         val mode = SettingsStore.getFailoverMode(this)
         LogStore.append("[failover] 触发节点切换 (mode=$mode, ${nodes.size} 个节点)")
@@ -331,7 +343,11 @@ class CoreService : VpnService() {
             val idx = nodes.indexOfFirst { it.uri == selectedUri }
             listOfNotNull(nodes.getOrNull(idx + 1) ?: nodes.firstOrNull()).map { it to 0L }
         }
-        val best = sorted.firstOrNull() ?: return
+        val best = sorted.firstOrNull()
+        if (best == null) {
+            LogStore.append("[failover] 所有节点测活均无响应 (网络中断/服务器维护)")
+            return false
+        }
         if (best.first.uri != selectedUri) {
             LogStore.append("[failover] 切换到: ${best.first.displayName} (${best.second}ms)")
             runCatching { MirageNative.setNode(best.first.uri) }
@@ -352,6 +368,7 @@ class CoreService : VpnService() {
                 if (isActive && !MirageNative.isRunning()) startInternal()
             }
         }
+        return true
     }
 
     fun stopInternal(): Unit = synchronized(stateLock) {
