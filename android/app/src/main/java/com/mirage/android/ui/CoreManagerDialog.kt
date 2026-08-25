@@ -9,6 +9,8 @@ import android.os.Build
 import android.view.LayoutInflater
 import android.widget.Toast
 import androidx.activity.result.ActivityResultLauncher
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.mirage.android.R
 import com.mirage.android.core.CoreManager
@@ -16,6 +18,7 @@ import com.mirage.android.core.NativeLoader
 import com.mirage.android.data.model.CoreInfo
 import com.mirage.android.databinding.DialogCoreManagerBinding
 import com.mirage.android.ui.adapter.CoreAdapter
+import kotlinx.coroutines.launch
 
 /**
  * 内核管理对话框控制器。
@@ -65,6 +68,10 @@ class CoreManagerDialog(
         b.recyclerCores.adapter = adapter
         refreshList()
 
+        b.btnCheckOnlineCore.setOnClickListener {
+            checkOnlineReleases()
+        }
+
         b.btnImportCore.setOnClickListener {
             onPickSoFile()
         }
@@ -83,6 +90,73 @@ class CoreManagerDialog(
             .create()
 
         alertDialog?.show()
+    }
+
+    private fun checkOnlineReleases() {
+        val b = binding ?: return
+        val scope = (context as? androidx.lifecycle.LifecycleOwner)?.lifecycleScope 
+            ?: kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
+
+        b.btnCheckOnlineCore.isEnabled = false
+        b.btnCheckOnlineCore.text = "正在查询 GitHub Releases..."
+
+        scope.launch {
+            val result = coreManager.fetchOnlineReleases()
+
+            result.onSuccess { releases ->
+                if (releases.isEmpty()) {
+                    b.btnCheckOnlineCore.isEnabled = true
+                    b.btnCheckOnlineCore.text = "检查 GitHub 在线内核 (Releases)"
+                    Toast.makeText(context, "暂无与当前架构 (${Build.SUPPORTED_ABIS.firstOrNull()}) 兼容的在线内核", Toast.LENGTH_LONG).show()
+                } else {
+                    val latest = releases.first()
+                    startDownloadRelease(latest)
+                }
+            }.onFailure { e ->
+                b.btnCheckOnlineCore.isEnabled = true
+                b.btnCheckOnlineCore.text = "检查 GitHub 在线内核 (Releases)"
+                Toast.makeText(context, "查询失败: ${e.message} (请开启代理重试)", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun startDownloadRelease(release: com.mirage.android.data.model.OnlineReleaseInfo) {
+        val b = binding ?: return
+        val scope = (context as? androidx.lifecycle.LifecycleOwner)?.lifecycleScope 
+            ?: kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
+
+        b.layoutDownloadProgress.visibility = android.view.View.VISIBLE
+        b.progressBarDownload.progress = 0
+        b.tvDownloadStatus.text = "正在下载 ${release.tagName} (${release.formattedSize})..."
+        b.tvDownloadPercent.text = "0%"
+        b.btnCheckOnlineCore.isEnabled = false
+        b.btnCheckOnlineCore.text = "正在下载内核 ${release.tagName}..."
+
+        android.util.Log.i("Mirage", "[loader] 开始下载在线内核: ${release.tagName} from ${release.downloadUrl}")
+        scope.launch {
+            val result = coreManager.downloadAndImportRelease(release) { percent ->
+                b.root.post {
+                    b.progressBarDownload.progress = percent
+                    b.tvDownloadPercent.text = "$percent%"
+                }
+            }
+
+            b.layoutDownloadProgress.visibility = android.view.View.GONE
+            b.btnCheckOnlineCore.isEnabled = true
+            b.btnCheckOnlineCore.text = "检查 GitHub 在线内核 (Releases)"
+
+            result.onSuccess { core ->
+                android.util.Log.i("Mirage", "[loader] 在线内核下载并导入成功: ${core.name} (${core.filePath})")
+                coreManager.setActiveCore(core.id)
+                refreshList()
+                updateCurrentCoreView()
+                onCoreChanged()
+                Toast.makeText(context, "成功下载并激活内核: ${core.name}\n(若已连接VPN请重新连接生效)", Toast.LENGTH_LONG).show()
+            }.onFailure { e ->
+                android.util.Log.e("Mirage", "[loader] 在线内核下载或导入失败: ${e.message}", e)
+                Toast.makeText(context, "下载失败: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
     fun handleImportUri(uri: Uri) {

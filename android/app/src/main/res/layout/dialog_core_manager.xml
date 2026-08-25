@@ -95,33 +95,89 @@
         android:maxHeight="220dp"
         tools:listitem="@layout/item_core" />
 
-    <!-- 底部按钮 -->
+    <!-- 在线下载与进度展示 -->
+    <LinearLayout
+        android:id="@+id/layoutDownloadProgress"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/tvDownloadStatus"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:textColor="@color/meow_blue"
+                android:textSize="12sp"
+                android:text="正在下载在线内核..." />
+
+            <TextView
+                android:id="@+id/tvDownloadPercent"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/meow_blue"
+                android:textSize="12sp"
+                android:text="0%" />
+        </LinearLayout>
+
+        <com.google.android.material.progressindicator.LinearProgressIndicator
+            android:id="@+id/progressBarDownload"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            app:indicatorColor="@color/meow_blue"
+            app:trackColor="#E2E8F0"
+            app:trackCornerRadius="4dp" />
+    </LinearLayout>
+
+    <!-- 底部按钮区 -->
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnCheckOnlineCore"
+        style="@style/MirageButton"
+        android:layout_width="match_parent"
+        android:layout_height="44dp"
+        android:layout_marginTop="10dp"
+        android:text="检查 GitHub 在线内核 (Releases)"
+        android:textSize="13sp"
+        app:cornerRadius="8dp"
+        app:icon="@drawable/ic_refresh"
+        app:iconGravity="textStart"
+        app:iconSize="18dp" />
+
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
+        android:layout_marginTop="8dp"
         android:orientation="horizontal">
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnImportCore"
-            style="@style/MirageButton"
+            style="@style/Widget.Material3.Button.TonalButton"
             android:layout_width="0dp"
-            android:layout_height="44dp"
+            android:layout_height="42dp"
             android:layout_marginEnd="4dp"
             android:layout_weight="1"
-            android:text="导入本地内核 (.so)"
-            android:textSize="13sp"
+            android:text="导入本地 (.so)"
+            android:textSize="12sp"
             app:cornerRadius="8dp" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnResetBuiltin"
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="0dp"
-            android:layout_height="44dp"
+            android:layout_height="42dp"
             android:layout_marginStart="4dp"
             android:layout_weight="1"
             android:text="恢复内置默认"
-            android:textSize="13sp"
+            android:textSize="12sp"
             app:cornerRadius="8dp"
             app:strokeColor="@color/meow_outline" />
     </LinearLayout>

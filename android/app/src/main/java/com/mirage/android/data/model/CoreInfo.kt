@@ -41,3 +41,25 @@ data class CoreInfo(
         }
     }
 }
+
+/**
+ * GitHub Releases 在线内核发布版本信息。
+ */
+data class OnlineReleaseInfo(
+    val tagName: String,
+    val name: String,
+    val body: String,
+    val publishedAt: String,
+    val assetName: String,
+    val downloadUrl: String,
+    val sizeBytes: Long,
+    val targetAbi: String
+) {
+    val formattedSize: String get() {
+        return when {
+            sizeBytes >= 1 shl 20 -> "%.2f MB".format(sizeBytes.toDouble() / (1 shl 20))
+            sizeBytes >= 1 shl 10 -> "%.1f KB".format(sizeBytes.toDouble() / (1 shl 10))
+            else -> "$sizeBytes B"
+        }
+    }
+}
