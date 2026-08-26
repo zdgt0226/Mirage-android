@@ -272,7 +272,7 @@ class CoreService : VpnService() {
             runCatching { registerReceiver(receiver, screenFilter) }
         }
 
-        // 注册底层物理网络监听 (Wi-Fi <-> 蜂窝移动网络切换时即时冲刷暖池坏死连接，并绑定底层物理网络)
+        // 注册系统默认底层物理网络监听 (Wi-Fi <-> 蜂窝移动网络切换时即时冲刷暖池坏死连接，并绑定底层物理网络)
         val cm = getSystemService(ConnectivityManager::class.java)
         if (cm != null && networkCallback == null) {
             val cb = object : ConnectivityManager.NetworkCallback() {
@@ -304,11 +304,15 @@ class CoreService : VpnService() {
             }
             networkCallback = cb
             runCatching {
-                val req = NetworkRequest.Builder()
-                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                    .build()
-                cm.registerNetworkCallback(req, cb)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    cm.registerDefaultNetworkCallback(cb)
+                } else {
+                    val req = NetworkRequest.Builder()
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                        .build()
+                    cm.registerNetworkCallback(req, cb)
+                }
             }
         }
 
@@ -729,37 +733,9 @@ class CoreService : VpnService() {
                 LogStore.append("[core] protect 失败: active 未设置!")
                 return
             }
-            // ① 传统 protect (SO_MARK 路由)
-            val ok = runCatching { inst.protect(fd) }.isSuccess
-            // ② Android 14+/16 增强: protect(fd) 可能不足以让 socket 绕过 VPN。
-            //    显式把 socket 绑定到**非 VPN 的底层网络** —— 注意: 不能用
-            //    cm.activeNetwork (VPN 激活时它可能返回 VPN 网络, 绑上去反而走 TUN
-            //    环路! 实机 DEBUG 日志证实隧道 SYN 进了 TUN)。遍历找第一个
-            //    TRANSPORT_VPN=false 且 INTERNET 的真实网络绑定。
-            var netOk = false
-            runCatching {
-                val cm = inst.getSystemService(android.net.ConnectivityManager::class.java)
-                val realNet = inst.currentPhysicalNetwork ?: cm.allNetworks.firstOrNull { net ->
-                    val caps = cm.getNetworkCapabilities(net)
-                    caps != null
-                        && !caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
-                        && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                }
-                if (realNet != null) {
-                    // 修复 FD 泄漏: fromFd(fd) 底层通过 dup(fd) 创建了一个副本描述符，
-                    // 必须通过 pfd.close() 正常关闭副本描述符；切勿调用 detachFd()，
-                    // 否则每次 protect 都会向进程泄露一个 FD，运行数小时后必触发 Too many open files！
-                    android.os.ParcelFileDescriptor.fromFd(fd).use { pfd ->
-                        realNet.bindSocket(pfd.fileDescriptor)
-                        netOk = true
-                    }
-                } else {
-                    LogStore.append("[core] 未找到非 VPN 底层网络")
-                }
-            }
-            // 修复 M6: 降低日志刷屏，仅在绑定或保护失败时记录关键告警
-            if (!ok || !netOk) {
-                LogStore.append("[core] protect fd=$fd 告警 (protectOk=$ok, bindNetOk=$netOk)")
+            val ok = runCatching { inst.protect(fd) }.getOrDefault(false)
+            if (!ok) {
+                LogStore.append("[core] protect(fd=$fd) 失败")
             }
         }
 

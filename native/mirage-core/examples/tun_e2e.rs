@@ -45,7 +45,7 @@ fn create_tun(name: &str) -> std::io::Result<(RawFd, String)> {
     let mut req = IfReq { name: [0u8; 16], flags: (IFF_TUN | IFF_NO_PI) as libc::c_short, _pad: [0u8; 22] };
     let name_bytes = name.as_bytes();
     req.name[..name_bytes.len()].copy_from_slice(name_bytes);
-    let ret = unsafe { libc::ioctl(tun_fd, TUNSETIFF, &mut req as *mut _ as *mut libc::c_void) };
+    let ret = unsafe { libc::ioctl(tun_fd, TUNSETIFF as _, &mut req as *mut _ as *mut libc::c_void) };
     if ret < 0 {
         return Err(std::io::Error::last_os_error());
     }
