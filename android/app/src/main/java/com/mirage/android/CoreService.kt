@@ -726,6 +726,14 @@ class CoreService : VpnService() {
         @Volatile
         private var active: CoreService? = null
 
+        private val fdField by lazy {
+            runCatching {
+                java.io.FileDescriptor::class.java.getDeclaredField("descriptor").apply {
+                    isAccessible = true
+                }
+            }.getOrNull()
+        }
+
         @JvmStatic
         fun protectFd(fd: Int) {
             val inst = active
@@ -733,7 +741,24 @@ class CoreService : VpnService() {
                 LogStore.append("[core] protect 失败: active 未设置!")
                 return
             }
+            // ① 传统 protect (SO_MARK 策略路由)
             val ok = runCatching { inst.protect(fd) }.getOrDefault(false)
+            // ② 物理网络显式绑定 (双重防护): 确保双网卡(Wi-Fi+5G)共存时流量必定走活动物理网卡
+            runCatching {
+                val realNet = inst.currentPhysicalNetwork
+                if (realNet != null) {
+                    val field = fdField
+                    if (field != null) {
+                        val fdesc = java.io.FileDescriptor()
+                        field.setInt(fdesc, fd)
+                        realNet.bindSocket(fdesc)
+                    } else {
+                        val pfd = android.os.ParcelFileDescriptor.fromFd(fd)
+                        realNet.bindSocket(pfd.fileDescriptor)
+                        pfd.detachFd() // 显式 detach，防止关闭底层原生 fd
+                    }
+                }
+            }
             if (!ok) {
                 LogStore.append("[core] protect(fd=$fd) 失败")
             }

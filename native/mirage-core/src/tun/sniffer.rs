@@ -80,20 +80,8 @@ impl Sniffer {
         SniffResult::default()
     }
 
-    /// 解析 TLS ClientHello 提取 SNI 扩展
-    pub fn parse_tls_sni(buf: &[u8]) -> Option<String> {
-        // Record Header (5 字节): [0x16, major, minor, len_hi, len_lo]
-        if buf.len() < 5 || buf[0] != 0x16 {
-            return None;
-        }
-
-        let record_len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
-        let data = if buf.len() >= 5 + record_len {
-            &buf[5..5 + record_len]
-        } else {
-            &buf[5..]
-        };
-
+    /// 解析 TLS ClientHello 载荷提取 SNI 扩展 (从 Handshake 头部开始，零堆分配)
+    pub fn parse_client_hello_payload(data: &[u8]) -> Option<String> {
         // Handshake Header: Type 0x01 (ClientHello), Length 3 字节
         if data.len() < 4 || data[0] != 0x01 {
             return None;
@@ -162,6 +150,23 @@ impl Sniffer {
         None
     }
 
+    /// 解析 TLS ClientHello 提取 SNI 扩展
+    pub fn parse_tls_sni(buf: &[u8]) -> Option<String> {
+        // Record Header (5 字节): [0x16, major, minor, len_hi, len_lo]
+        if buf.len() < 5 || buf[0] != 0x16 {
+            return None;
+        }
+
+        let record_len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
+        let data = if buf.len() >= 5 + record_len {
+            &buf[5..5 + record_len]
+        } else {
+            &buf[5..]
+        };
+
+        Self::parse_client_hello_payload(data)
+    }
+
     /// 解析 HTTP 1.1 请求提取 Host 头
     pub fn parse_http_host(buf: &[u8]) -> Option<String> {
         // 检查常见的 HTTP 方法
@@ -202,19 +207,18 @@ impl Sniffer {
         None
     }
 
-    /// 解析 QUIC 初始包提取 SNI
+    /// 解析 QUIC 初始包提取 SNI (零堆分配切片解析)
     pub fn parse_quic_sni(buf: &[u8]) -> Option<String> {
         let limit = buf.len().min(1200);
-        for i in 0..limit.saturating_sub(40) {
-            if buf[i] == 0x01 {
-                let fake_record = [
-                    &[0x16, 0x03, 0x03, 0x00, 0x00][..],
-                    &buf[i..],
-                ].concat();
-                if let Some(sni) = Self::parse_tls_sni(&fake_record) {
+        let mut i = 0;
+        while i < limit.saturating_sub(40) {
+            // ClientHello 头部特征: Type 0x01, Length 高位 0x00
+            if buf[i] == 0x01 && i + 1 < limit && buf[i + 1] == 0x00 {
+                if let Some(sni) = Self::parse_client_hello_payload(&buf[i..]) {
                     return Some(sni);
                 }
             }
+            i += 1;
         }
         None
     }

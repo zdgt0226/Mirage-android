@@ -245,7 +245,15 @@ impl MuxTunnel {
     }
 
     pub fn alloc_sid(&self) -> u32 {
-        self.next_sid.fetch_add(1, Ordering::Relaxed)
+        let mut sid = self.next_sid.fetch_add(1, Ordering::Relaxed);
+        if sid == 0 {
+            sid = self.next_sid.fetch_add(1, Ordering::Relaxed);
+            if sid == 0 {
+                sid = 1;
+                self.next_sid.store(2, Ordering::Relaxed);
+            }
+        }
+        sid
     }
 
     fn unregister(&self, sid: u32) {

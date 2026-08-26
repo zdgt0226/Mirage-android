@@ -52,10 +52,70 @@ impl Ipv4Cidr {
     }
 }
 
+/// GeoSite 快速哈希索引匹配器 (将 O(N) 线性搜索优化为 O(1) 哈希查询)
+#[derive(Debug, Clone, Default)]
+pub struct GeoSiteMatcher {
+    pub count: usize,
+    pub exact_set: std::collections::HashSet<String>,
+    pub suffix_set: std::collections::HashSet<String>,
+    pub other_rules: Vec<SiteDomain>,
+}
+
+impl GeoSiteMatcher {
+    pub fn new(domains: Vec<SiteDomain>) -> Self {
+        let count = domains.len();
+        let mut exact_set = std::collections::HashSet::with_capacity(domains.len());
+        let mut suffix_set = std::collections::HashSet::with_capacity(domains.len());
+        let mut other_rules = Vec::new();
+
+        for d in domains {
+            match d {
+                SiteDomain::Exact(v) => {
+                    exact_set.insert(v.trim_end_matches('.').to_ascii_lowercase());
+                }
+                SiteDomain::Suffix(v) => {
+                    suffix_set.insert(v.trim_end_matches('.').to_ascii_lowercase());
+                }
+                other => other_rules.push(other),
+            }
+        }
+        Self {
+            count,
+            exact_set,
+            suffix_set,
+            other_rules,
+        }
+    }
+
+    pub fn matches(&self, domain: &str) -> bool {
+        let d = domain.trim_end_matches('.').to_ascii_lowercase();
+        if self.exact_set.contains(&d) {
+            return true;
+        }
+        if self.suffix_set.contains(&d) {
+            return true;
+        }
+        // 快速遍历子域后缀 (例如 "sub.example.com" 遍历 "example.com" 和 "com")
+        let mut remaining = d.as_str();
+        while let Some(idx) = remaining.find('.') {
+            remaining = &remaining[idx + 1..];
+            if self.suffix_set.contains(remaining) {
+                return true;
+            }
+        }
+        for item in &self.other_rules {
+            if item.matches(domain) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
 #[derive(Default)]
 pub struct GeoStore {
-    /// geosite: tag (大写, 如 "CN", "GOOGLE", "CATEGORY-ADS-ALL") -> 域名匹配列表
-    pub sites: HashMap<String, Vec<SiteDomain>>,
+    /// geosite: tag (大写, 如 "CN", "GOOGLE", "CATEGORY-ADS-ALL") -> 哈希索引匹配器
+    pub sites: HashMap<String, GeoSiteMatcher>,
     /// geoip: code (大写, 如 "CN", "TELEGRAM", "PRIVATE") -> IPv4 网段列表
     pub ip_v4: HashMap<String, Vec<Ipv4Cidr>>,
     pub geosite_path: String,
@@ -65,14 +125,11 @@ pub struct GeoStore {
 impl GeoStore {
     pub fn match_geosite(&self, tag: &str, domain: &str) -> bool {
         let tag_upper = tag.trim().to_ascii_uppercase();
-        if let Some(list) = self.sites.get(&tag_upper) {
-            for item in list {
-                if item.matches(domain) {
-                    return true;
-                }
-            }
+        if let Some(matcher) = self.sites.get(&tag_upper) {
+            matcher.matches(domain)
+        } else {
+            false
         }
-        false
     }
 
     pub fn match_geoip(&self, code: &str, ip: IpAddr) -> bool {
@@ -446,8 +503,13 @@ pub fn load_geo_files(geosite_path: &str, geoip_path: &str) -> (usize, usize) {
     let site_count = site_map.len();
     let ip_count = ip_map.len();
 
+    let indexed_sites: HashMap<String, GeoSiteMatcher> = site_map
+        .into_iter()
+        .map(|(tag, domains)| (tag, GeoSiteMatcher::new(domains)))
+        .collect();
+
     let mut g = global_geo().write().unwrap_or_else(|e| e.into_inner());
-    g.sites = site_map;
+    g.sites = indexed_sites;
     g.ip_v4 = ip_map;
     g.geosite_path = geosite_path.to_string();
     g.geoip_path = geoip_path.to_string();
@@ -487,10 +549,10 @@ pub fn get_geo_tags_json() -> String {
 pub fn get_geo_tags_detail_json() -> String {
     let g = global_geo().read().unwrap_or_else(|e| e.into_inner());
     
-    let mut site_details: Vec<serde_json::Value> = g.sites.iter().map(|(tag, entries)| {
+    let mut site_details: Vec<serde_json::Value> = g.sites.iter().map(|(tag, matcher)| {
         serde_json::json!({
             "tag": tag,
-            "count": entries.len(),
+            "count": matcher.count,
         })
     }).collect();
     site_details.sort_by(|a, b| {

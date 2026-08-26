@@ -54,8 +54,8 @@ use crate::engine::{Engine, TUN_ADDR_V4, TUN_DNS_V4, TUN_PEER_V4};
 use crate::tun::device::TunDevice;
 
 pub const TUN_MTU: usize = 1400;
-/// TCP socket 收发缓冲 (每条连接 2×128KB)。移动端吞吐与内存占用的最佳平衡点。
-pub const SOCK_BUF: usize = 128 * 1024;
+/// TCP socket 收发缓冲 (每条连接 2×256KB)。大幅提升跨国长肥链路 (Google Play / CDN) 单流吞吐。
+pub const SOCK_BUF: usize = 256 * 1024;
 /// 无 4 元组的 catcher socket (SYN 来了没人连) 的存活上限, 到点由 sweeper 回收。
 const CATCHER_TTL: Duration = Duration::from_secs(15);
 /// 泵的定时 tick (驱动 smoltcp 计时器: 重传/窗口/超时)。
