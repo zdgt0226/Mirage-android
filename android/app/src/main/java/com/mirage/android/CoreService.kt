@@ -684,15 +684,12 @@ class CoreService : VpnService() {
                         && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 }
                 if (realNet != null) {
-                    // 修复 S3: 使用 ParcelFileDescriptor 必须在 close 前调用 detachFd() 剥离底层描述符所有权，
-                    // 严禁关闭底层 socket，否则 Rust 随后 connect() 时会因 EBADF 失败！
-                    val pfd = android.os.ParcelFileDescriptor.fromFd(fd)
-                    try {
+                    // 修复 FD 泄漏: fromFd(fd) 底层通过 dup(fd) 创建了一个副本描述符，
+                    // 必须通过 pfd.close() 正常关闭副本描述符；切勿调用 detachFd()，
+                    // 否则每次 protect 都会向进程泄露一个 FD，运行数小时后必触发 Too many open files！
+                    android.os.ParcelFileDescriptor.fromFd(fd).use { pfd ->
                         realNet.bindSocket(pfd.fileDescriptor)
                         netOk = true
-                    } finally {
-                        pfd.detachFd()
-                        pfd.close()
                     }
                 } else {
                     LogStore.append("[core] 未找到非 VPN 底层网络")
