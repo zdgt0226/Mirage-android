@@ -301,6 +301,24 @@ pub fn is_cn_ip(ip: IpAddr) -> bool {
     false
 }
 
+/// 严格国内域名判定 (只查内置白名单 + .cn 后缀, 不查 Geo 数据)。
+///
+/// ⚠️ 不能直接用 `is_cn_domain`: 它第一步查 `match_geosite_tag("CN")`, 而 geosite cn
+/// 数据**可能误含境外域名** (实测 update.googleapis.com / gstatic.com 在 cn 标签里,
+/// 这是 Play 更新慢的根因之一: cn 规则把 Google 服务劫持去直连 DNS 污染的假 IP)。
+pub fn is_cn_domain_strict(domain: &str) -> bool {
+    let d_lower = domain.trim_end_matches('.').to_ascii_lowercase();
+    if d_lower.ends_with(".cn") || d_lower == "cn" {
+        return true;
+    }
+    for &d in crate::direct_cn_domains::CN_DOMAINS {
+        if d_lower == d || d_lower.ends_with(&format!(".{d}")) {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn is_cn_domain(domain: &str) -> bool {
     if match_geosite_tag("CN", domain) {
         return true;
@@ -373,6 +391,29 @@ pub fn route_decision(
     // 1. 优先遍历用户自定义复合规则 (自上而下，首条命中即返回)
     for rule in &r.rules {
         if rule.matches(domain, ip, port, protocol) {
+            // ⚠️ geosite:cn → direct 特判: geosite cn 数据可能误含境外域名
+            // (实测 update.googleapis.com / gstatic.com 被 cn 标签命中), 若直接
+            // 直连 → Play 等 Google 服务被 DNS 污染 IP 拖慢。cn 直连只对"严格
+            // 国内域名"生效 (内置白名单 / .cn 后缀 / 内置 CN IP 段), 否则跳过该
+            // 规则让后续 proxy 规则 (geosite:google 等) 命中。
+            let cn_direct = rule.action == RuleAction::Direct
+                && rule.conditions.iter().any(|c| matches!(c, ConditionKind::GeoSite(t) if t.eq_ignore_ascii_case("cn")));
+            if cn_direct {
+                // 用**纯内置**判定 (不查 Geo 数据), 避免 geosite cn 误含境外域名时放行
+                let strictly_cn = match domain {
+                    Some(d) => is_cn_domain_strict(d),
+                    None => ip.is_some_and(|i| is_cn_ip(i)),
+                };
+                if !strictly_cn {
+                    tracing::debug!(
+                        "[ROUTER] geosite:cn 命中但非严格国内 ({:?}), 跳过该规则继续匹配",
+                        domain.map(|d| d.to_string())
+                            .or(ip.map(|i| i.to_string()))
+                            .unwrap_or_default()
+                    );
+                    continue;
+                }
+            }
             record_rule_hit(&rule.id, &rule.name, rule.action.as_str());
             return rule.action;
         }
@@ -687,6 +728,36 @@ mod tests {
         // 4. Foreign domain without explicit rule over Fake-IP MUST fall back to default_action (Proxy)
         let dec4 = route_decision(Some("twitter.com"), Some(fake_ip), Some(443), Some("tcp"));
         assert_eq!(dec4, RuleAction::Proxy);
+    }
+
+    #[test]
+    fn geosite_cn_direct_does_not_hijack_foreign_domains() {
+        // 复现 Play 更新慢根因: geosite:cn 数据误含 googleapis.com 等境外域名,
+        // 若 cn→direct 直接生效会把 Google 服务直连到 DNS 污染的国内假 IP。
+        // 规则: geosite:cn→direct (排前), geosite:google→proxy (排后)。
+        set_custom_rules(&format!(
+            r#"{{"default_action":"proxy","rules":[
+                {{"id":"r1","name":"cn-direct","action":"direct","logic":"OR","conditions":[{{"type":"geosite","pattern":"cn"}}]}},
+                {{"id":"r2","name":"google-proxy","action":"proxy","logic":"OR","conditions":[{{"type":"geosite","pattern":"google"}}]}}
+            ]}}"#
+        ));
+        // 境外 Google 域名必须走 proxy (不被 cn 数据误劫持)
+        assert_eq!(
+            route_decision(Some("update.googleapis.com"), None, Some(53), Some("udp")),
+            RuleAction::Proxy,
+            "update.googleapis.com 必须走 proxy (geosite cn 误含境外域名时不得直连)"
+        );
+        assert_eq!(
+            route_decision(Some("play.google.com"), None, Some(443), Some("tcp")),
+            RuleAction::Proxy
+        );
+        // 真正国内域名仍应直连 (cn 数据对真实 CN 域名有效)
+        assert_eq!(
+            route_decision(Some("www.baidu.com"), None, Some(80), Some("tcp")),
+            RuleAction::Direct,
+            "baidu 仍应直连"
+        );
+        set_custom_rules(r#"{"rules":[],"default_action":"proxy"}"#);
     }
 
     #[test]
