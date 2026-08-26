@@ -50,8 +50,14 @@ class NodesFragment : Fragment() {
 
     private fun setupRecyclerView() {
         adapter = NodeAdapter(
-            onSelect = { index, _ -> viewModel.selectNode(index) },
-            onTest = { index, _ -> viewModel.testNode(index) },
+            onSelect = { index, _ ->
+                com.mirage.android.util.Haptic.toggle(binding.root)
+                viewModel.selectNode(index)
+            },
+            onTest = { index, _ ->
+                com.mirage.android.util.Haptic.tap(binding.root)
+                viewModel.testNode(index)
+            },
             onEdit = { index, _ -> showNodeDialog(index) },
             onDelete = { index, node ->
                 AlertDialog.Builder(requireContext())
@@ -68,9 +74,13 @@ class NodesFragment : Fragment() {
     }
 
     private fun setupButtons() {
-        binding.addNodeBtn.setOnClickListener { showNodeDialog(null) }
+        binding.addNodeBtn.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
+            showNodeDialog(null)
+        }
 
         binding.btnImportClipboard.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
             val cm = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             val text = cm.primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
             val count = viewModel.importFromClipboard(text)
@@ -82,6 +92,7 @@ class NodesFragment : Fragment() {
         }
 
         binding.btnTestAll.setOnClickListener {
+            com.mirage.android.util.Haptic.confirm(it)
             // 批量测速 + RTT 排序展示
             viewModel.testAllWithSort { sorted ->
                 if (sorted.isEmpty()) {
@@ -103,14 +114,17 @@ class NodesFragment : Fragment() {
         }
 
         binding.autoSelectBtn.setOnClickListener {
+            com.mirage.android.util.Haptic.toggle(it)
             viewModel.toggleAutoSelect()
         }
 
         binding.testMethodBtn.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
             chooseTestMethod()
         }
 
         binding.btnPoolSize.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
             choosePoolSize()
         }
     }

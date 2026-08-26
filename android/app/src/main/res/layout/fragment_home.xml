@@ -189,20 +189,21 @@
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- 实时速率卡片: 上传 / 下载 (Telegram 扁平双列卡片) -->
+        <!-- 实时速率 Bento Grid: 上行 / 下行 对称便当盒 -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
             android:orientation="horizontal">
 
+            <!-- 上传 Bento 卡片 -->
             <com.google.android.material.card.MaterialCardView
                 style="@style/MirageCard"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginEnd="6dp"
                 android:layout_weight="1"
-                app:cardCornerRadius="14dp">
+                app:cardCornerRadius="16dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -214,30 +215,43 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:background="@drawable/bg_bento_pill_upload"
+                        android:paddingHorizontal="10dp"
+                        android:paddingVertical="3dp"
                         android:text="↑ 实时上传"
                         android:textColor="@color/meow_upload"
-                        android:textSize="12sp"
+                        android:textSize="11sp"
                         android:textStyle="bold" />
 
                     <TextView
                         android:id="@+id/upRate"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
+                        android:layout_marginTop="8dp"
+                        android:fontFamily="monospace"
                         android:text="0 B/s"
                         android:textColor="@color/meow_ink"
-                        android:textSize="20sp"
+                        android:textSize="21sp"
                         android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="实时上行吞吐"
+                        android:textColor="@color/meow_ink_secondary"
+                        android:textSize="11sp" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
+            <!-- 下载 Bento 卡片 -->
             <com.google.android.material.card.MaterialCardView
                 style="@style/MirageCard"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="6dp"
                 android:layout_weight="1"
-                app:cardCornerRadius="14dp">
+                app:cardCornerRadius="16dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -249,31 +263,43 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:background="@drawable/bg_bento_pill_download"
+                        android:paddingHorizontal="10dp"
+                        android:paddingVertical="3dp"
                         android:text="↓ 实时下载"
                         android:textColor="@color/meow_download"
-                        android:textSize="12sp"
+                        android:textSize="11sp"
                         android:textStyle="bold" />
 
                     <TextView
                         android:id="@+id/downRate"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
+                        android:layout_marginTop="8dp"
+                        android:fontFamily="monospace"
                         android:text="0 B/s"
                         android:textColor="@color/meow_ink"
-                        android:textSize="20sp"
+                        android:textSize="21sp"
                         android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="实时下行吞吐"
+                        android:textColor="@color/meow_ink_secondary"
+                        android:textSize="11sp" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
         </LinearLayout>
 
-        <!-- 累计流量与活跃连接 -->
+        <!-- 累计流量与用量 Bento 详情卡片 -->
         <com.google.android.material.card.MaterialCardView
             style="@style/MirageCard"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
-            app:cardCornerRadius="14dp">
+            app:cardCornerRadius="16dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -281,20 +307,41 @@
                 android:orientation="vertical"
                 android:padding="16dp">
 
-                <TextView
-                    android:id="@+id/totalFlow"
+                <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="累计流量: ↑0 B / ↓0 B"
-                    android:textColor="@color/meow_ink"
-                    android:textSize="14sp"
-                    android:textStyle="bold" />
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <ImageView
+                        android:layout_width="16dp"
+                        android:layout_height="16dp"
+                        android:src="@drawable/ic_nav_traffic"
+                        app:tint="@color/meow_blue" />
+
+                    <TextView
+                        android:id="@+id/totalFlow"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1"
+                        android:fontFamily="monospace"
+                        android:text="累计流量: ↑0 B / ↓0 B"
+                        android:textColor="@color/meow_ink"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginVertical="10dp"
+                    android:background="@color/meow_outline" />
 
                 <TextView
                     android:id="@+id/connsInfo"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
                     android:text="活跃连接: TCP 0 · UDP 0 · DNS 0"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="12sp" />

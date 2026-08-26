@@ -84,6 +84,7 @@ class RulesFragment : Fragment() {
                     .show()
             },
             onToggleEnabled = { index, _, _ ->
+                com.mirage.android.util.Haptic.toggle(binding.root)
                 viewModel.toggleRuleEnabled(index)
             },
             onMove = { from, to ->
@@ -115,7 +116,7 @@ class RulesFragment : Fragment() {
                 super.onSelectedChanged(viewHolder, actionState)
                 if (actionState == ItemTouchHelper.ACTION_STATE_DRAG && viewHolder is RuleAdapter.RuleViewHolder) {
                     // 触觉震动反馈
-                    viewHolder.itemView.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                    com.mirage.android.util.Haptic.longPress(viewHolder.itemView)
                     // 浮起放大与高亮
                     viewHolder.binding.cardRule.apply {
                         animate().scaleX(1.03f).scaleY(1.03f).setDuration(120).start()
@@ -129,6 +130,7 @@ class RulesFragment : Fragment() {
             override fun clearView(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
                 super.clearView(recyclerView, viewHolder)
                 if (viewHolder is RuleAdapter.RuleViewHolder) {
+                    com.mirage.android.util.Haptic.tap(viewHolder.itemView)
                     viewHolder.binding.cardRule.apply {
                         animate().scaleX(1.0f).scaleY(1.0f).setDuration(120).start()
                         cardElevation = 0f
@@ -151,25 +153,38 @@ class RulesFragment : Fragment() {
 
     private fun setupButtons() {
         binding.cardGeoAssetCenter.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
             startActivity(Intent(requireContext(), GeoAssetActivity::class.java))
         }
 
         binding.cardAppFilter.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
             startActivity(Intent(requireContext(), AppFilterActivity::class.java))
         }
 
-        binding.btnQuickGeoPreset.setOnClickListener { showQuickGeoPresetDialog() }
+        binding.btnQuickGeoPreset.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
+            showQuickGeoPresetDialog()
+        }
 
-        binding.addRuleBtn.setOnClickListener { showRuleDialog(null) }
+        binding.addRuleBtn.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
+            showRuleDialog(null)
+        }
 
         binding.btnResetHits.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
             viewModel.resetRuleHits()
             Toast.makeText(requireContext(), "已清空规则命中统计", Toast.LENGTH_SHORT).show()
         }
 
-        binding.defaultActionBtn.setOnClickListener { chooseDefaultAction() }
+        binding.defaultActionBtn.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
+            chooseDefaultAction()
+        }
 
         binding.applyRulesBtn.setOnClickListener {
+            com.mirage.android.util.Haptic.confirm(it)
             val ok = viewModel.applyRules()
             Toast.makeText(requireContext(), if (ok) "分流规则已立即生效" else "规则应用失败", Toast.LENGTH_SHORT).show()
         }

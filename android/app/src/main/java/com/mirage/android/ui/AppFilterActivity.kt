@@ -59,6 +59,7 @@ class AppFilterActivity : AppCompatActivity() {
         }
 
         binding.switchEnable.setOnCheckedChangeListener { _, isChecked ->
+            com.mirage.android.util.Haptic.toggle(binding.root)
             currentConfig = currentConfig.copy(enabled = isChecked)
             updateSummary()
         }
@@ -68,6 +69,7 @@ class AppFilterActivity : AppCompatActivity() {
         }
 
         binding.rgMode.setOnCheckedChangeListener { _, checkedId ->
+            com.mirage.android.util.Haptic.toggle(binding.root)
             val mode = if (checkedId == R.id.rbAllow) AppFilterMode.ALLOW else AppFilterMode.DISALLOW
             currentConfig = currentConfig.copy(mode = mode)
             updateSummary()
@@ -82,6 +84,7 @@ class AppFilterActivity : AppCompatActivity() {
         })
 
         binding.btnSelectAll.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
             val visible = getCurrentFilteredApps()
             visible.forEach { selectedPackages.add(it.packageName) }
             refreshAdapterList()
@@ -89,6 +92,7 @@ class AppFilterActivity : AppCompatActivity() {
         }
 
         binding.btnClearAll.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
             val visible = getCurrentFilteredApps()
             visible.forEach { selectedPackages.remove(it.packageName) }
             refreshAdapterList()
@@ -100,6 +104,7 @@ class AppFilterActivity : AppCompatActivity() {
 
     private fun setupRecyclerView() {
         adapter = AppFilterAdapter(repository) { item, isChecked ->
+            com.mirage.android.util.Haptic.toggle(binding.root)
             if (isChecked) {
                 selectedPackages.add(item.packageName)
             } else {

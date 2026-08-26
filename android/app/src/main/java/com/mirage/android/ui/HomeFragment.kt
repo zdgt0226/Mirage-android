@@ -45,14 +45,17 @@ class HomeFragment : Fragment() {
         updateVersionBadge()
 
         binding.tvVersion.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
             showVersionDetailsDialog()
         }
 
         binding.tvAppSubtitle.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
             showVersionDetailsDialog()
         }
 
         binding.connectSwitch.setOnClickListener {
+            com.mirage.android.util.Haptic.toggle(it)
             val isChecked = binding.connectSwitch.isChecked
             if (isChecked && !viewModel.vpnState.value.isRunning) {
                 performConnect()
@@ -61,10 +64,17 @@ class HomeFragment : Fragment() {
             }
         }
 
-        binding.btnBackup.setOnClickListener { showBackupDialog() }
-        binding.btnRestore.setOnClickListener { showRestoreDialog() }
+        binding.btnBackup.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
+            showBackupDialog()
+        }
+        binding.btnRestore.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
+            showRestoreDialog()
+        }
 
         binding.connectBtn.setOnClickListener {
+            com.mirage.android.util.Haptic.confirm(it)
             if (viewModel.vpnState.value.isRunning) {
                 viewModel.disconnect()
             } else {
@@ -73,14 +83,17 @@ class HomeFragment : Fragment() {
         }
 
         binding.nodeSelectCard.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
             (activity as? MainActivity)?.navigateToTab(1)
         }
 
         binding.dnsCard.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
             showDnsConfigDialog()
         }
 
         binding.tunCard.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
             showTunConfigDialog()
         }
         updateTunSummary()

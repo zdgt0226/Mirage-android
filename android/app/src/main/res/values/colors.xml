@@ -16,4 +16,11 @@
     <color name="meow_accent_tint">#E8F2FA</color>   <!-- 浅蓝淡色胶囊底色 -->
     <color name="meow_console_bg">#181F26</color>    <!-- Telegram 风格深色控制台面板 -->
     <color name="meow_error">#FF3B30</color>         <!-- 错误/断开红 -->
+    
+    <!-- Bento Grid 便当盒现代色彩 Tokens -->
+    <color name="meow_upload_tint">#EBF5FF</color>   <!-- 上传柔和淡色底 -->
+    <color name="meow_download_tint">#E8F8FF</color> <!-- 下载柔和淡色底 -->
+    <color name="meow_connected_tint">#EAF8EF</color><!-- 已连接柔和安全绿底 -->
+    <color name="meow_amber_tint">#FFF8EB</color>    <!-- 告警柔和琥珀底 -->
+    <color name="meow_surface_bento">#F8FAFC</color> <!-- Bento 卡片浅色质感底 -->
 </resources>
