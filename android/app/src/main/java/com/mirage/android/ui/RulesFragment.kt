@@ -63,11 +63,13 @@ class RulesFragment : Fragment() {
         setupButtons()
         observeState()
         refreshGeoSummary()
+        refreshAppFilterSummary()
     }
 
     override fun onResume() {
         super.onResume()
         refreshGeoSummary()
+        refreshAppFilterSummary()
     }
 
     private fun setupRecyclerView() {
@@ -152,6 +154,10 @@ class RulesFragment : Fragment() {
             startActivity(Intent(requireContext(), GeoAssetActivity::class.java))
         }
 
+        binding.cardAppFilter.setOnClickListener {
+            startActivity(Intent(requireContext(), AppFilterActivity::class.java))
+        }
+
         binding.btnQuickGeoPreset.setOnClickListener { showQuickGeoPresetDialog() }
 
         binding.addRuleBtn.setOnClickListener { showRuleDialog(null) }
@@ -167,7 +173,17 @@ class RulesFragment : Fragment() {
             val ok = viewModel.applyRules()
             Toast.makeText(requireContext(), if (ok) "分流规则已立即生效" else "规则应用失败", Toast.LENGTH_SHORT).show()
         }
+    }
 
+    private fun refreshAppFilterSummary() {
+        val ctx = context ?: return
+        val config = com.mirage.android.core.AppFilterStore.getConfig(ctx)
+        if (!config.enabled) {
+            binding.tvAppFilterSummary.text = "未启用 (默认全部应用由 VPN 规则接管)"
+        } else {
+            val modeText = if (config.mode == com.mirage.android.data.model.AppFilterMode.ALLOW) "白名单模式" else "黑名单模式"
+            binding.tvAppFilterSummary.text = "已启用 · $modeText (${config.selectedPackages.size} 款应用)"
+        }
     }
 
     private fun refreshGeoSummary() {

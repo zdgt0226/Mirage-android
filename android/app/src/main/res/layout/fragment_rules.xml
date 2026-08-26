@@ -109,6 +109,67 @@
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
+    <!-- 分应用代理 (Per-App Proxy) 快速配置入口 -->
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/cardAppFilter"
+        style="@style/MirageCard"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:clickable="true"
+        android:focusable="true"
+        android:foreground="?attr/selectableItemBackground"
+        app:cardCornerRadius="12dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="14dp"
+            android:paddingVertical="10dp">
+
+            <ImageView
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:background="@drawable/badge_latency_bg"
+                android:padding="6dp"
+                android:src="@drawable/ic_nav_home"
+                app:tint="@color/meow_connected" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="分应用代理 (Per-App Proxy)"
+                    android:textColor="@color/meow_ink"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvAppFilterSummary"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="白名单 / 黑名单模式 · 精确指定应用进出 VPN"
+                    android:textColor="@color/meow_ink_secondary"
+                    android:textSize="11sp" />
+            </LinearLayout>
+
+            <ImageView
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:src="@drawable/ic_arrow_forward"
+                app:tint="@color/meow_ink_secondary" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
     <!-- 拖拽排序提示栏 -->
     <LinearLayout
         android:layout_width="match_parent"

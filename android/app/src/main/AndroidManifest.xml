@@ -42,6 +42,11 @@
             android:name=".ui.GeoAssetActivity"
             android:exported="false" />
 
+        <!-- 分应用代理设置 -->
+        <activity
+            android:name=".ui.AppFilterActivity"
+            android:exported="false" />
+
         <!-- VPN 服务 (独立内核进程 :core) -->
         <service
             android:name=".CoreService"

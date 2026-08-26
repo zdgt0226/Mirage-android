@@ -74,4 +74,5 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.6")
     implementation("androidx.fragment:fragment-ktx:1.8.4")
+    testImplementation("junit:junit:4.13.2")
 }

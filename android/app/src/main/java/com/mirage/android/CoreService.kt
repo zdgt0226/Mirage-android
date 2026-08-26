@@ -57,6 +57,7 @@ class CoreService : VpnService() {
     private var watchdogJob: Job? = null
     private var failoverRestartJob: Job? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var screenReceiver: BroadcastReceiver? = null
     @Volatile
     var currentPhysicalNetwork: Network? = null
     private var lastRecordedUp = -1L
@@ -90,6 +91,10 @@ class CoreService : VpnService() {
         networkCallback?.let { cb ->
             runCatching { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) }
             networkCallback = null
+        }
+        screenReceiver?.let {
+            runCatching { unregisterReceiver(it) }
+            screenReceiver = null
         }
         currentPhysicalNetwork = null
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -169,6 +174,34 @@ class CoreService : VpnService() {
         val mtu = TunConfigStore.getMtu(this)
         builder.setMtu(mtu)
 
+        // 分应用代理 (Per-App Proxy / Split Tunneling)
+        runCatching {
+            val filterConfig = com.mirage.android.core.AppFilterStore.getConfig(this)
+            val installedPackages = packageManager.getInstalledApplications(0).map { it.packageName }
+            when (filterConfig.mode) {
+                com.mirage.android.data.model.AppFilterMode.ALLOW -> {
+                    val allowed = com.mirage.android.data.repository.AppFilterManager.computeEffectiveAllowed(filterConfig, installedPackages)
+                    if (allowed.isNotEmpty()) {
+                        log("[filter] 启用白名单分应用代理: 仅代理 ${allowed.size} 款应用")
+                        allowed.forEach { pkg ->
+                            runCatching { builder.addAllowedApplication(pkg) }
+                        }
+                    }
+                }
+                com.mirage.android.data.model.AppFilterMode.DISALLOW -> {
+                    val disallowed = com.mirage.android.data.repository.AppFilterManager.computeEffectiveDisallowed(filterConfig, installedPackages)
+                    if (disallowed.isNotEmpty()) {
+                        log("[filter] 启用黑名单分应用代理: 绕过 ${disallowed.size} 款应用")
+                        disallowed.forEach { pkg ->
+                            runCatching { builder.addDisallowedApplication(pkg) }
+                        }
+                    }
+                }
+            }
+            // 自身应用强制排除在 VPN 之外 (防止自环)
+            runCatching { builder.addDisallowedApplication(packageName) }
+        }
+
         val fd = try { builder.establish() } catch (e: Exception) {
             log("[core] TUN establish 异常: ${e.message}")
             return -3
@@ -209,6 +242,35 @@ class CoreService : VpnService() {
         log("[core] 内核已启动")
         notifyState()
         runCatching { sendBroadcast(Intent(ACTION_VPN_STARTED).setPackage(packageName)) }
+
+        // 注册屏幕亮灭广播 (自适应低功耗动态连接池)
+        if (screenReceiver == null) {
+            val screenFilter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_SCREEN_ON)
+            }
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    when (intent?.action) {
+                        Intent.ACTION_SCREEN_OFF -> {
+                            scope.launch {
+                                delay(15000)
+                                val target = com.mirage.android.data.repository.AppFilterManager.calculateAdaptivePoolSize(screenOn = false, hasActiveHighTraffic = false)
+                                LogStore.append("[power] 息屏低功耗模式: 连接池缩容至 $target 条")
+                                runCatching { MirageNative.setPoolSize(target) }
+                            }
+                        }
+                        Intent.ACTION_SCREEN_ON -> {
+                            val target = com.mirage.android.data.repository.AppFilterManager.calculateAdaptivePoolSize(screenOn = true, hasActiveHighTraffic = false)
+                            LogStore.append("[power] 屏幕点亮: 连接池恢复至 $target 条")
+                            runCatching { MirageNative.setPoolSize(target) }
+                        }
+                    }
+                }
+            }
+            screenReceiver = receiver
+            runCatching { registerReceiver(receiver, screenFilter) }
+        }
 
         // 注册底层物理网络监听 (Wi-Fi <-> 蜂窝移动网络切换时即时冲刷暖池坏死连接，并绑定底层物理网络)
         val cm = getSystemService(ConnectivityManager::class.java)
