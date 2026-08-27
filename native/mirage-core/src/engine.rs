@@ -47,7 +47,7 @@ impl NodeInfo {
             server_port: uri.port,
             password: uri.password.clone(),
             sni: uri.sni.clone(),
-            pool_size: uri.pool_size.unwrap_or(8),
+            pool_size: uri.pool_size.unwrap_or(16),
             pfs: false,
             udp_mux: uri.udp_mux.unwrap_or(true),
         }

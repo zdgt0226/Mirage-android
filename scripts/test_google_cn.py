@@ -6,7 +6,7 @@ import urllib.request
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-DEVICE = "BH905W2A9G"
+DEVICE = "R5CX21FD9PX"
 DEBUG_API = "http://127.0.0.1:9090"
 
 # 126 google@cn 域名列表

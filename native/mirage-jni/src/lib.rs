@@ -29,7 +29,7 @@ use mirage_core::node_uri::NodeUri;
 static STARTED: AtomicBool = AtomicBool::new(false);
 /// 引擎与 TUN 栈句柄 (stop 时置空)。
 static RUNTIME: Mutex<Option<Arc<RunState>>> = Mutex::new(None);
-static CURRENT_POOL_SIZE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(8);
+static CURRENT_POOL_SIZE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(16);
 static CURRENT_NODE_URI: Mutex<Option<String>> = Mutex::new(None);
 
 struct RunState {

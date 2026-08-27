@@ -171,7 +171,7 @@ object NodeStore {
     }
 
     fun getPoolSize(ctx: Context): Int =
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(KEY_POOL, 4)
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(KEY_POOL, 16)
 
     fun setPoolSize(ctx: Context, size: Int) {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt(KEY_POOL, size).apply()

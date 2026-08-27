@@ -81,7 +81,7 @@ pub enum OutboundConfig {
 }
 
 fn d_camouflage_host() -> String { "www.apple.com".into() }
-fn d_pool_size() -> usize { 4 }
+fn d_pool_size() -> usize { 16 }
 fn d_test_type() -> String { "ping".into() }
 fn d_true() -> bool { true }
 fn d_udp_mux_tunnels() -> usize { 4 }

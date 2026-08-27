@@ -74,7 +74,7 @@ class NodeRepository(private val context: Context) {
         prefs.edit().putInt(KEY_SELECTED, targetIdx).apply()
         _testMethod.value = prefs.getString(KEY_TEST_METHOD, "tcp") ?: "tcp"
         _isAutoSelect.value = prefs.getBoolean(KEY_AUTO_SELECT, false)
-        val pool = prefs.getInt(KEY_POOL, 8)
+        val pool = prefs.getInt(KEY_POOL, 16)
         _poolSize.value = pool
         com.mirage.android.core.NodeStore.setPoolSize(context, pool)
         saveNodes(finalNodes)

@@ -92,7 +92,7 @@ object CoreController {
     fun stop() { call { it.stop() } }
     fun setNode(uri: String): Boolean = call { it.setNode(uri) } ?: false
     fun setPoolSize(poolSize: Int): Boolean = call { it.setPoolSize(poolSize) } ?: false
-    fun getPoolSize(): Int = call { it.poolSize } ?: 8
+    fun getPoolSize(): Int = call { it.poolSize } ?: 16
     fun setRules(json: String): Boolean = call { it.setRules(json) } ?: false
     fun getRuleHits(): String = call { it.ruleHits } ?: "[]"
     fun resetRuleHits(): Boolean = call { it.resetRuleHits() } ?: false

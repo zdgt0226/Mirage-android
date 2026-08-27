@@ -365,10 +365,10 @@ impl WarmPool {
         let max_size = Arc::new(AtomicUsize::new(initial_size));
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        // 并发拨号上限: 至少 8 (图片秒开), 至多 16 (防 thundering herd)。
+        // 并发拨号上限: 至少 16 (图片秒开), 至多 32 (防 thundering herd)。
         // 平滑靠回流 + notify (见 refill_or_take), 而非压低并发 —— 太低的并发
-        // (如 4) 会让 20 张图片排队成渐进延迟 (实测 1.6~8s), 违背"秒开"初衷。
-        let on_demand_limit = initial_size.max(8).min(16);
+        // (如 4/8) 会让 20 张图片排队成渐进延迟 (实测 1.6~8s), 违背"秒开"初衷。
+        let on_demand_limit = initial_size.max(16).min(32);
         let pool = Self {
             queue: queue.clone(),
             notify: notify.clone(),
@@ -505,54 +505,61 @@ impl WarmPool {
                     tokio::time::sleep(backoff).await;
                 }
 
-                // SYN Staggering: 阶梯延迟防止暖池在平稳期一次性喷 SYN。
-                // 若池子处于饥饿状态 (current_idle == 0)，则缩短补货延迟，快速填满基础容量。
-                if current_idle > 0 {
+                // 突发并发补货 (Burst Refill):
+                // 若池子处于饥饿状态 (current_idle == 0)，立即取消平稳期阶梯等待，一次性并发补充多条连接；
+                // 若池子处于平稳补货期 (current_idle > 0)，施加 150ms 阶梯延迟平滑 SYN 抖动。
+                let burst_count = if current_idle == 0 {
+                    let needed = current_target.saturating_sub(current_idle + current_in_flight);
+                    needed.min(8).max(1)
+                } else {
                     let now = Instant::now();
                     if next_build_at > now {
                         tokio::time::sleep_until(next_build_at).await;
                     }
                     next_build_at = Instant::now() + Duration::from_millis(150 + fastrand::u64(0..=150));
-                }
+                    1
+                };
 
-                let cfg_task = cfg_clone.clone();
-                let q_task = q_clone_builder.clone();
-                let n_task = n_clone_builder.clone();
-                let in_flight_task = in_flight_clone.clone();
-                let stats_task = stats_builder.clone();
-                let brutal_state_builder = brutal_state_builder.clone();
-                let shutdown_task = shutdown_builder.clone();
+                for _ in 0..burst_count {
+                    let cfg_task = cfg_clone.clone();
+                    let q_task = q_clone_builder.clone();
+                    let n_task = n_clone_builder.clone();
+                    let in_flight_task = in_flight_clone.clone();
+                    let stats_task = stats_builder.clone();
+                    let brutal_state_builder = brutal_state_builder.clone();
+                    let shutdown_task = shutdown_builder.clone();
 
-                in_flight_clone.fetch_add(1, Ordering::Relaxed);
+                    in_flight_clone.fetch_add(1, Ordering::Relaxed);
 
-                tokio::spawn(async move {
-                    if shutdown_task.load(Ordering::Relaxed) {
-                        in_flight_task.fetch_sub(1, Ordering::Relaxed);
-                        return;
-                    }
-                    let start = Instant::now();
-                    match Self::connect_upstream(&cfg_task, &brutal_state_builder).await {
-                        Ok(tunnel) => {
-                            let elapsed = start.elapsed().as_millis() as u64;
-                            stats_task.write().unwrap_or_else(|e| e.into_inner()).record_latency(elapsed);
-                            
-                            if shutdown_task.load(Ordering::Relaxed) {
+                    tokio::spawn(async move {
+                        if shutdown_task.load(Ordering::Relaxed) {
+                            in_flight_task.fetch_sub(1, Ordering::Relaxed);
+                            return;
+                        }
+                        let start = Instant::now();
+                        match Self::connect_upstream(&cfg_task, &brutal_state_builder).await {
+                            Ok(tunnel) => {
+                                let elapsed = start.elapsed().as_millis() as u64;
+                                stats_task.write().unwrap_or_else(|e| e.into_inner()).record_latency(elapsed);
+                                
+                                if shutdown_task.load(Ordering::Relaxed) {
+                                    in_flight_task.fetch_sub(1, Ordering::Relaxed);
+                                    return;
+                                }
+                                q_task.lock().await.push_back(tunnel);
+                                n_task.notify_one();
                                 in_flight_task.fetch_sub(1, Ordering::Relaxed);
-                                return;
+                                tracing::trace!("WarmPool: 预热连接就绪 ({}ms)", elapsed);
                             }
-                            q_task.lock().await.push_back(tunnel);
-                            n_task.notify_one();
-                            in_flight_task.fetch_sub(1, Ordering::Relaxed);
-                            tracing::trace!("WarmPool: 预热连接就绪 ({}ms)", elapsed);
+                            Err(e) => {
+                                stats_task.write().unwrap_or_else(|e| e.into_inner()).record_failure();
+                                in_flight_task.fetch_sub(1, Ordering::Relaxed);
+                                error!("WarmPool: 上游连接失败: {:?}", e);
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                            }
                         }
-                        Err(e) => {
-                            stats_task.write().unwrap_or_else(|e| e.into_inner()).record_failure();
-                            in_flight_task.fetch_sub(1, Ordering::Relaxed);
-                            error!("WarmPool: 上游连接失败: {:?}", e);
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                        }
-                    }
-                });
+                    });
+                }
             }
         });
 
