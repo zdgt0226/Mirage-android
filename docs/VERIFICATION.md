@@ -127,3 +127,59 @@ scripts/test-e2e.sh   # 需 root; 内部用 systemd-nspawn 隔离, 不动宿主�
 | **国内直连与海外代理共存** | 国内站点（`m.bilibili.com`）与海外站点（`x.com`）同时并发访问，国内流量瞬时直连传输完成，海外流量持续稳定走隧道代理 (`233_bilibili_and_x_coexist.png`) |
 | **自动化回归测试** | `cargo test` 103 项测试全部通过（新增 `test_fake_ip_routing_safety`） |
 
+
+---
+
+## 2026-08-27 Google Play 更新慢 — 深度诊断与修复验证
+
+**环境**: SM-S9260 (Android 16, R5CX21FD9PX) 实测诊断 + SO-02K (Android 9) 修复验证
+**现象**: Play 商店 16 个 App 更新下载极慢/停滞 (小红书 86.6MB 下载耗时数分钟)
+
+### 根因 (完整链路)
+
+```
+Play 请求 gstatic/googleapis/gvt1
+  ├─ ① DNS 污染: 上游 DNS (223.5.5.5/119.29.29.29) 对 Google 域名返回国内假 IP
+  │     checkin.gstatic.com → 180.163.150.162 (上海电信)
+  │     connectivitycheck.gstatic.com → 202.101.48.66 (上海电信)
+  │     update.googleapis.com → 202.101.48.33 (上海电信)
+  │     safebrowsing.googleapis.com → 180.163.151.33 (上海电信)
+  ├─ ② geosite:cn 数据误含 googleapis.com/gstatic.com (实测设备 geosite.dat cn 标签命中)
+  ├─ ③ 规则顺序缺陷: geosite:cn→direct 排在 geosite:google→proxy 前
+  │     → Google 服务被劫持"直连" → 连污染假 IP → 3.05s 超时 → Play 卡在检查/下载
+  └─ ④ 隧道 RTT 470ms (SM-S9260→117.55.230.75 移动链路) → 单流吞吐 ~210KB/s (次要)
+     + WarmPool target=64 过大 (64 条常驻隧道竞争带宽, 稀释单流)
+```
+
+### 关键实测数据
+
+| 测试 | 结果 |
+|---|---|
+| 宿主直连服务器 TCP | **4-5ms** (服务器本身极快) |
+| SM-S9260 直连服务器 TCP | **470ms** (移动链路绕路) |
+| 隧道吞吐 (SM-S9260) | **~210KB/s** (窗口/RTT 限制: 256KB/0.47s≈545KB/s 上限) |
+| 假 IP 直连 180.163.150.34:443 | **3.05s** (污染 IP, Play 修复前实际行为) |
+| 经隧道连 play.googleapis.com (SO-02K) | **0.27s** (修复后) |
+| **提速** | **~10 倍** |
+
+### 修复 (commit 2fff723)
+
+1. **`is_cn_domain_strict`**: 纯内置白名单 + .cn 后缀判定, **不查被污染的 Geo 数据**
+2. **geosite:cn→direct 特判**: route_decision 中命中 cn direct 但域名非严格国内时
+   **跳过该规则**, 让后续 proxy 规则 (geosite:google 等) 命中 → Google 走隧道
+3. **回归测试**: `geosite_cn_direct_does_not_hijack_foreign_domains` —
+   googleapis/gstatic→Proxy, baidu/weixin→Direct
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 宿主 (加载真实 geosite.dat) | gstatic/googleapis→**Proxy**, baidu/weixin→**Direct** |
+| cargo test | **104 passed** (含回归测试) |
+| SO-02K 实机 (内置内核) | play.googleapis.com/play-fe → **Fake-IP 隧道**; 隧道 0.27s vs 直连污染 IP 3.05s |
+
+### 遗留 / 建议
+
+- **SM-S9260 需切回内置内核** (设备激活自定义 v0.10.3 不含此修复) + 重装验证 Play 更新提速
+- **WarmPool target=64 过大**: 建议 8-16 (实测单流吞吐受限 + 服务器资源), SM-S9260 已临时降至 8
+- **UI 状态不同步** (VPN 连接但首页显示未连接): 已知 bug (MutableStateFlow 相等值不 emit)
