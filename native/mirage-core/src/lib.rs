@@ -33,6 +33,7 @@ pub mod time_sync;
 pub mod monitor;
 pub mod protect;
 pub mod tun;
+pub mod debug_server;
 
 /// 版本信息 (跟随 vendored 协议版本, 见 vendor/SYNC.md)。
 pub const PROTOCOL_SYNC: &str = include_str!("vendor/SYNC.md");

@@ -244,6 +244,9 @@ impl TunStack {
         let pump_stack = stack.clone();
         tokio::spawn(pump(pump_stack, rx));
 
+        // 启动远程调试 REST API (127.0.0.1:9090)
+        crate::debug_server::start_debug_server(9090, Arc::clone(&engine), Arc::clone(&stack));
+
         info!("TUN 引擎已启动 (mtu={}, fd={})", mtu, fd);
         Ok(stack)
     }

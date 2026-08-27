@@ -358,7 +358,7 @@ fn send_dns_reply_rcode(stack: &TunStack, client: std::net::SocketAddr, server: 
 /// DNS 查询计数 (流量监测用)。
 pub static DNS_QUERIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// DNS 查询入口 (mod.rs 调用): Anycast 劫持与分流 (国内→真实 IP, 国外→fake-IP)。
+/// DNS 查询入口 (mod.rs 调用): 全量 Fake-IP 极速架构 (0ms 秒回，彻底免疫 GFW 污染与排队)。
 pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, server: std::net::SocketAddr, query: &[u8]) {
     use crate::direct;
     let Some((domain, qtype, question_len)) = parse_query(query) else { return };
@@ -379,69 +379,24 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, serv
         return;
     }
 
-    if decision == direct::RuleAction::Direct {
-        if qtype == 1 {
-            // A 记录: 直连上游解析真实 IP
-            let (cid, _conn_up, _conn_down) = crate::monitor::record_conn_start(
-                "DNS",
-                &format!("{domain}:53"),
-                "国内直连解析",
-            );
-            tracing::info!("[TUN-DNS] 直连 DNS 查询: {} (A) from {} (目标 DNS: {})", domain, client, server);
-            let stack2 = stack.clone();
-            let query2 = query.to_vec();
-            let qlen = query.len() as u64;
-            tokio::spawn(async move {
-                match resolve_upstream(&domain).await {
-                    Some(ip) => {
-                        send_dns_reply(&stack2, client, server, &query2, &domain, qtype, Some(ip.octets()), question_len);
-                        crate::monitor::record_conn_close(cid, qlen, 64);
-                    }
-                    None => {
-                        let engine = stack2.engine();
-                        if engine.is_healthy() {
-                            if let Some(a) = engine.fake_ip_allocate(&domain).map(|i| i.octets()) {
-                                tracing::warn!("[TUN-DNS] 直连解析超时，自动降级 Fake-IP 代理: {} → 198.18.{}.{}", domain, a[2], a[3]);
-                                send_dns_reply(&stack2, client, server, &query2, &domain, qtype, Some(a), question_len);
-                                crate::monitor::record_conn_close(cid, qlen, 64);
-                            } else {
-                                crate::monitor::record_conn_close(cid, qlen, 0);
-                            }
-                        } else {
-                            tracing::warn!("[TUN-DNS] 直连解析失败且隧道不健康, 返回 SERVFAIL ({}), 避免 fake-IP 白等", domain);
-                            send_dns_reply_rcode(&stack2, client, server, &query2, &domain, qtype, None, question_len, 3);
-                            crate::monitor::record_conn_close(cid, qlen, 0);
-                        }
-                    }
-                }
-            });
-            return;
-        } else {
-            // 非 A 记录 (AAAA/HTTPS/TXT): 直连域名直接返回 NOERROR 空应答，避免客户端反复重试或创建冗余 Fake-IP
-            tracing::info!("[TUN-DNS] 直连 DNS 空应答 (type={}): {} from {}", qtype, domain, client);
-            send_dns_reply(&stack, client, server, query, &domain, qtype, None, question_len);
-            return;
+    if qtype == 1 {
+        // A 记录: 全量统一分配 Fake-IP (0ms 秒回，避免上游 DNS 排队与 GFW 污染注入系统 DNS 缓存)
+        let a = stack.engine().fake_ip_allocate(&domain).map(|ip| ip.octets());
+        if let Some(ref oct) = a {
+            tracing::debug!("[TUN-DNS] Fake-IP 分配: {} → 198.18.{}.{} (qtype=1) from {}", domain, oct[2], oct[3], client);
         }
-    }
-
-    // 默认: 海外/代理域名分配 Fake-IP
-    let a = if qtype == 1 {
-        let allocated = stack.engine().fake_ip_allocate(&domain).map(|ip| ip.octets());
-        if let Some(ref oct) = allocated {
-            tracing::info!("[TUN-DNS] 代理 Fake-IP 分配: {} → 198.18.{}.{} (qtype=1) from {}", domain, oct[2], oct[3], client);
-        }
-        allocated
+        let (cid, _conn_up, _conn_down) = crate::monitor::record_conn_start(
+            "DNS",
+            &format!("{domain}:53"),
+            "Fake-IP 秒回",
+        );
+        send_dns_reply(&stack, client, server, query, &domain, qtype, a, question_len);
+        crate::monitor::record_conn_close(cid, query.len() as u64, 64);
     } else {
-        tracing::debug!("[TUN-DNS] 代理非 A 记录查询: {} (type={}) from {} → 返回空应答", domain, qtype, client);
-        None
-    };
-    let (cid, _conn_up, _conn_down) = crate::monitor::record_conn_start(
-        "DNS",
-        &format!("{domain}:53"),
-        "Fake-IP 代理",
-    );
-    send_dns_reply(&stack, client, server, query, &domain, qtype, a, question_len);
-    crate::monitor::record_conn_close(cid, query.len() as u64, 64);
+        // 非 A 记录 (AAAA/HTTPS/TXT): 返回空应答 (NOERROR)，引导客户端立即回退 IPv4
+        tracing::debug!("[TUN-DNS] 非 A 记录查询: {} (type={}) from {} → 空应答", domain, qtype, client);
+        send_dns_reply(&stack, client, server, query, &domain, qtype, None, question_len);
+    }
 }
 
 /// UDP DNS 应答 (兼容旧接口, TCP DNS relay 用; fake-IP 路径)。

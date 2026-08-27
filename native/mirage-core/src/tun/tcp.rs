@@ -318,6 +318,17 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
         return;
     }
 
+    relay_proxy(stack, stream, dst, direct_domain, initial_payload).await;
+}
+
+/// 代理路径: smoltcp socket ⇄ Mirage 加密隧道
+async fn relay_proxy(
+    stack: Arc<TunStack>,
+    stream: TunTcpStream,
+    dst: (std::net::IpAddr, u16),
+    direct_domain: Option<String>,
+    initial_payload: Vec<u8>,
+) {
     let tunnel = match connect_tunnel(&stack, dst, direct_domain.clone()).await {
         Ok(t) => t,
         Err(e) => {
@@ -426,7 +437,7 @@ fn _sock_buf_const() -> usize {
     SOCK_BUF
 }
 
-/// 直连路径: smoltcp socket ⇄ 真实 TCP socket (protect 绕过 TUN)。
+/// 直连路径: smoltcp socket ⇄ 真实 TCP socket (protect 绕过 TUN，带自动回退代理)。
 async fn relay_direct(
     stack: Arc<TunStack>,
     stream: TunTcpStream,
@@ -437,7 +448,7 @@ async fn relay_direct(
     let engine = stack.engine();
     let is_fake = engine.is_fake_ip(&dst.0);
 
-    // 如果目标是 Fake-IP，必须先解析出公网真实 IP，避免向虚拟不可达地址发起直连
+    // 如果目标是 Fake-IP，必须先解析出公网真实 IP
     let target_ip = if is_fake {
         if let Some(ref dom) = direct_domain {
             if let Some(real_ip) = crate::tun::dns::direct_dns_lookup(dom) {
@@ -445,8 +456,8 @@ async fn relay_direct(
             } else if let Some(real_v4) = crate::tun::dns::resolve_upstream(dom).await {
                 std::net::IpAddr::V4(real_v4)
             } else {
-                debug!("[TUN-TCP/direct] 直连域名 [{}] 真实解析失败，放弃直连", dom);
-                return;
+                debug!("[TUN-TCP/direct] 直连域名 [{}] 真实解析超时，自动平滑回退走隧道代理", dom);
+                return relay_proxy(stack, stream, dst, direct_domain, initial_payload).await;
             }
         } else {
             debug!("[TUN-TCP/direct] 目标为 Fake-IP ({}) 但无对应域名映射，无法直连", dst.0);
@@ -455,6 +466,12 @@ async fn relay_direct(
     } else {
         dst.0
     };
+
+    // 严密安全防护: 若 Fake-IP 域名解析出非国内 IP (如境外域名被规则误判或 DNS 污染)，自动回退隧道代理
+    if is_fake && !crate::direct::is_cn_ip(target_ip) && !crate::direct::is_direct_ip(target_ip) {
+        debug!("[TUN-TCP/direct] 域名 [{:?}] 解析为非国内 IP ({})，自动回退走隧道代理", direct_domain, target_ip);
+        return relay_proxy(stack, stream, dst, direct_domain, initial_payload).await;
+    }
 
     let target_display = if let Some(ref dom) = direct_domain {
         format!("{}:{}", dom, dst.1)
@@ -482,19 +499,19 @@ async fn relay_direct(
     // protect: 直连 socket 也要绕过 TUN (否则 0.0.0.0/0→tun0 环路)
     crate::protect::protect(sock.as_raw_fd());
     let mut remote = match tokio::time::timeout(
-        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(8),
         sock.connect(addr),
     ).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             crate::monitor::record_conn_close(cid, 0, 0);
-            debug!("[TUN-TCP/direct] 连接 {addr} 失败: {e}");
-            return;
+            debug!("[TUN-TCP/direct] 直连 {addr} 失败: {e}，自动回退走隧道代理");
+            return relay_proxy(stack, stream, dst, direct_domain, initial_payload).await;
         }
         Err(_) => {
             crate::monitor::record_conn_close(cid, 0, 0);
-            debug!("[TUN-TCP/direct] 连接 {addr} 超时");
-            return;
+            debug!("[TUN-TCP/direct] 直连 {addr} 超时，自动回退走隧道代理");
+            return relay_proxy(stack, stream, dst, direct_domain, initial_payload).await;
         }
     };
     let _ = remote.set_nodelay(true);
