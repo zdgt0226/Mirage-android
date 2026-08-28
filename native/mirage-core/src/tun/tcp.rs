@@ -36,10 +36,18 @@ impl Drop for TcpActiveGuard {
 
 /// 建连 (SYN→Established) 超时。catcher 被 SYN 接住后一般一个 RTT 内完成握手。
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-/// 隧道 relay 空闲超时 (双向 300s 无数据则断开释放资源，兼顾 SSH/IM/推送长连接与防僵尸连接)。
-const RELAY_IDLE: std::time::Duration = std::time::Duration::from_secs(300);
-/// 直连 relay 空闲超时 (300s: 兼顾长连接保活与系统资源回收)。
-const RELAY_IDLE_DIRECT: std::time::Duration = std::time::Duration::from_secs(300);
+/// 隧道与直连长连接/SSH等兜底空闲超时 (300s)
+const RELAY_IDLE_LONG: std::time::Duration = std::time::Duration::from_secs(300);
+/// 移动端 HTTP/HTTPS (Web/图片 CDN/API) 活跃传输后的短空闲超时 (10s)。
+/// 用于瓦解移动端 OkHttp / Glide / Fresco 默认 300s 的 Keep-Alive 僵尸占坑，促使隧道及时回流。
+const RELAY_IDLE_SHORT: std::time::Duration = std::time::Duration::from_secs(10);
+/// 连接建立后、首个应用层请求到达前的初始等待超时 (15s)
+const RELAY_IDLE_INITIAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+#[inline]
+fn is_interactive_port(port: u16) -> bool {
+    matches!(port, 22 | 23 | 3389)
+}
 
 /// 一条已建立的 TCP 连接 (smoltcp 侧)。
 pub struct TunTcpStream {
@@ -357,12 +365,20 @@ async fn relay_proxy(
         conn_up.fetch_add(initial_payload.len() as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
+    let is_interactive = is_interactive_port(dst.1);
     let up_atomic = conn_up.clone();
     let upload = async {
         let mut up_bytes: u64 = 0;
         let mut buf = [0u8; 65536];
         loop {
-            match tokio::time::timeout(RELAY_IDLE, local_rd.read(&mut buf)).await {
+            let timeout_dur = if is_interactive {
+                RELAY_IDLE_LONG
+            } else if up_bytes > 0 {
+                RELAY_IDLE_SHORT
+            } else {
+                RELAY_IDLE_INITIAL
+            };
+            match tokio::time::timeout(timeout_dur, local_rd.read(&mut buf)).await {
                 Ok(Ok(0)) => {
                     let _ = tun_writer.send_close_notify().await;
                     break;
@@ -378,7 +394,11 @@ async fn relay_proxy(
                     let _ = tun_writer.send_close_notify().await;
                     break;
                 }
-                Err(_) => break,
+                Err(_) => {
+                    debug!("[TUN-TCP] 上行空闲超时 ({}s), 优雅关闭", timeout_dur.as_secs());
+                    let _ = tun_writer.send_close_notify().await;
+                    break;
+                }
             }
         }
         up_bytes
@@ -388,14 +408,24 @@ async fn relay_proxy(
     let download = async {
         let mut down_bytes: u64 = 0;
         loop {
-            match tokio::time::timeout(RELAY_IDLE, tun_reader.recv_data_to(&mut local_wr)).await {
+            let timeout_dur = if is_interactive {
+                RELAY_IDLE_LONG
+            } else if down_bytes > 0 {
+                RELAY_IDLE_SHORT
+            } else {
+                RELAY_IDLE_INITIAL
+            };
+            match tokio::time::timeout(timeout_dur, tun_reader.recv_data_to(&mut local_wr)).await {
                 Ok(Ok(Some(n))) => {
                     down_bytes += n as u64;
                     down_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                 }
                 Ok(Ok(None)) => break, // 对端正常 close_notify
                 Ok(Err(_)) => break,
-                Err(_) => break,
+                Err(_) => {
+                    debug!("[TUN-TCP] 下行空闲超时 ({}s), 优雅关闭", timeout_dur.as_secs());
+                    break;
+                }
             }
         }
         let _ = local_wr.shutdown().await;
@@ -530,12 +560,20 @@ async fn relay_direct(
     let mut local = stream;
     let (mut lr, mut lw) = tokio::io::split(&mut local);
     let (mut rr, mut rw) = remote.split();
+    let is_interactive = is_interactive_port(dst.1);
     let up_atomic = conn_up.clone();
     let to_tunnel = async {
         let mut up_bytes: u64 = 0;
         let mut buf = [0u8; 65536];
         loop {
-            match tokio::time::timeout(RELAY_IDLE_DIRECT, lr.read(&mut buf)).await {
+            let timeout_dur = if is_interactive {
+                RELAY_IDLE_LONG
+            } else if up_bytes > 0 {
+                RELAY_IDLE_SHORT
+            } else {
+                RELAY_IDLE_INITIAL
+            };
+            match tokio::time::timeout(timeout_dur, lr.read(&mut buf)).await {
                 Ok(Ok(0)) => break,
                 Ok(Ok(n)) => {
                     if rw.write_all(&buf[..n]).await.is_err() { break; }
@@ -553,7 +591,14 @@ async fn relay_direct(
         let mut down_bytes: u64 = 0;
         let mut buf = [0u8; 65536];
         loop {
-            match tokio::time::timeout(RELAY_IDLE_DIRECT, rr.read(&mut buf)).await {
+            let timeout_dur = if is_interactive {
+                RELAY_IDLE_LONG
+            } else if down_bytes > 0 {
+                RELAY_IDLE_SHORT
+            } else {
+                RELAY_IDLE_INITIAL
+            };
+            match tokio::time::timeout(timeout_dur, rr.read(&mut buf)).await {
                 Ok(Ok(0)) => break,
                 Ok(Ok(n)) => {
                     if lw.write_all(&buf[..n]).await.is_err() { break; }
