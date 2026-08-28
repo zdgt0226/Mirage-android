@@ -206,14 +206,16 @@ pub fn classify_connection(dst_port: u16, domain: Option<&str>) -> (TrafficCateg
         let found = with_profiles_write(|map| {
             if let Some(profile) = map.get_mut(&dom_lower) {
                 profile.last_seen_secs = now;
-                // 重连反弹检测: 若上次关闭在 4 秒内且是被 IdleTimeout 掐断
-                if profile.last_closed_secs > 0
+                // 重连反弹检测 (仅对动态 GeneralApi 规则生效, 静态规则与 CDN/IM 不参与 Churn 放大)
+                if !profile.is_static_rule
+                    && profile.category == TrafficCategory::GeneralApi
+                    && profile.last_closed_secs > 0
                     && now.saturating_sub(profile.last_closed_secs) <= 4
                     && profile.last_close_reason == CloseReason::IdleTimeout
                 {
                     let old_timeout = profile.assigned_idle_secs;
-                    // 动态拉长 1.5 倍 (上限 300s)
-                    profile.assigned_idle_secs = (profile.assigned_idle_secs * 15 / 10).min(300);
+                    // 动态拉长 1.5 倍 (上限 120s)
+                    profile.assigned_idle_secs = (profile.assigned_idle_secs * 15 / 10).min(120);
                     profile.churn_penalties += 1;
                     debug!(
                         "[AdaptiveProfile] 域名 [{}] 触发重连反弹惩罚 ({}s 前被超时掐断): {}s -> {}s (累计惩罚 {} 次)",
@@ -233,7 +235,7 @@ pub fn classify_connection(dst_port: u16, domain: Option<&str>) -> (TrafficCateg
             return (cat, Duration::from_secs(idle_secs));
         }
 
-        // 2. 静态规则快速命中
+        // 2. 静态规则快速命中 (确定性超时, 标记为 is_static=true)
         if is_image_or_media_cdn(&dom_lower) {
             let cat = TrafficCategory::MediaCdn;
             let timeout = cat.idle_timeout(false);
@@ -255,7 +257,7 @@ pub fn classify_connection(dst_port: u16, domain: Option<&str>) -> (TrafficCateg
 fn record_initial_profile(domain: String, category: TrafficCategory, is_static: bool) {
     with_profiles_write(|map| {
         if map.len() >= MAX_PROFILES_CAPACITY && !map.contains_key(&domain) {
-            // 清理最早未更新的一个条目
+            // LRU: 清理最早未访问的一个条目
             if let Some(oldest_key) = map.iter().min_by_key(|(_, p)| p.last_seen_secs).map(|(k, _)| k.clone()) {
                 map.remove(&oldest_key);
             }
@@ -317,6 +319,12 @@ pub fn record_conn_metrics(
     let now = unix_now_secs();
 
     with_profiles_write(|map| {
+        if map.len() >= MAX_PROFILES_CAPACITY && !map.contains_key(&dom_lower) {
+            // LRU 淘汰最久未见条目
+            if let Some(oldest_key) = map.iter().min_by_key(|(_, p)| p.last_seen_secs).map(|(k, _)| k.clone()) {
+                map.remove(&oldest_key);
+            }
+        }
         let profile = map.entry(dom_lower.clone()).or_insert_with(|| {
             let initial_cat = if is_image_or_media_cdn(&dom_lower) {
                 TrafficCategory::MediaCdn
@@ -353,24 +361,23 @@ pub fn record_conn_metrics(
         let ratio = profile.total_down_bytes as f32 / (profile.total_up_bytes.max(1) as f32);
         profile.avg_down_up_ratio = ratio;
 
-        // --- Phase 2: 闭环强化逻辑 ---
-        if close_reason == CloseReason::IdleTimeout && !is_reused {
-            // 僵尸空闲衰减: 达到超时但全程没有复用，向下收敛 20%
-            let min_idle = match profile.category {
-                TrafficCategory::Interactive => 120,
-                TrafficCategory::PushIm => 60,
-                TrafficCategory::MediaCdn => 5,
-                TrafficCategory::GeneralApi => 10,
-            };
-            let old_timeout = profile.assigned_idle_secs;
-            profile.assigned_idle_secs = (profile.assigned_idle_secs * 8 / 10).max(min_idle);
-            profile.zombie_decays += 1;
-            debug!(
-                "[AdaptiveProfile] 域名 [{}] 触发僵尸空闲衰减 (超时未复用): {}s -> {}s (累计衰减 {} 次)",
-                dom_lower, old_timeout, profile.assigned_idle_secs, profile.zombie_decays
-            );
-        } else if is_reused {
+        if is_reused {
             profile.reuse_hits += 1;
+        }
+
+        // --- Phase 2: 闭环强化逻辑 (仅对非静态规则的 GeneralApi 生效) ---
+        // 静态规则 (MediaCdn/PushIm/Interactive) 超时绝对锁定，不参与衰减
+        if !profile.is_static_rule && profile.category == TrafficCategory::GeneralApi {
+            if close_reason == CloseReason::IdleTimeout && !is_reused {
+                // 僵尸空闲衰减: 达到超时但全程无多请求复用，向下收敛 20% (下限 10s)
+                let old_timeout = profile.assigned_idle_secs;
+                profile.assigned_idle_secs = (profile.assigned_idle_secs * 8 / 10).max(10);
+                profile.zombie_decays += 1;
+                debug!(
+                    "[AdaptiveProfile] 域名 [{}] 触发僵尸空闲衰减 (超时未复用): {}s -> {}s (累计衰减 {} 次)",
+                    dom_lower, old_timeout, profile.assigned_idle_secs, profile.zombie_decays
+                );
+            }
         }
 
         // 如果不是静态锁定的规则且样本数 >= 2，进行基础分类自适应演进
@@ -384,11 +391,16 @@ pub fn record_conn_metrics(
             if ratio >= 6.0 && avg_down >= 16 * 1024 {
                 profile.category = TrafficCategory::MediaCdn;
                 profile.assigned_idle_secs = 10;
+                // 重置动态惩罚/衰减计数，恢复标准 CDN 短保活策略
+                profile.churn_penalties = 0;
+                profile.zombie_decays = 0;
             }
             // 特征 2: 双向持续微量小包且连接持续时间较长 -> 自动演进为 PushIm (180s 长保活)
             else if avg_up <= 2048 && avg_down <= 4096 && duration_ms >= 8000 {
                 profile.category = TrafficCategory::PushIm;
                 profile.assigned_idle_secs = 180;
+                profile.churn_penalties = 0;
+                profile.zombie_decays = 0;
             }
 
             if prev_cat != profile.category {
@@ -509,6 +521,28 @@ mod tests {
         let profile = with_profiles_read(|map| map.get(domain).cloned()).unwrap();
         assert_eq!(profile.assigned_idle_secs, 24);
         assert_eq!(profile.zombie_decays, 1);
+    }
+
+    #[test]
+    fn test_static_rule_immunity_from_churn_and_decay() {
+        let static_cdn = "pbs.twimg.com";
+        let (cat, timeout) = classify_connection(443, Some(static_cdn));
+        assert_eq!(cat, TrafficCategory::MediaCdn);
+        assert_eq!(timeout.as_secs(), 10);
+
+        // 1. 模拟 IdleTimeout 且无复用 -> 静态规则不应被 Zombie 衰减
+        record_conn_metrics(Some(static_cdn), 500, 20000, 1000, CloseReason::IdleTimeout, false);
+        let (_, timeout_after_idle) = classify_connection(443, Some(static_cdn));
+        assert_eq!(timeout_after_idle.as_secs(), 10);
+
+        // 2. 模拟 1 秒后立即重连 -> 静态规则不应被 Churn 惩罚放大
+        let (_, timeout_after_reconnect) = classify_connection(443, Some(static_cdn));
+        assert_eq!(timeout_after_reconnect.as_secs(), 10);
+
+        let profile = with_profiles_read(|map| map.get(static_cdn).cloned()).unwrap();
+        assert_eq!(profile.assigned_idle_secs, 10);
+        assert_eq!(profile.churn_penalties, 0);
+        assert_eq!(profile.zombie_decays, 0);
     }
 
     #[test]

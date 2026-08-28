@@ -357,9 +357,15 @@ async fn relay_proxy(
     let dom_ref = direct_domain.as_deref();
     let dst_port = dst.1;
     let up_atomic = conn_up.clone();
-    let upload = async {
+
+    // 跨事务多请求复用判定 (HTTP/1.1 Keep-Alive / HTTP/2 多路复用)
+    let request_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
+    let server_has_downloaded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let req_counter_up = request_count.clone();
+    let srv_flag_up = server_has_downloaded.clone();
+    let upload = async move {
         let mut up_bytes: u64 = 0;
-        let mut chunks: u32 = 0;
         let mut timed_out = false;
         let mut buf = [0u8; 65536];
         loop {
@@ -378,8 +384,11 @@ async fn relay_proxy(
                         break;
                     }
                     up_bytes += n as u64;
-                    chunks += 1;
                     up_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                    // 若在接收服务端响应后，客户端再次发起上行写入，计入一次新的请求复用 (Request Cycle)
+                    if srv_flag_up.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                        req_counter_up.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
                 Ok(Err(_)) => {
                     let _ = tun_writer.send_close_notify().await;
@@ -393,13 +402,13 @@ async fn relay_proxy(
                 }
             }
         }
-        (up_bytes, timed_out, chunks)
+        (up_bytes, timed_out)
     };
 
     let down_atomic = conn_down.clone();
-    let download = async {
+    let srv_flag_down = server_has_downloaded.clone();
+    let download = async move {
         let mut down_bytes: u64 = 0;
-        let mut chunks: u32 = 0;
         let mut timed_out = false;
         loop {
             let timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
@@ -410,8 +419,8 @@ async fn relay_proxy(
             match tokio::time::timeout(timeout_dur, tun_reader.recv_data_to(&mut local_wr)).await {
                 Ok(Ok(Some(n))) => {
                     down_bytes += n as u64;
-                    chunks += 1;
                     down_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                    srv_flag_down.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 Ok(Ok(None)) => break, // 对端正常 close_notify
                 Ok(Err(_)) => break,
@@ -423,47 +432,43 @@ async fn relay_proxy(
             }
         }
         let _ = local_wr.shutdown().await;
-        (down_bytes, timed_out, chunks)
+        (down_bytes, timed_out)
     };
 
     tokio::pin!(upload);
     tokio::pin!(download);
     let mut up = 0u64;
     let mut down = 0u64;
-    let mut total_chunks = 0u32;
     let close_reason;
 
     tokio::select! {
-        (u, u_timeout, u_chunks) = &mut upload => {
+        (u, u_timeout) = &mut upload => {
             up = u;
-            total_chunks += u_chunks;
             if u_timeout {
                 close_reason = crate::tun::adaptive_idle::CloseReason::IdleTimeout;
             } else {
                 close_reason = crate::tun::adaptive_idle::CloseReason::ClientClosed;
             }
-            if let Ok((d, _, d_chunks)) = tokio::time::timeout(std::time::Duration::from_secs(3), &mut download).await {
+            if let Ok((d, _)) = tokio::time::timeout(std::time::Duration::from_secs(3), &mut download).await {
                 down = d;
-                total_chunks += d_chunks;
             }
         }
-        (d, d_timeout, d_chunks) = &mut download => {
+        (d, d_timeout) = &mut download => {
             down = d;
-            total_chunks += d_chunks;
             if d_timeout {
                 close_reason = crate::tun::adaptive_idle::CloseReason::IdleTimeout;
             } else {
                 close_reason = crate::tun::adaptive_idle::CloseReason::ServerClosed;
             }
-            if let Ok((u, _, u_chunks)) = tokio::time::timeout(std::time::Duration::from_secs(2), &mut upload).await {
+            if let Ok((u, _)) = tokio::time::timeout(std::time::Duration::from_secs(2), &mut upload).await {
                 up = u;
-                total_chunks += u_chunks;
             }
         }
     }
     crate::monitor::record_conn_close(cid, up, down);
     let duration_ms = start_time.elapsed().as_millis() as u64;
-    let is_reused = total_chunks >= 4;
+    let req_total = request_count.load(std::sync::atomic::Ordering::Relaxed);
+    let is_reused = req_total >= 2;
     crate::tun::adaptive_idle::record_conn_metrics(
         direct_domain.as_deref(),
         up,
@@ -473,13 +478,14 @@ async fn relay_proxy(
         is_reused,
     );
     debug!(
-        "[TUN-TCP] {}:{} 关闭 (↑{} ↓{}, 耗时{}ms, 原因:{:?}, 复用:{})",
+        "[TUN-TCP] {}:{} 关闭 (↑{} ↓{}, 耗时{}ms, 原因:{:?}, 请求数:{}, 复用:{})",
         dst.0,
         dst.1,
         crate::tun::udp::human_bytes(up),
         crate::tun::udp::human_bytes(down),
         duration_ms,
         close_reason,
+        req_total,
         is_reused
     );
 }
@@ -586,9 +592,15 @@ async fn relay_direct(
     let dom_ref = direct_domain.as_deref();
     let dst_port = dst.1;
     let up_atomic = conn_up.clone();
-    let to_tunnel = async {
+
+    // 跨事务多请求复用判定 (HTTP/1.1 Keep-Alive / HTTP/2 多路复用)
+    let request_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
+    let server_has_downloaded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let req_counter_to = request_count.clone();
+    let srv_flag_to = server_has_downloaded.clone();
+    let to_tunnel = async move {
         let mut up_bytes: u64 = 0;
-        let mut chunks: u32 = 0;
         let mut timed_out = false;
         let mut buf = [0u8; 65536];
         loop {
@@ -602,9 +614,12 @@ async fn relay_direct(
                 Ok(Ok(n)) => {
                     if rw.write_all(&buf[..n]).await.is_err() { break; }
                     up_bytes += n as u64;
-                    chunks += 1;
                     up_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     crate::monitor::add_up(n as u64);
+                    // 若在接收服务端响应后，客户端再次发起上行写入，计入一次新的请求复用 (Request Cycle)
+                    if srv_flag_to.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                        req_counter_to.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
                 Ok(Err(_)) => break,
                 Err(_) => {
@@ -613,12 +628,12 @@ async fn relay_direct(
                 }
             }
         }
-        (up_bytes, timed_out, chunks)
+        (up_bytes, timed_out)
     };
     let down_atomic = conn_down.clone();
-    let from_tunnel = async {
+    let srv_flag_from = server_has_downloaded.clone();
+    let from_tunnel = async move {
         let mut down_bytes: u64 = 0;
-        let mut chunks: u32 = 0;
         let mut timed_out = false;
         let mut buf = [0u8; 65536];
         loop {
@@ -632,9 +647,9 @@ async fn relay_direct(
                 Ok(Ok(n)) => {
                     if lw.write_all(&buf[..n]).await.is_err() { break; }
                     down_bytes += n as u64;
-                    chunks += 1;
                     down_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     crate::monitor::add_down(n as u64);
+                    srv_flag_from.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 Ok(Err(_)) => break,
                 Err(_) => {
@@ -643,46 +658,42 @@ async fn relay_direct(
                 }
             }
         }
-        (down_bytes, timed_out, chunks)
+        (down_bytes, timed_out)
     };
     tokio::pin!(to_tunnel);
     tokio::pin!(from_tunnel);
     let mut up: u64 = 0;
     let mut down: u64 = 0;
-    let mut total_chunks = 0u32;
     let close_reason;
 
     tokio::select! {
-        (u, u_timeout, u_chunks) = &mut to_tunnel => {
+        (u, u_timeout) = &mut to_tunnel => {
             up = u;
-            total_chunks += u_chunks;
             if u_timeout {
                 close_reason = crate::tun::adaptive_idle::CloseReason::IdleTimeout;
             } else {
                 close_reason = crate::tun::adaptive_idle::CloseReason::ClientClosed;
             }
-            if let Ok((d, _, d_chunks)) = tokio::time::timeout(std::time::Duration::from_secs(3), &mut from_tunnel).await {
+            if let Ok((d, _)) = tokio::time::timeout(std::time::Duration::from_secs(3), &mut from_tunnel).await {
                 down = d;
-                total_chunks += d_chunks;
             }
         }
-        (d, d_timeout, d_chunks) = &mut from_tunnel => {
+        (d, d_timeout) = &mut from_tunnel => {
             down = d;
-            total_chunks += d_chunks;
             if d_timeout {
                 close_reason = crate::tun::adaptive_idle::CloseReason::IdleTimeout;
             } else {
                 close_reason = crate::tun::adaptive_idle::CloseReason::ServerClosed;
             }
-            if let Ok((u, _, u_chunks)) = tokio::time::timeout(std::time::Duration::from_secs(2), &mut to_tunnel).await {
+            if let Ok((u, _)) = tokio::time::timeout(std::time::Duration::from_secs(2), &mut to_tunnel).await {
                 up = u;
-                total_chunks += u_chunks;
             }
         }
     }
     crate::monitor::record_conn_close(cid, up, down);
     let duration_ms = start_time.elapsed().as_millis() as u64;
-    let is_reused = total_chunks >= 4;
+    let req_total = request_count.load(std::sync::atomic::Ordering::Relaxed);
+    let is_reused = req_total >= 2;
     crate::tun::adaptive_idle::record_conn_metrics(
         direct_domain.as_deref(),
         up,
@@ -691,8 +702,8 @@ async fn relay_direct(
         close_reason,
         is_reused,
     );
-    debug!("[TUN-TCP/direct] {}:{} 直连关闭 (↑{} ↓{}, 耗时{}ms, 原因:{:?}, 复用:{})",
+    debug!("[TUN-TCP/direct] {}:{} 直连关闭 (↑{} ↓{}, 耗时{}ms, 原因:{:?}, 请求数:{}, 复用:{})",
         dst.0, dst.1,
         crate::tun::udp::human_bytes(up), crate::tun::udp::human_bytes(down),
-        duration_ms, close_reason, is_reused);
+        duration_ms, close_reason, req_total, is_reused);
 }
