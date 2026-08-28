@@ -672,6 +672,38 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_getTrafficProfi
     env.new_string(json).unwrap_or_else(|_| JString::from(JObject::null())).into_raw()
 }
 
+/// `boolean saveTrafficProfiles(String filePath)` — 将当前学得的画像持久化到指定文件。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_saveTrafficProfiles(
+    mut env: JNIEnv,
+    _class: JClass,
+    file_path: JString,
+) -> jboolean {
+    let path_str: String = match env.get_string(&file_path) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+    if mirage_core::tun::adaptive_idle::save_profiles_to_disk(&path_str).is_ok() {
+        1
+    } else {
+        0
+    }
+}
+
+/// `int loadTrafficProfiles(String filePath)` — 从指定文件加载历史流量画像。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_loadTrafficProfiles(
+    mut env: JNIEnv,
+    _class: JClass,
+    file_path: JString,
+) -> jint {
+    let path_str: String = match env.get_string(&file_path) {
+        Ok(s) => s.into(),
+        Err(_) => return -1,
+    };
+    mirage_core::tun::adaptive_idle::load_profiles_from_disk(&path_str).unwrap_or(0) as jint
+}
+
 /// `boolean setBlockQuic(boolean block)` — 设置是否全局拦截 QUIC (UDP 443)。
 #[no_mangle]
 pub extern "system" fn Java_com_mirage_android_core_MirageNative_setBlockQuic(

@@ -68,6 +68,12 @@ object MirageNative {
     /** 获取已学得的常用域名画像与时延设定记录 (JSON 字符串)。 */
     external fun getTrafficProfilesJson(): String
 
+    /** 持久化已学得的流量画像到本地磁盘 (返回 true = 成功)。 */
+    external fun saveTrafficProfiles(filePath: String): Boolean
+
+    /** 从本地磁盘恢复历史流量画像 (返回加载条数)。 */
+    external fun loadTrafficProfiles(filePath: String): Int
+
     /** 完整协议握手测活: 返回 RTT 毫秒, -1 = 不可用。 */
     external fun testNode(uri: String, timeoutMs: Int): Long
 

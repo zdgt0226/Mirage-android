@@ -69,6 +69,10 @@ class CoreService : VpnService() {
             java.io.File(filesDir, "core.log").writeText(logs.takeLast(30000))
         }
         runCatching {
+            val profileFile = java.io.File(filesDir, "traffic_profiles.json").absolutePath
+            MirageNative.saveTrafficProfiles(profileFile)
+        }
+        runCatching {
             val st = MirageNative.getStats()
             if (st.size >= 2) {
                 val up = st[0].toLong()
@@ -240,6 +244,16 @@ class CoreService : VpnService() {
             return rc
         }
         log("[core] 内核已启动")
+
+        // 恢复加载历史流量画像字典 (Phase 3 持久化)
+        runCatching {
+            val profileFile = java.io.File(filesDir, "traffic_profiles.json").absolutePath
+            val loadedProfiles = MirageNative.loadTrafficProfiles(profileFile)
+            if (loadedProfiles > 0) {
+                log("[profile] 成功恢复加载 $loadedProfiles 条历史流量画像")
+            }
+        }
+
         notifyState()
         runCatching { sendBroadcast(Intent(ACTION_VPN_STARTED).setPackage(packageName)) }
 
@@ -316,13 +330,17 @@ class CoreService : VpnService() {
             }
         }
 
-        // 文件日志: 降低落盘频次至 60 秒 (大幅减少 Flash 闪存 I/O 与 CPU 唤醒，允许 SoC 深度休眠)
+        // 文件日志与画像字典: 降低落盘频次至 60 秒 (大幅减少 Flash 闪存 I/O 与 CPU 唤醒，允许 SoC 深度休眠)
         logJob = scope.launch {
             while (isActive) {
                 delay(60000)
                 runCatching {
                     val logs = (LogStore.all() + MirageNative.recentLogs().toList()).joinToString("\n")
                     java.io.File(filesDir, "core.log").writeText(logs.takeLast(30000))
+                }
+                runCatching {
+                    val profileFile = java.io.File(filesDir, "traffic_profiles.json").absolutePath
+                    MirageNative.saveTrafficProfiles(profileFile)
                 }
             }
         }

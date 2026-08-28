@@ -9,9 +9,12 @@
 //!    - 记录每个域名的历史会话样本：总连接数、平均上行/下行流量、下行/上行比率 (ratio)、会话持续时间。
 //!    - 若观察到高频下行（如 ratio >= 6.0 且 单连接下行 >= 16KB），自学习归类为 `MediaCdn` (收紧超时至 10s，加速池位释放)。
 //!    - 若观察到持续双向小包（如 avg_up <= 2KB 且 avg_down <= 4KB 且 连接时间较长），自学习归类为 `PushIm` (放宽超时至 180s，避免误杀推送)。
-//! 3. **记录与洞察生成 (Profiles Record & Statistics)**：
-//!    - 维护全局内存 LRU / 学习画像表（最多保留 512 个常用域名画像）。
-//!    - 提供 `get_learned_profiles_json()` 供 JNI / 控制台 / 监控面板查询已学得的时延与分类设定。
+//! 3. **闭环强化调优 (Closed-Loop Feedback & Reinforcement - Phase 2)**：
+//!    - **重连反弹惩罚 (Churn Penalty)**: 若连接刚因 IdleTimeout 关闭在 4s 内同一域名立即重建 SYN，判定为过早掐断，自动延长 1.5 倍超时 (上限 300s)。
+//!    - **僵尸空闲衰减 (Zombie Decay)**: 若连接空闲超时退出且全程未被复用，判定超时偏长，自动收紧 20% (下限 5s/10s)。
+//!    - **复用命中奖励 (Reuse Hit)**: 记录复用次数，稳定当前高效时延。
+//! 4. **原子持久化 (Crash-Safe Disk Persistence - Phase 3)**：
+//!    - 支持原子保存/恢复用户专属历史画像字典。
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -33,6 +36,15 @@ pub enum TrafficCategory {
 }
 
 impl TrafficCategory {
+    pub fn default_idle_secs(&self) -> u64 {
+        match self {
+            TrafficCategory::Interactive => 300,
+            TrafficCategory::MediaCdn => 10,
+            TrafficCategory::PushIm => 180,
+            TrafficCategory::GeneralApi => 30,
+        }
+    }
+
     pub fn idle_timeout(&self, is_active_transfer: bool) -> Duration {
         match self {
             TrafficCategory::Interactive => Duration::from_secs(300),
@@ -64,6 +76,15 @@ impl TrafficCategory {
     }
 }
 
+/// 连接关闭原因
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CloseReason {
+    ClientClosed,
+    ServerClosed,
+    IdleTimeout,
+    Error,
+}
+
 /// 单个域名的学习画像与时延设定记录
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomainProfile {
@@ -76,6 +97,13 @@ pub struct DomainProfile {
     pub assigned_idle_secs: u64,
     pub is_static_rule: bool,
     pub last_seen_secs: u64,
+
+    // --- Phase 2 闭环调优自适应统计 ---
+    pub churn_penalties: u32,
+    pub zombie_decays: u32,
+    pub reuse_hits: u32,
+    pub last_closed_secs: u64,
+    pub last_close_reason: CloseReason,
 }
 
 fn unix_now_secs() -> u64 {
@@ -164,17 +192,45 @@ where
     f(map)
 }
 
-/// 判定连接分类并返回推荐的空闲超时
+/// 判定连接分类并返回推荐的空闲超时 (包含 Phase 2 重连反弹检测)
 pub fn classify_connection(dst_port: u16, domain: Option<&str>) -> (TrafficCategory, Duration) {
     if is_interactive_port(dst_port) {
-        return (TrafficCategory::Interactive, TrafficCategory::Interactive.idle_timeout(false));
+        return (TrafficCategory::Interactive, Duration::from_secs(300));
     }
 
     if let Some(dom) = domain {
         let dom_lower = dom.to_lowercase();
-        // 1. 查询是否已存在画像记录
-        if let Some(profile) = with_profiles_read(|map| map.get(&dom_lower).cloned()) {
-            return (profile.category, profile.category.idle_timeout(false));
+        let now = unix_now_secs();
+
+        // 1. 查询画像并检查是否有重连反弹 (Churn / Ping-Pong Reconnect)
+        let found = with_profiles_write(|map| {
+            if let Some(profile) = map.get_mut(&dom_lower) {
+                profile.last_seen_secs = now;
+                // 重连反弹检测: 若上次关闭在 4 秒内且是被 IdleTimeout 掐断
+                if profile.last_closed_secs > 0
+                    && now.saturating_sub(profile.last_closed_secs) <= 4
+                    && profile.last_close_reason == CloseReason::IdleTimeout
+                {
+                    let old_timeout = profile.assigned_idle_secs;
+                    // 动态拉长 1.5 倍 (上限 300s)
+                    profile.assigned_idle_secs = (profile.assigned_idle_secs * 15 / 10).min(300);
+                    profile.churn_penalties += 1;
+                    debug!(
+                        "[AdaptiveProfile] 域名 [{}] 触发重连反弹惩罚 ({}s 前被超时掐断): {}s -> {}s (累计惩罚 {} 次)",
+                        dom_lower,
+                        now.saturating_sub(profile.last_closed_secs),
+                        old_timeout,
+                        profile.assigned_idle_secs,
+                        profile.churn_penalties
+                    );
+                }
+                return Some((profile.category, profile.assigned_idle_secs));
+            }
+            None
+        });
+
+        if let Some((cat, idle_secs)) = found {
+            return (cat, Duration::from_secs(idle_secs));
         }
 
         // 2. 静态规则快速命中
@@ -211,9 +267,14 @@ fn record_initial_profile(domain: String, category: TrafficCategory, is_static: 
             total_up_bytes: 0,
             total_down_bytes: 0,
             avg_down_up_ratio: 1.0,
-            assigned_idle_secs: category.idle_timeout(true).as_secs(),
+            assigned_idle_secs: category.default_idle_secs(),
             is_static_rule: is_static,
             last_seen_secs: unix_now_secs(),
+            churn_penalties: 0,
+            zombie_decays: 0,
+            reuse_hits: 0,
+            last_closed_secs: 0,
+            last_close_reason: CloseReason::ServerClosed,
         });
     });
 }
@@ -224,20 +285,36 @@ pub fn compute_adaptive_timeout(
     domain: Option<&str>,
     is_active_transfer: bool,
 ) -> Duration {
+    if is_interactive_port(dst_port) {
+        return Duration::from_secs(300);
+    }
+    // 未传输阶段: 统一给 15s 初始等待
+    if !is_active_transfer {
+        return Duration::from_secs(15);
+    }
+    if let Some(dom) = domain {
+        let dom_lower = dom.to_lowercase();
+        if let Some(profile) = with_profiles_read(|map| map.get(&dom_lower).cloned()) {
+            return Duration::from_secs(profile.assigned_idle_secs);
+        }
+    }
     let (cat, _) = classify_connection(dst_port, domain);
     cat.idle_timeout(is_active_transfer)
 }
 
-/// 记录一次连接生命周期的吞吐指标并触发自适应学习画像演进
+/// 记录一次连接生命周期的吞吐指标并触发自适应学习画像与闭环调优
 pub fn record_conn_metrics(
     domain: Option<&str>,
     up_bytes: u64,
     down_bytes: u64,
     duration_ms: u64,
+    close_reason: CloseReason,
+    is_reused: bool,
 ) {
     let Some(dom) = domain else { return };
     if dom.is_empty() { return; }
     let dom_lower = dom.to_lowercase();
+    let now = unix_now_secs();
 
     with_profiles_write(|map| {
         let profile = map.entry(dom_lower.clone()).or_insert_with(|| {
@@ -255,21 +332,48 @@ pub fn record_conn_metrics(
                 total_up_bytes: 0,
                 total_down_bytes: 0,
                 avg_down_up_ratio: 1.0,
-                assigned_idle_secs: initial_cat.idle_timeout(true).as_secs(),
+                assigned_idle_secs: initial_cat.default_idle_secs(),
                 is_static_rule: initial_cat != TrafficCategory::GeneralApi,
-                last_seen_secs: unix_now_secs(),
+                last_seen_secs: now,
+                churn_penalties: 0,
+                zombie_decays: 0,
+                reuse_hits: 0,
+                last_closed_secs: now,
+                last_close_reason: close_reason,
             }
         });
 
         profile.sample_count += 1;
         profile.total_up_bytes += up_bytes;
         profile.total_down_bytes += down_bytes;
-        profile.last_seen_secs = unix_now_secs();
+        profile.last_seen_secs = now;
+        profile.last_closed_secs = now;
+        profile.last_close_reason = close_reason;
 
         let ratio = profile.total_down_bytes as f32 / (profile.total_up_bytes.max(1) as f32);
         profile.avg_down_up_ratio = ratio;
 
-        // 如果不是静态锁定的规则且样本数 >= 2，进行自适应学习演进
+        // --- Phase 2: 闭环强化逻辑 ---
+        if close_reason == CloseReason::IdleTimeout && !is_reused {
+            // 僵尸空闲衰减: 达到超时但全程没有复用，向下收敛 20%
+            let min_idle = match profile.category {
+                TrafficCategory::Interactive => 120,
+                TrafficCategory::PushIm => 60,
+                TrafficCategory::MediaCdn => 5,
+                TrafficCategory::GeneralApi => 10,
+            };
+            let old_timeout = profile.assigned_idle_secs;
+            profile.assigned_idle_secs = (profile.assigned_idle_secs * 8 / 10).max(min_idle);
+            profile.zombie_decays += 1;
+            debug!(
+                "[AdaptiveProfile] 域名 [{}] 触发僵尸空闲衰减 (超时未复用): {}s -> {}s (累计衰减 {} 次)",
+                dom_lower, old_timeout, profile.assigned_idle_secs, profile.zombie_decays
+            );
+        } else if is_reused {
+            profile.reuse_hits += 1;
+        }
+
+        // 如果不是静态锁定的规则且样本数 >= 2，进行基础分类自适应演进
         if !profile.is_static_rule && profile.sample_count >= 2 {
             let avg_down = profile.total_down_bytes / profile.sample_count;
             let avg_up = profile.total_up_bytes / profile.sample_count;
@@ -279,17 +383,13 @@ pub fn record_conn_metrics(
             // 特征 1: 高下载/上行比且单次吞吐较大 -> 自动演进为 MediaCdn (10s 快速回收)
             if ratio >= 6.0 && avg_down >= 16 * 1024 {
                 profile.category = TrafficCategory::MediaCdn;
+                profile.assigned_idle_secs = 10;
             }
             // 特征 2: 双向持续微量小包且连接持续时间较长 -> 自动演进为 PushIm (180s 长保活)
             else if avg_up <= 2048 && avg_down <= 4096 && duration_ms >= 8000 {
                 profile.category = TrafficCategory::PushIm;
+                profile.assigned_idle_secs = 180;
             }
-            // 其余 -> GeneralApi (30s)
-            else {
-                profile.category = TrafficCategory::GeneralApi;
-            }
-
-            profile.assigned_idle_secs = profile.category.idle_timeout(true).as_secs();
 
             if prev_cat != profile.category {
                 debug!(
@@ -311,6 +411,34 @@ pub fn get_learned_profiles_json() -> String {
     })
 }
 
+/// 持久化已学得的画像到磁盘文件 (Phase 3 原子写入: 写入 .tmp 再 rename 避免崩溃损毁)
+pub fn save_profiles_to_disk(file_path: &str) -> std::io::Result<()> {
+    let json_data = get_learned_profiles_json();
+    let tmp_path = format!("{file_path}.tmp");
+    std::fs::write(&tmp_path, json_data.as_bytes())?;
+    std::fs::rename(&tmp_path, file_path)?;
+    debug!("[AdaptiveProfile] 成功原子持久化流量画像到 {}", file_path);
+    Ok(())
+}
+
+/// 从磁盘文件恢复加载历史画像 (Phase 3)
+pub fn load_profiles_from_disk(file_path: &str) -> std::io::Result<usize> {
+    if !std::path::Path::new(file_path).exists() {
+        return Ok(0);
+    }
+    let data = std::fs::read_to_string(file_path)?;
+    let profiles: Vec<DomainProfile> = serde_json::from_str(&data)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let count = profiles.len();
+    with_profiles_write(|map| {
+        for p in profiles {
+            map.insert(p.domain.clone(), p);
+        }
+    });
+    debug!("[AdaptiveProfile] 成功从 {} 恢复加载 {} 条历史流量画像", file_path, count);
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,20 +454,17 @@ mod tests {
     #[test]
     fn test_dynamic_learning_to_media_cdn() {
         let domain = "test-gallery.img-service.net";
-        // 初始分类为 GeneralApi
         let (cat, _) = classify_connection(443, Some(domain));
         assert_eq!(cat, TrafficCategory::GeneralApi);
 
         // 模拟 3 次大下行图片流 (上行 500B, 下行 64KB)
         for _ in 0..3 {
-            record_conn_metrics(Some(domain), 500, 65536, 1500);
+            record_conn_metrics(Some(domain), 500, 65536, 1500, CloseReason::ServerClosed, false);
         }
 
-        // 验证已自动演进为 MediaCdn
-        let (cat_learned, timeout) = classify_connection(443, Some(domain));
+        let (cat_learned, _) = classify_connection(443, Some(domain));
         assert_eq!(cat_learned, TrafficCategory::MediaCdn);
-        assert_eq!(timeout.as_secs(), 15); // 首包等待 15s
-        assert_eq!(compute_adaptive_timeout(443, Some(domain), true).as_secs(), 10); // 传输后 10s 回收
+        assert_eq!(compute_adaptive_timeout(443, Some(domain), true).as_secs(), 10);
     }
 
     #[test]
@@ -350,18 +475,52 @@ mod tests {
 
         // 模拟 3 次心跳小包 (上行 120B, 下行 180B, 持续 10 秒)
         for _ in 0..3 {
-            record_conn_metrics(Some(domain), 120, 180, 10000);
+            record_conn_metrics(Some(domain), 120, 180, 10000, CloseReason::ClientClosed, true);
         }
 
-        let (cat_learned, timeout) = classify_connection(443, Some(domain));
+        let (cat_learned, _) = classify_connection(443, Some(domain));
         assert_eq!(cat_learned, TrafficCategory::PushIm);
-        assert_eq!(timeout.as_secs(), 180);
+        assert_eq!(compute_adaptive_timeout(443, Some(domain), true).as_secs(), 180);
     }
 
     #[test]
-    fn test_json_export() {
-        record_conn_metrics(Some("sample.test.com"), 100, 200, 500);
-        let json = get_learned_profiles_json();
-        assert!(json.contains("sample.test.com"));
+    fn test_churn_penalty() {
+        let domain = "test-churn-app.api.io";
+        let _ = classify_connection(443, Some(domain));
+
+        // 1. 连接正常交互后由于短超时关闭 (上行 4KB, 下行 6KB, 持续 2s)
+        record_conn_metrics(Some(domain), 4096, 6144, 2000, CloseReason::IdleTimeout, true);
+
+        // 2. 模拟 App 立即发生重连 (由于刚刚被 IdleTimeout 掐断, 触发 1.5x 惩罚)
+        let (_, timeout_after_churn) = classify_connection(443, Some(domain));
+        // 初始 GeneralApi 为 30s，触发 1.5x 惩罚后应为 45s
+        assert_eq!(timeout_after_churn.as_secs(), 45);
+    }
+
+    #[test]
+    fn test_zombie_decay() {
+        let domain = "test-zombie-app.api.io";
+        let _ = classify_connection(443, Some(domain));
+
+        // 连接被 IdleTimeout 关闭且全程未被复用 (is_reused = false) -> 触发 0.8x 僵尸衰减
+        record_conn_metrics(Some(domain), 4096, 6144, 2000, CloseReason::IdleTimeout, false);
+
+        // 验证画像内 assigned_idle_secs 已缩减: 30 * 0.8 = 24s
+        let profile = with_profiles_read(|map| map.get(domain).cloned()).unwrap();
+        assert_eq!(profile.assigned_idle_secs, 24);
+        assert_eq!(profile.zombie_decays, 1);
+    }
+
+    #[test]
+    fn test_disk_persistence() {
+        let test_file = "/tmp/test_traffic_profiles.json";
+        record_conn_metrics(Some("persist.example.com"), 1234, 5678, 2000, CloseReason::ServerClosed, true);
+        save_profiles_to_disk(test_file).expect("Save to disk should succeed");
+
+        assert!(std::path::Path::new(test_file).exists());
+        let count = load_profiles_from_disk(test_file).expect("Load from disk should succeed");
+        assert!(count >= 1);
+        let _ = std::fs::remove_file(test_file);
     }
 }
+

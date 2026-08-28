@@ -359,6 +359,8 @@ async fn relay_proxy(
     let up_atomic = conn_up.clone();
     let upload = async {
         let mut up_bytes: u64 = 0;
+        let mut chunks: u32 = 0;
+        let mut timed_out = false;
         let mut buf = [0u8; 65536];
         loop {
             let timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
@@ -376,6 +378,7 @@ async fn relay_proxy(
                         break;
                     }
                     up_bytes += n as u64;
+                    chunks += 1;
                     up_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                 }
                 Ok(Err(_)) => {
@@ -385,16 +388,19 @@ async fn relay_proxy(
                 Err(_) => {
                     debug!("[TUN-TCP] 上行空闲超时 ({}s), 优雅关闭", timeout_dur.as_secs());
                     let _ = tun_writer.send_close_notify().await;
+                    timed_out = true;
                     break;
                 }
             }
         }
-        up_bytes
+        (up_bytes, timed_out, chunks)
     };
 
     let down_atomic = conn_down.clone();
     let download = async {
         let mut down_bytes: u64 = 0;
+        let mut chunks: u32 = 0;
+        let mut timed_out = false;
         loop {
             let timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
                 dst_port,
@@ -404,50 +410,77 @@ async fn relay_proxy(
             match tokio::time::timeout(timeout_dur, tun_reader.recv_data_to(&mut local_wr)).await {
                 Ok(Ok(Some(n))) => {
                     down_bytes += n as u64;
+                    chunks += 1;
                     down_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                 }
                 Ok(Ok(None)) => break, // 对端正常 close_notify
                 Ok(Err(_)) => break,
                 Err(_) => {
                     debug!("[TUN-TCP] 下行空闲超时 ({}s), 优雅关闭", timeout_dur.as_secs());
+                    timed_out = true;
                     break;
                 }
             }
         }
         let _ = local_wr.shutdown().await;
-        down_bytes
+        (down_bytes, timed_out, chunks)
     };
 
     tokio::pin!(upload);
     tokio::pin!(download);
     let mut up = 0u64;
     let mut down = 0u64;
+    let mut total_chunks = 0u32;
+    let close_reason;
+
     tokio::select! {
-        u = &mut upload => {
+        (u, u_timeout, u_chunks) = &mut upload => {
             up = u;
-            // 客户端主动断开: 给下行最多 3 秒接收对端残留数据，随后立即退出释放隧道与 FD
-            if let Ok(d) = tokio::time::timeout(std::time::Duration::from_secs(3), &mut download).await {
+            total_chunks += u_chunks;
+            if u_timeout {
+                close_reason = crate::tun::adaptive_idle::CloseReason::IdleTimeout;
+            } else {
+                close_reason = crate::tun::adaptive_idle::CloseReason::ClientClosed;
+            }
+            if let Ok((d, _, d_chunks)) = tokio::time::timeout(std::time::Duration::from_secs(3), &mut download).await {
                 down = d;
+                total_chunks += d_chunks;
             }
         }
-        d = &mut download => {
+        (d, d_timeout, d_chunks) = &mut download => {
             down = d;
-            // 服务端主动断开: 给客户端最多 2 秒发送残留缓冲数据
-            if let Ok(u) = tokio::time::timeout(std::time::Duration::from_secs(2), &mut upload).await {
+            total_chunks += d_chunks;
+            if d_timeout {
+                close_reason = crate::tun::adaptive_idle::CloseReason::IdleTimeout;
+            } else {
+                close_reason = crate::tun::adaptive_idle::CloseReason::ServerClosed;
+            }
+            if let Ok((u, _, u_chunks)) = tokio::time::timeout(std::time::Duration::from_secs(2), &mut upload).await {
                 up = u;
+                total_chunks += u_chunks;
             }
         }
     }
     crate::monitor::record_conn_close(cid, up, down);
     let duration_ms = start_time.elapsed().as_millis() as u64;
-    crate::tun::adaptive_idle::record_conn_metrics(direct_domain.as_deref(), up, down, duration_ms);
+    let is_reused = total_chunks >= 4;
+    crate::tun::adaptive_idle::record_conn_metrics(
+        direct_domain.as_deref(),
+        up,
+        down,
+        duration_ms,
+        close_reason,
+        is_reused,
+    );
     debug!(
-        "[TUN-TCP] {}:{} 关闭 (↑{} ↓{}, 耗时{}ms)",
+        "[TUN-TCP] {}:{} 关闭 (↑{} ↓{}, 耗时{}ms, 原因:{:?}, 复用:{})",
         dst.0,
         dst.1,
         crate::tun::udp::human_bytes(up),
         crate::tun::udp::human_bytes(down),
-        duration_ms
+        duration_ms,
+        close_reason,
+        is_reused
     );
 }
 
@@ -555,6 +588,8 @@ async fn relay_direct(
     let up_atomic = conn_up.clone();
     let to_tunnel = async {
         let mut up_bytes: u64 = 0;
+        let mut chunks: u32 = 0;
+        let mut timed_out = false;
         let mut buf = [0u8; 65536];
         loop {
             let timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
@@ -567,17 +602,24 @@ async fn relay_direct(
                 Ok(Ok(n)) => {
                     if rw.write_all(&buf[..n]).await.is_err() { break; }
                     up_bytes += n as u64;
+                    chunks += 1;
                     up_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     crate::monitor::add_up(n as u64);
                 }
-                _ => break,
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    timed_out = true;
+                    break;
+                }
             }
         }
-        up_bytes
+        (up_bytes, timed_out, chunks)
     };
     let down_atomic = conn_down.clone();
     let from_tunnel = async {
         let mut down_bytes: u64 = 0;
+        let mut chunks: u32 = 0;
+        let mut timed_out = false;
         let mut buf = [0u8; 65536];
         loop {
             let timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
@@ -590,37 +632,67 @@ async fn relay_direct(
                 Ok(Ok(n)) => {
                     if lw.write_all(&buf[..n]).await.is_err() { break; }
                     down_bytes += n as u64;
+                    chunks += 1;
                     down_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     crate::monitor::add_down(n as u64);
                 }
-                _ => break,
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    timed_out = true;
+                    break;
+                }
             }
         }
-        down_bytes
+        (down_bytes, timed_out, chunks)
     };
     tokio::pin!(to_tunnel);
     tokio::pin!(from_tunnel);
     let mut up: u64 = 0;
     let mut down: u64 = 0;
+    let mut total_chunks = 0u32;
+    let close_reason;
+
     tokio::select! {
-        u = &mut to_tunnel => {
+        (u, u_timeout, u_chunks) = &mut to_tunnel => {
             up = u;
-            if let Ok(d) = tokio::time::timeout(std::time::Duration::from_secs(3), &mut from_tunnel).await {
+            total_chunks += u_chunks;
+            if u_timeout {
+                close_reason = crate::tun::adaptive_idle::CloseReason::IdleTimeout;
+            } else {
+                close_reason = crate::tun::adaptive_idle::CloseReason::ClientClosed;
+            }
+            if let Ok((d, _, d_chunks)) = tokio::time::timeout(std::time::Duration::from_secs(3), &mut from_tunnel).await {
                 down = d;
+                total_chunks += d_chunks;
             }
         }
-        d = &mut from_tunnel => {
+        (d, d_timeout, d_chunks) = &mut from_tunnel => {
             down = d;
-            if let Ok(u) = tokio::time::timeout(std::time::Duration::from_secs(2), &mut to_tunnel).await {
+            total_chunks += d_chunks;
+            if d_timeout {
+                close_reason = crate::tun::adaptive_idle::CloseReason::IdleTimeout;
+            } else {
+                close_reason = crate::tun::adaptive_idle::CloseReason::ServerClosed;
+            }
+            if let Ok((u, _, u_chunks)) = tokio::time::timeout(std::time::Duration::from_secs(2), &mut to_tunnel).await {
                 up = u;
+                total_chunks += u_chunks;
             }
         }
     }
     crate::monitor::record_conn_close(cid, up, down);
     let duration_ms = start_time.elapsed().as_millis() as u64;
-    crate::tun::adaptive_idle::record_conn_metrics(direct_domain.as_deref(), up, down, duration_ms);
-    debug!("[TUN-TCP/direct] {}:{} 直连关闭 (↑{} ↓{}, 耗时{}ms)",
+    let is_reused = total_chunks >= 4;
+    crate::tun::adaptive_idle::record_conn_metrics(
+        direct_domain.as_deref(),
+        up,
+        down,
+        duration_ms,
+        close_reason,
+        is_reused,
+    );
+    debug!("[TUN-TCP/direct] {}:{} 直连关闭 (↑{} ↓{}, 耗时{}ms, 原因:{:?}, 复用:{})",
         dst.0, dst.1,
         crate::tun::udp::human_bytes(up), crate::tun::udp::human_bytes(down),
-        duration_ms);
+        duration_ms, close_reason, is_reused);
 }
