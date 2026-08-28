@@ -104,13 +104,43 @@ class CoreManagerDialog(
             val result = coreManager.fetchOnlineReleases()
 
             result.onSuccess { releases ->
+                b.btnCheckOnlineCore.isEnabled = true
+                b.btnCheckOnlineCore.text = "检查 GitHub 在线内核 (Releases)"
+
                 if (releases.isEmpty()) {
-                    b.btnCheckOnlineCore.isEnabled = true
-                    b.btnCheckOnlineCore.text = "检查 GitHub 在线内核 (Releases)"
                     Toast.makeText(context, "暂无与当前架构 (${Build.SUPPORTED_ABIS.firstOrNull()}) 兼容的在线内核", Toast.LENGTH_LONG).show()
                 } else {
                     val latest = releases.first()
-                    startDownloadRelease(latest)
+                    val activeCore = coreManager.getActiveCore()
+                    val existing = coreManager.cores.value.firstOrNull { core ->
+                        (!core.isBuiltin) && (
+                            (!latest.expectedSha256.isNullOrBlank() && core.sha256.equals(latest.expectedSha256, ignoreCase = true)) ||
+                            core.name.equals("Mirage-rs ${latest.tagName}", ignoreCase = true)
+                        ) && core.file?.exists() == true
+                    }
+
+                    if (existing != null) {
+                        if (activeCore.id == existing.id) {
+                            Toast.makeText(
+                                context,
+                                "当前已是最新内核版本 (${latest.tagName})\n无需重复下载",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        } else {
+                            coreManager.setActiveCore(existing.id)
+                            refreshList()
+                            updateCurrentCoreView()
+                            onCoreChanged()
+                            Toast.makeText(
+                                context,
+                                "已在本地找到已下载的最新内核 (${latest.tagName})\n已为你自动切换激活 (免重复下载)",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    } else {
+                        // 本地尚未下载该版本，启动下载并校验
+                        startDownloadRelease(latest)
+                    }
                 }
             }.onFailure { e ->
                 b.btnCheckOnlineCore.isEnabled = true

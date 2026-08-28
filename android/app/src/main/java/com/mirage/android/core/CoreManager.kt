@@ -163,6 +163,43 @@ class CoreManager private constructor(private val context: Context) {
                 )
             }
 
+            val coreName = displayName.ifBlank { "Mirage 内核 ($abi)" }
+
+            // 查重检测: 若已存在相同 SHA-256 或同名的非内置内核，进行复用或覆盖更新，避免冗余文件与重复条目
+            val existing = _cores.value.firstOrNull { 
+                !it.isBuiltin && (
+                    it.sha256?.equals(computedSha256, ignoreCase = true) == true ||
+                    it.name.equals(coreName, ignoreCase = true)
+                )
+            }
+
+            if (existing != null && existing.filePath != null) {
+                val existingFile = File(existing.filePath)
+                // 若 SHA-256 完全相同且文件存在，直接复用已有项
+                if (existing.sha256.equals(computedSha256, ignoreCase = true) && existingFile.exists()) {
+                    tempFile.delete()
+                    Log.i("Mirage", "[loader] 内核已存在且哈希一致: ${existing.name}, 复用已有内核")
+                    return Result.success(existing)
+                }
+                // 同名但哈希不同 (更新内核版本)，覆盖写原有文件
+                tempFile.copyTo(existingFile, overwrite = true)
+                tempFile.delete()
+                val updatedInfo = existing.copy(
+                    name = coreName,
+                    version = "自定义版本 ($abi)",
+                    fileSize = existingFile.length(),
+                    sha256 = computedSha256,
+                    addedTime = System.currentTimeMillis()
+                )
+                val current = _cores.value.toMutableList()
+                val idx = current.indexOfFirst { it.id == existing.id }
+                if (idx != -1) current[idx] = updatedInfo else current.add(updatedInfo)
+                _cores.value = current
+                saveCustomCores(current)
+                Log.i("Mirage", "[loader] 成功覆盖更新已有内核: ${updatedInfo.name}")
+                return Result.success(updatedInfo)
+            }
+
             val id = UUID.randomUUID().toString()
             val targetFile = File(coresDir, "libmirage_$id.so")
             if (!tempFile.renameTo(targetFile)) {
@@ -172,7 +209,7 @@ class CoreManager private constructor(private val context: Context) {
 
             val coreInfo = CoreInfo(
                 id = id,
-                name = displayName.ifBlank { "Mirage 内核 ($abi)" },
+                name = coreName,
                 version = "自定义版本 ($abi)",
                 abi = abi,
                 filePath = targetFile.absolutePath,
@@ -306,6 +343,18 @@ class CoreManager private constructor(private val context: Context) {
         release: OnlineReleaseInfo,
         onProgress: (Int) -> Unit
     ): Result<CoreInfo> = withContext(Dispatchers.IO) {
+        // 1. 预先查重: 若本地已有匹配该 Release 的 SHA-256 或同名版本的内核且文件完整，跳过网络下载
+        val existing = _cores.value.firstOrNull { core ->
+            !core.isBuiltin && (
+                (!release.expectedSha256.isNullOrBlank() && core.sha256.equals(release.expectedSha256, ignoreCase = true)) ||
+                core.name.equals("Mirage-rs ${release.tagName}", ignoreCase = true)
+            ) && core.file?.exists() == true
+        }
+        if (existing != null) {
+            Log.i("Mirage", "[loader] 本地已存在匹配该 Release 的内核 (${release.tagName}), 避免重复下载")
+            return@withContext Result.success(existing)
+        }
+
         val tempFile = File(coresDir, "download_${System.currentTimeMillis()}.so")
         try {
             var currentUrl = release.downloadUrl

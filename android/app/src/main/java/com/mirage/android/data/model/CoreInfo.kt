@@ -32,7 +32,7 @@ data class CoreInfo(
     companion object {
         const val BUILTIN_ID = "builtin"
 
-        fun builtin(version: String = "v0.9.2 (内置)"): CoreInfo {
+        fun builtin(version: String = "v0.10.4 (内置)"): CoreInfo {
             return CoreInfo(
                 id = BUILTIN_ID,
                 name = "内置默认内核",
