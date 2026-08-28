@@ -195,6 +195,19 @@ fn handle_request(
             )
         }
 
+        ("GET", "/debug/traffic-profiles") | ("GET", "/debug/profiles") => {
+            let profiles_str = crate::tun::adaptive_idle::get_learned_profiles_json();
+            let profiles_json: serde_json::Value = serde_json::from_str(&profiles_str).unwrap_or_else(|_| serde_json::json!([]));
+
+            (
+                "200 OK",
+                serde_json::json!({
+                    "traffic_profiles": profiles_json,
+                    "total_profiles_count": profiles_json.as_array().map(|a| a.len()).unwrap_or(0),
+                }),
+            )
+        }
+
         ("POST", "/debug/control") => {
             let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
             let action = parsed.get("action").and_then(|v| v.as_str()).unwrap_or("");
@@ -248,6 +261,7 @@ fn handle_request(
                     "GET /debug/fake-ip",
                     "POST /debug/route",
                     "GET /debug/conns",
+                    "GET /debug/traffic-profiles",
                     "POST /debug/control"
                 ]
             }),

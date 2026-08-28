@@ -662,6 +662,16 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_getConnectionsJ
     env.new_string(json).unwrap_or_else(|_| JString::from(JObject::null())).into_raw()
 }
 
+/// `String getTrafficProfilesJson()` — 获取已学得的常用域名画像与时延设定记录 (JSON 字符串)。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_getTrafficProfilesJson(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let json = mirage_core::tun::adaptive_idle::get_learned_profiles_json();
+    env.new_string(json).unwrap_or_else(|_| JString::from(JObject::null())).into_raw()
+}
+
 /// `boolean setBlockQuic(boolean block)` — 设置是否全局拦截 QUIC (UDP 443)。
 #[no_mangle]
 pub extern "system" fn Java_com_mirage_android_core_MirageNative_setBlockQuic(

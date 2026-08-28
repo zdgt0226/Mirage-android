@@ -31,6 +31,7 @@
 //! 本模块只依赖一个 `RawFd` (TUN 接口), Android/iOS 皆可用; 上层包装见
 //! `mirage-jni` (Android) 与规划中的 `mirage-ios`。
 
+pub mod adaptive_idle;
 pub mod dns;
 pub mod device;
 pub mod sniffer;
