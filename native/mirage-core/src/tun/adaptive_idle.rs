@@ -113,8 +113,9 @@ pub fn unix_now_secs() -> u64 {
         .as_secs()
 }
 
-/// 静态 CDN 域名后缀列表
+/// 静态 CDN 域名后缀列表 (包含国际与国内主流 CDN)
 const CDN_SUFFIXES: &[&str] = &[
+    // 国际 CDN
     "twimg.com",
     "ytimg.com",
     "ggpht.com",
@@ -131,10 +132,30 @@ const CDN_SUFFIXES: &[&str] = &[
     "llnwd.net",
     "cdn.sstatic.net",
     "githubusercontent.com",
+    // 国内主流 CDN
+    "alicdn.com",
+    "hdslb.com",
+    "bilivideo.com",
+    "sinaimg.cn",
+    "qpic.cn",
+    "gtimg.com",
+    "bdstatic.com",
+    "douyincdn.com",
+    "snssdk.com",
+    "kuaishoucdn.com",
+    "yximgs.com",
+    "iqiyipic.com",
+    "ykimg.com",
+    "360buyimg.com",
+    "meituan.net",
+    "pstatp.com",
+    "baidupcs.com",
+    "aliyuncs.com",
 ];
 
-/// 静态 IM / 推送服务域名后缀列表
+/// 静态 IM / 推送服务域名后缀列表 (包含国际与国内主流推送平台)
 const IM_SUFFIXES: &[&str] = &[
+    // 国际 IM / 推送
     "telegram.org",
     "t.me",
     "whatsapp.net",
@@ -145,6 +166,20 @@ const IM_SUFFIXES: &[&str] = &[
     "discord.com",
     "matrix.org",
     "signal.org",
+    // 国内 IM / 第三方厂商推送
+    "weixin.qq.com",
+    "jpush.cn",
+    "getui.com",
+    "getui.net",
+    "umeng.com",
+    "push.aliyun.com",
+    "push.dingtalk.com",
+    "xmpush.xiaomi.com",
+    "push.xiaomi.com",
+    "push.hicloud.com",
+    "push.heytap.com",
+    "push.oppomobile.com",
+    "push.vivo.com.cn",
 ];
 
 #[inline]
@@ -460,6 +495,10 @@ mod tests {
         assert_eq!(classify_connection(22, None).0, TrafficCategory::Interactive);
         assert_eq!(classify_connection(443, Some("pbs.twimg.com")).0, TrafficCategory::MediaCdn);
         assert_eq!(classify_connection(443, Some("mtalk.google.com")).0, TrafficCategory::PushIm);
+        assert_eq!(classify_connection(443, Some("img.alicdn.com")).0, TrafficCategory::MediaCdn);
+        assert_eq!(classify_connection(443, Some("i0.hdslb.com")).0, TrafficCategory::MediaCdn);
+        assert_eq!(classify_connection(443, Some("weixin.qq.com")).0, TrafficCategory::PushIm);
+        assert_eq!(classify_connection(443, Some("push.aliyun.com")).0, TrafficCategory::PushIm);
         assert_eq!(classify_connection(443, Some("api.unknown-service.org")).0, TrafficCategory::GeneralApi);
     }
 
