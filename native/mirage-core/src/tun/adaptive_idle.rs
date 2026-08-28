@@ -106,7 +106,7 @@ pub struct DomainProfile {
     pub last_close_reason: CloseReason,
 }
 
-fn unix_now_secs() -> u64 {
+pub fn unix_now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

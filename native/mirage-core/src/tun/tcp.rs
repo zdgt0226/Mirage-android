@@ -358,12 +358,14 @@ async fn relay_proxy(
     let dst_port = dst.1;
     let up_atomic = conn_up.clone();
 
-    // 跨事务多请求复用判定 (HTTP/1.1 Keep-Alive / HTTP/2 多路复用)
+    // 跨事务多请求复用判定与双向活跃时间戳 (HTTP/1.1 Keep-Alive / HTTP/2 多路复用)
     let request_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
     let server_has_downloaded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let last_active = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(crate::tun::adaptive_idle::unix_now_secs()));
 
     let req_counter_up = request_count.clone();
     let srv_flag_up = server_has_downloaded.clone();
+    let last_act_up = last_active.clone();
     let upload = async move {
         let mut up_bytes: u64 = 0;
         let mut timed_out = false;
@@ -385,6 +387,7 @@ async fn relay_proxy(
                     }
                     up_bytes += n as u64;
                     up_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                    last_act_up.store(crate::tun::adaptive_idle::unix_now_secs(), std::sync::atomic::Ordering::Relaxed);
                     // 若在接收服务端响应后，客户端再次发起上行写入，计入一次新的请求复用 (Request Cycle)
                     if srv_flag_up.swap(false, std::sync::atomic::Ordering::Relaxed) {
                         req_counter_up.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -395,7 +398,13 @@ async fn relay_proxy(
                     break;
                 }
                 Err(_) => {
-                    debug!("[TUN-TCP] 上行空闲超时 ({}s), 优雅关闭", timeout_dur.as_secs());
+                    let now = crate::tun::adaptive_idle::unix_now_secs();
+                    let last = last_act_up.load(std::sync::atomic::Ordering::Relaxed);
+                    if now.saturating_sub(last) < timeout_dur.as_secs() {
+                        // 下行仍在活跃推流，上行继续等待，不中断连接
+                        continue;
+                    }
+                    debug!("[TUN-TCP] 全双工空闲超时 ({}s), 优雅关闭", timeout_dur.as_secs());
                     let _ = tun_writer.send_close_notify().await;
                     timed_out = true;
                     break;
@@ -407,6 +416,7 @@ async fn relay_proxy(
 
     let down_atomic = conn_down.clone();
     let srv_flag_down = server_has_downloaded.clone();
+    let last_act_down = last_active.clone();
     let download = async move {
         let mut down_bytes: u64 = 0;
         let mut timed_out = false;
@@ -420,12 +430,19 @@ async fn relay_proxy(
                 Ok(Ok(Some(n))) => {
                     down_bytes += n as u64;
                     down_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                    last_act_down.store(crate::tun::adaptive_idle::unix_now_secs(), std::sync::atomic::Ordering::Relaxed);
                     srv_flag_down.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 Ok(Ok(None)) => break, // 对端正常 close_notify
                 Ok(Err(_)) => break,
                 Err(_) => {
-                    debug!("[TUN-TCP] 下行空闲超时 ({}s), 优雅关闭", timeout_dur.as_secs());
+                    let now = crate::tun::adaptive_idle::unix_now_secs();
+                    let last = last_act_down.load(std::sync::atomic::Ordering::Relaxed);
+                    if now.saturating_sub(last) < timeout_dur.as_secs() {
+                        // 上行近期有活跃传输，下行继续等待
+                        continue;
+                    }
+                    debug!("[TUN-TCP] 全双工空闲超时 ({}s), 优雅关闭", timeout_dur.as_secs());
                     timed_out = true;
                     break;
                 }
@@ -593,12 +610,14 @@ async fn relay_direct(
     let dst_port = dst.1;
     let up_atomic = conn_up.clone();
 
-    // 跨事务多请求复用判定 (HTTP/1.1 Keep-Alive / HTTP/2 多路复用)
+    // 跨事务多请求复用判定与双向活跃时间戳 (HTTP/1.1 Keep-Alive / HTTP/2 多路复用)
     let request_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
     let server_has_downloaded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let last_active = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(crate::tun::adaptive_idle::unix_now_secs()));
 
     let req_counter_to = request_count.clone();
     let srv_flag_to = server_has_downloaded.clone();
+    let last_act_to = last_active.clone();
     let to_tunnel = async move {
         let mut up_bytes: u64 = 0;
         let mut timed_out = false;
@@ -616,6 +635,7 @@ async fn relay_direct(
                     up_bytes += n as u64;
                     up_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     crate::monitor::add_up(n as u64);
+                    last_act_to.store(crate::tun::adaptive_idle::unix_now_secs(), std::sync::atomic::Ordering::Relaxed);
                     // 若在接收服务端响应后，客户端再次发起上行写入，计入一次新的请求复用 (Request Cycle)
                     if srv_flag_to.swap(false, std::sync::atomic::Ordering::Relaxed) {
                         req_counter_to.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -623,6 +643,11 @@ async fn relay_direct(
                 }
                 Ok(Err(_)) => break,
                 Err(_) => {
+                    let now = crate::tun::adaptive_idle::unix_now_secs();
+                    let last = last_act_to.load(std::sync::atomic::Ordering::Relaxed);
+                    if now.saturating_sub(last) < timeout_dur.as_secs() {
+                        continue;
+                    }
                     timed_out = true;
                     break;
                 }
@@ -632,6 +657,7 @@ async fn relay_direct(
     };
     let down_atomic = conn_down.clone();
     let srv_flag_from = server_has_downloaded.clone();
+    let last_act_from = last_active.clone();
     let from_tunnel = async move {
         let mut down_bytes: u64 = 0;
         let mut timed_out = false;
@@ -649,10 +675,16 @@ async fn relay_direct(
                     down_bytes += n as u64;
                     down_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     crate::monitor::add_down(n as u64);
+                    last_act_from.store(crate::tun::adaptive_idle::unix_now_secs(), std::sync::atomic::Ordering::Relaxed);
                     srv_flag_from.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 Ok(Err(_)) => break,
                 Err(_) => {
+                    let now = crate::tun::adaptive_idle::unix_now_secs();
+                    let last = last_act_from.load(std::sync::atomic::Ordering::Relaxed);
+                    if now.saturating_sub(last) < timeout_dur.as_secs() {
+                        continue;
+                    }
                     timed_out = true;
                     break;
                 }
