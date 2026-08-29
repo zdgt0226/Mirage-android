@@ -246,6 +246,132 @@ pub fn is_direct_ip(ip: IpAddr) -> bool {
     direct_ips().lock().unwrap_or_else(|e| e.into_inner()).contains(&ip)
 }
 
+/// 判断 IP 是否为私有 IP / 局域网保留 IP (RFC 1918 / RFC 3927 / CGNAT / 组播 / 广播)
+///
+/// ⚠️ 绝不可走代理: 任何发往局域网路由器、NAS、打印机、智能家居设备的私有单播与组播必须走本地直连。
+pub fn is_private_ip(ip: IpAddr) -> bool {
+    if is_fake_ip(ip) {
+        return false;
+    }
+    match ip {
+        IpAddr::V4(v4) => {
+            let u = u32::from(v4);
+            // 10.0.0.0/8 (RFC 1918)
+            (u & 0xFF000000) == 0x0A000000
+            // 172.16.0.0/12 (RFC 1918)
+            || (u & 0xFFF00000) == 0xAC100000
+            // 192.168.0.0/16 (RFC 1918)
+            || (u & 0xFFFF0000) == 0xC0A80000
+            // 127.0.0.0/8 (Loopback)
+            || (u & 0xFF000000) == 0x7F000000
+            // 169.254.0.0/16 (Link-Local RFC 3927)
+            || (u & 0xFFFF0000) == 0xA9FE0000
+            // 100.64.0.0/10 (CGNAT RFC 6598)
+            || (u & 0xFFC00000) == 0x64400000
+            // 224.0.0.0/4 (Multicast RFC 5771)
+            || (u & 0xF0000000) == 0xE0000000
+            // 240.0.0.0/4 (Reserved / Broadcast RFC 1112)
+            || (u & 0xF0000000) == 0xF0000000
+            // 0.0.0.0/8 ("This network" RFC 1122)
+            || (u & 0xFF000000) == 0x00000000
+        }
+        IpAddr::V6(v6) => {
+            let segs = v6.segments();
+            // ::1 (Loopback) or :: (Unspecified)
+            v6.is_loopback() || v6.is_unspecified()
+            // fe80::/10 (Link-Local Unicast)
+            || (segs[0] & 0xFFC0) == 0xFE80
+            // fc00::/7 (Unique Local Address ULA)
+            || (segs[0] & 0xFE00) == 0xFC00
+            // ff00::/8 (Multicast)
+            || (segs[0] & 0xFF00) == 0xFF00
+            // ::ffff:0:0/96 (IPv4-mapped IPv6)
+            || (segs[0] == 0 && segs[1] == 0 && segs[2] == 0 && segs[3] == 0 && segs[4] == 0 && segs[5] == 0xFFFF && {
+                let v4 = std::net::Ipv4Addr::new(
+                    (segs[6] >> 8) as u8,
+                    (segs[6] & 0xFF) as u8,
+                    (segs[7] >> 8) as u8,
+                    (segs[7] & 0xFF) as u8,
+                );
+                is_private_ip(IpAddr::V4(v4))
+            })
+        }
+    }
+}
+
+/// 静态局域网与路由器管理域名列表
+const LAN_ROUTER_EXACT_DOMAINS: &[&str] = &[
+    "router.asus.com",
+    "asusrouter.com",
+    "tplogin.cn",
+    "tplinkwifi.net",
+    "tplinklogin.net",
+    "miwifi.com",
+    "tendawifi.com",
+    "pcloudlink.com",
+    "phicomm.me",
+    "zte.home",
+    "my.router",
+    "netcore.cc",
+    "melogin.cn",
+    "falogin.cn",
+    "hiwifi.com",
+    "leike.cc",
+    "routerlogin.net",
+    "routerlogin.com",
+    "speedport.ip",
+    "fritz.box",
+    "repeater.setup",
+    "router.ctc",
+    "gateway.zte",
+];
+
+const LAN_DOMAIN_SUFFIXES: &[&str] = &[
+    "local",
+    "lan",
+    "home.arpa",
+    "localhost",
+    "internal",
+    "home",
+    "corp",
+    "box",
+];
+
+/// 判断域名是否属于局域网主机名、mDNS 或主流路由器后台管理域名
+pub fn is_lan_or_router_domain(domain: &str) -> bool {
+    let d = domain.trim_end_matches('.').to_ascii_lowercase();
+    if LAN_ROUTER_EXACT_DOMAINS.iter().any(|&r| d == r || d.ends_with(&format!(".{r}"))) {
+        return true;
+    }
+    for &s in LAN_DOMAIN_SUFFIXES {
+        if d == s || d.ends_with(&format!(".{s}")) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 局域网主流路由器管理域名默认默认回退 IP
+pub fn default_router_ip_for_domain(domain: &str) -> Option<IpAddr> {
+    let d = domain.trim_end_matches('.').to_ascii_lowercase();
+    if d.contains("miwifi.com") {
+        Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 31, 1)))
+    } else if d.contains("tendawifi.com") {
+        Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 0, 1)))
+    } else if d.contains("phicomm.me") || d.contains("speedport.ip") {
+        Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 2, 1)))
+    } else if d.contains("fritz.box") {
+        Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 178, 1)))
+    } else if d.contains("router.asus.com") || d.contains("asusrouter.com") || d.contains("tplogin.cn")
+        || d.contains("tplinkwifi.net") || d.contains("melogin.cn") || d.contains("falogin.cn")
+        || d.contains("hiwifi.com") || d.contains("netcore.cc") || d.contains("leike.cc")
+    {
+        Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1)))
+    } else {
+        None
+    }
+}
+
 /// 判断 IP 是否属于中国段 (优先查动态加载的 GeoIP: CN，未就绪时二分查找内置 7730 条 CN IP 段)
 ///
 /// ⚠️ 二分正确性前提: 不能用 partition_point 按 net 直接二分 —— CN_IPV4 的 net 并非全部
@@ -419,14 +545,26 @@ pub fn route_decision(
         }
     }
 
-    // 2. 检查直连 IP 标记 (DNS 阶段标记的直连真实 IP)
+    // 2. 私有 IP / 局域网主机与路由器后台域名内置本地直连 (RFC 1918 / mDNS / 局域网组播与广播)
+    if let Some(ip_addr) = ip {
+        if is_private_ip(ip_addr) {
+            return RuleAction::Direct;
+        }
+    }
+    if let Some(dom) = domain {
+        if is_lan_or_router_domain(dom) {
+            return RuleAction::Direct;
+        }
+    }
+
+    // 3. 检查直连 IP 标记 (DNS 阶段标记的直连真实 IP)
     if let Some(ip_addr) = ip {
         if is_direct_ip(ip_addr) {
             return RuleAction::Direct;
         }
     }
 
-    // 3. 国内流量智能直连兜底 (在用户未配置规则/冷启动状态下，确保国内域名/IP 默认直连)
+    // 4. 国内流量智能直连兜底 (在用户未配置规则/冷启动状态下，确保国内域名/IP 默认直连)
     if let Some(dom) = domain {
         if is_cn_domain(dom) {
             return RuleAction::Direct;
@@ -781,5 +919,77 @@ mod tests {
         // 4. 边界地址
         assert!(!is_cn_ip("0.0.0.0".parse().unwrap()));
         assert!(!is_cn_ip("255.255.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_private_ip_and_lan_router_domain() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        // 清空所有规则，默认动作为 proxy
+        set_custom_rules(r#"{"rules":[],"default_action":"proxy"}"#);
+
+        // 1. IPv4 私有网段
+        assert!(is_private_ip("192.168.1.1".parse().unwrap()));
+        assert!(is_private_ip("192.168.0.254".parse().unwrap()));
+        assert!(is_private_ip("10.0.0.1".parse().unwrap()));
+        assert!(is_private_ip("10.254.254.254".parse().unwrap()));
+        assert!(is_private_ip("172.16.0.1".parse().unwrap()));
+        assert!(is_private_ip("172.31.255.255".parse().unwrap()));
+        assert!(is_private_ip("127.0.0.1".parse().unwrap()));
+        assert!(is_private_ip("169.254.1.1".parse().unwrap()));
+        assert!(is_private_ip("100.64.0.1".parse().unwrap()));
+        assert!(is_private_ip("224.0.0.251".parse().unwrap()), "mDNS 组播必须为 private");
+        assert!(is_private_ip("239.255.255.250".parse().unwrap()), "SSDP 组播必须为 private");
+        assert!(is_private_ip("255.255.255.255".parse().unwrap()), "广播必须为 private");
+
+        // 2. 公网 IP 绝不能为 private
+        assert!(!is_private_ip("1.1.1.1".parse().unwrap()));
+        assert!(!is_private_ip("8.8.8.8".parse().unwrap()));
+        assert!(!is_private_ip("223.5.5.5".parse().unwrap()));
+        assert!(!is_private_ip("172.32.0.1".parse().unwrap()));
+
+        // 3. Fake-IP (198.18.0.0/15) 必须在入口短路为 false
+        assert!(!is_private_ip("198.18.0.1".parse().unwrap()));
+        assert!(!is_private_ip("198.19.255.255".parse().unwrap()));
+
+        // 4. IPv6 私有与本地地址
+        assert!(is_private_ip("::1".parse().unwrap()));
+        assert!(is_private_ip("fe80::1".parse().unwrap()));
+        assert!(is_private_ip("fc00::1".parse().unwrap()));
+        assert!(is_private_ip("ff02::fb".parse().unwrap())); // IPv6 mDNS
+        assert!(!is_private_ip("2400:3200::1".parse().unwrap())); // AliDNS IPv6
+        assert!(!is_private_ip("2001:4860:4860::8888".parse().unwrap())); // Google DNS IPv6
+
+        // 5. 局域网与路由器域名
+        assert!(is_lan_or_router_domain("router.asus.com"));
+        assert!(is_lan_or_router_domain("tplogin.cn"));
+        assert!(is_lan_or_router_domain("miwifi.com"));
+        assert!(is_lan_or_router_domain("my-nas.local"));
+        assert!(is_lan_or_router_domain("openwrt.lan"));
+        assert!(is_lan_or_router_domain("printer.home.arpa"));
+        assert!(!is_lan_or_router_domain("google.com"));
+        assert!(!is_lan_or_router_domain("baidu.com"));
+
+        // 6. route_decision 强制直连决策验证
+        assert_eq!(
+            route_decision(None, Some("192.168.1.1".parse().unwrap()), Some(80), Some("tcp")),
+            RuleAction::Direct,
+            "局域网 IP 必须返回 Direct"
+        );
+        assert_eq!(
+            route_decision(Some("router.asus.com"), None, Some(80), Some("tcp")),
+            RuleAction::Direct,
+            "路由器域名必须返回 Direct"
+        );
+        assert_eq!(
+            route_decision(None, Some("224.0.0.251".parse().unwrap()), Some(5353), Some("udp")),
+            RuleAction::Direct,
+            "mDNS 组播必须返回 Direct"
+        );
+
+        // 7. GeoIP / GeoSite 特殊标签识别
+        assert_eq!(
+            route_decision(Some("my-server.local"), None, Some(80), Some("tcp")),
+            RuleAction::Direct
+        );
     }
 }

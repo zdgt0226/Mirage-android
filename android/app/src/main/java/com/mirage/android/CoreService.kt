@@ -165,14 +165,27 @@ class CoreService : VpnService() {
         val builder = Builder()
         builder.setSession("Mirage")
         builder.addAddress("198.18.0.1", 32)
-        builder.addRoute("0.0.0.0", 0)
+        val bypassLan = TunConfigStore.isBypassLanEnabled(this)
+        if (bypassLan) {
+            log("[core] 启用绕过局域网: 路由排除 RFC 1918 / 组播 / 广播私有网段")
+            NON_LAN_IPV4_ROUTES.forEach { (net, prefix) ->
+                builder.addRoute(net, prefix)
+            }
+        } else {
+            builder.addRoute("0.0.0.0", 0)
+        }
         builder.addRoute("198.18.0.0", 15)
         builder.addDnsServer(InetAddress.getByName("198.19.0.53"))
         // 捕获 IPv6 流量，防止 Android 14/15/16 5G 蜂窝网络 IPv6 绕过 VPN 直连物理网卡被 GFW 阻断
         if (TunConfigStore.isIpv6Enabled(this)) {
             runCatching {
                 builder.addAddress("fdfe:dcba:9876::1", 128)
-                builder.addRoute("::", 0)
+                if (!bypassLan) {
+                    builder.addRoute("::", 0)
+                } else {
+                    // IPv6 绕过链路本地 fe80::/10 与 ULA fc00::/7
+                    builder.addRoute("2000::", 3) // 全球单播公网地址 (2000::/3)
+                }
             }
         }
         val mtu = TunConfigStore.getMtu(this)
@@ -790,5 +803,68 @@ class CoreService : VpnService() {
 
         @JvmStatic
         fun clearActive() { active = null }
+
+        /**
+         * 绕过局域网 (Bypass LAN) 的非私有 IPv4 网段分解列表。
+         * 精确排除:
+         * - 0.0.0.0/8 (本网络)
+         * - 10.0.0.0/8 (RFC 1918 私有 A 类)
+         * - 100.64.0.0/10 (RFC 6598 运营商级 NAT)
+         * - 127.0.0.0/8 (环回地址)
+         * - 169.254.0.0/16 (链路本地 / APIPA)
+         * - 172.16.0.0/12 (RFC 1918 私有 B 类)
+         * - 192.168.0.0/16 (RFC 1918 私有 C 类)
+         * - 224.0.0.0/4 (组播: mDNS 224.0.0.251, SSDP 239.255.255.250 等)
+         * - 240.0.0.0/4 (保留 / 255.255.255.255 广播)
+         */
+        val NON_LAN_IPV4_ROUTES = listOf(
+            "1.0.0.0" to 8,
+            "2.0.0.0" to 7,
+            "4.0.0.0" to 6,
+            "8.0.0.0" to 7,
+            "11.0.0.0" to 8,
+            "12.0.0.0" to 6,
+            "16.0.0.0" to 4,
+            "32.0.0.0" to 3,
+            "64.0.0.0" to 3,
+            "72.0.0.0" to 5,
+            "76.0.0.0" to 6,
+            "78.0.0.0" to 7,
+            "80.0.0.0" to 4,
+            "96.0.0.0" to 6,
+            "100.0.0.0" to 10,
+            "100.128.0.0" to 9,
+            "101.0.0.0" to 8,
+            "102.0.0.0" to 7,
+            "104.0.0.0" to 5,
+            "112.0.0.0" to 5,
+            "120.0.0.0" to 6,
+            "124.0.0.0" to 7,
+            "126.0.0.0" to 8,
+            "128.0.0.0" to 3,
+            "160.0.0.0" to 5,
+            "168.0.0.0" to 6,
+            "172.0.0.0" to 12,
+            "172.32.0.0" to 11,
+            "172.64.0.0" to 10,
+            "172.128.0.0" to 9,
+            "173.0.0.0" to 8,
+            "174.0.0.0" to 7,
+            "176.0.0.0" to 4,
+            "192.0.0.0" to 9,
+            "192.128.0.0" to 11,
+            "192.160.0.0" to 13,
+            "192.169.0.0" to 16,
+            "192.170.0.0" to 15,
+            "192.172.0.0" to 14,
+            "192.176.0.0" to 12,
+            "192.188.0.0" to 14,
+            "192.192.0.0" to 10,
+            "193.0.0.0" to 8,
+            "194.0.0.0" to 7,
+            "196.0.0.0" to 6,
+            "200.0.0.0" to 5,
+            "208.0.0.0" to 4,
+        )
     }
 }

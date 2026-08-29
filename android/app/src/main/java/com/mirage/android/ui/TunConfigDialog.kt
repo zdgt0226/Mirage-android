@@ -98,9 +98,19 @@ class TunConfigDialog(
         })
 
         val vpnRepo = com.mirage.android.data.repository.VpnRepository.getInstance(context)
+        binding.switchBypassLan.isChecked = vpnRepo.isBypassLanEnabled.value
         binding.switchEnableIpv6.isChecked = vpnRepo.isIpv6Enabled.value
         binding.switchBlockQuic.isChecked = vpnRepo.isBlockQuic.value
         binding.switchUdpMux.isChecked = vpnRepo.isUdpMux.value
+
+        binding.switchBypassLan.setOnCheckedChangeListener { _, isChecked ->
+            vpnRepo.setBypassLanEnabled(isChecked)
+            Toast.makeText(
+                context,
+                if (isChecked) "已开启绕过局域网 (局域网设备/投屏/打印机原生直连，重连生效)" else "已关闭绕过局域网 (全局接管私有网段，重连生效)",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
 
         binding.switchEnableIpv6.setOnCheckedChangeListener { _, isChecked ->
             vpnRepo.setIpv6Enabled(isChecked)
@@ -133,6 +143,7 @@ class TunConfigDialog(
             binding.etMtu.setText(TunConfigStore.DEFAULT_MTU.toString())
             binding.etTcpIdle.setText(TunConfigStore.DEFAULT_TCP_IDLE_SEC.toString())
             syncBatchChips(TunConfigStore.DEFAULT_BATCH_SIZE)
+            binding.switchBypassLan.isChecked = true
             binding.switchEnableIpv6.isChecked = true
             binding.switchBlockQuic.isChecked = true
             binding.switchUdpMux.isChecked = true

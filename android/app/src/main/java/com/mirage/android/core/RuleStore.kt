@@ -20,6 +20,13 @@ object RuleStore {
         return listOf(
             Rule(
                 id = java.util.UUID.randomUUID().toString(),
+                name = "局域网私有 IP 直连 (GeoIP Private)",
+                enabled = true,
+                action = "direct",
+                conditions = listOf(RuleCondition("geoip", "private"))
+            ),
+            Rule(
+                id = java.util.UUID.randomUUID().toString(),
                 name = "国内域名直连 (GeoSite)",
                 enabled = true,
                 action = "direct",

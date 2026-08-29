@@ -280,8 +280,11 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
     let mut direct_domain = stack.engine().fake_ip_reverse(&dst.0);
     let mut initial_payload: Vec<u8> = Vec::new();
 
-    // 性能快速通道: 若该 IP 已经为直连 IP 或国内 IP，无需消耗 CPU/网络嗅探，直接跳过快速直连
-    let should_sniff = direct_domain.is_none() && !crate::direct::is_direct_ip(dst.0) && !crate::direct::is_cn_ip(dst.0);
+    // 性能快速通道: 若该 IP 已经为直连 IP、国内 IP 或私有局域网 IP，无需消耗 CPU/网络嗅探，直接跳过快速直连
+    let should_sniff = direct_domain.is_none()
+        && !crate::direct::is_direct_ip(dst.0)
+        && !crate::direct::is_cn_ip(dst.0)
+        && !crate::direct::is_private_ip(dst.0);
 
     if should_sniff {
         let mut sniff_buf = [0u8; 2048];
@@ -523,13 +526,16 @@ async fn relay_direct(
     let engine = stack.engine();
     let is_fake = engine.is_fake_ip(&dst.0);
 
-    // 如果目标是 Fake-IP，必须先解析出公网真实 IP
+    // 如果目标是 Fake-IP，必须先解析出真实 IP (或局域网路由器 IP)
     let target_ip = if is_fake {
         if let Some(ref dom) = direct_domain {
             if let Some(real_ip) = crate::tun::dns::direct_dns_lookup(dom) {
                 real_ip
             } else if let Some(real_v4) = crate::tun::dns::resolve_upstream(dom).await {
                 std::net::IpAddr::V4(real_v4)
+            } else if let Some(router_ip) = crate::direct::default_router_ip_for_domain(dom) {
+                debug!("[TUN-TCP/direct] 局域网管理域名 [{}] 使用默认网关 IP: {}", dom, router_ip);
+                router_ip
             } else {
                 debug!("[TUN-TCP/direct] 直连域名 [{}] 真实解析超时，自动平滑回退走隧道代理", dom);
                 return relay_proxy(stack, stream, dst, direct_domain, initial_payload).await;
@@ -542,8 +548,8 @@ async fn relay_direct(
         dst.0
     };
 
-    // 严密安全防护: 若 Fake-IP 域名解析出非国内 IP (如境外域名被规则误判或 DNS 污染)，自动回退隧道代理
-    if is_fake && !crate::direct::is_cn_ip(target_ip) && !crate::direct::is_direct_ip(target_ip) {
+    // 严密安全防护: 若 Fake-IP 域名解析出非国内 IP (如境外域名被规则误判或 DNS 污染)，自动回退隧道代理 (私有 IP 豁免)
+    if is_fake && !crate::direct::is_cn_ip(target_ip) && !crate::direct::is_direct_ip(target_ip) && !crate::direct::is_private_ip(target_ip) {
         debug!("[TUN-TCP/direct] 域名 [{:?}] 解析为非国内 IP ({})，自动回退走隧道代理", direct_domain, target_ip);
         return relay_proxy(stack, stream, dst, direct_domain, initial_payload).await;
     }

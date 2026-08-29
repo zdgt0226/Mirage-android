@@ -126,10 +126,14 @@ impl GeoStore {
     pub fn match_geosite(&self, tag: &str, domain: &str) -> bool {
         let tag_upper = tag.trim().to_ascii_uppercase();
         if let Some(matcher) = self.sites.get(&tag_upper) {
-            matcher.matches(domain)
-        } else {
-            false
+            if matcher.matches(domain) {
+                return true;
+            }
         }
+        if tag_upper == "PRIVATE" || tag_upper == "LAN" {
+            return crate::direct::is_lan_or_router_domain(domain);
+        }
+        false
     }
 
     pub fn match_geoip(&self, code: &str, ip: IpAddr) -> bool {
@@ -137,6 +141,9 @@ impl GeoStore {
             return false;
         }
         let code_upper = code.trim().to_ascii_uppercase();
+        if code_upper == "PRIVATE" || code_upper == "LAN" {
+            return crate::direct::is_private_ip(ip);
+        }
         match ip {
             IpAddr::V4(v4) => {
                 if let Some(list) = self.ip_v4.get(&code_upper) {

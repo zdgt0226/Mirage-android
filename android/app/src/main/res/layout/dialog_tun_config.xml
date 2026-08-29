@@ -266,6 +266,52 @@
             android:textSize="14sp"
             android:textStyle="bold" />
 
+        <!-- 绕过局域网 (Bypass LAN) 开关卡片 -->
+        <com.google.android.material.card.MaterialCardView
+            style="@style/MirageCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            app:cardCornerRadius="12dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingHorizontal="14dp"
+                android:paddingVertical="10dp">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="绕过局域网 (Bypass LAN)"
+                        android:textColor="@color/meow_ink"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="排除 RFC 1918 / 组播 / 广播私有网段，确保局域网设备、路由器后台、无线投屏与智能家居 100% 直连 (重连生效)"
+                        android:textColor="@color/meow_ink_secondary"
+                        android:textSize="11sp" />
+                </LinearLayout>
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switchBypassLan"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
         <!-- IPv6 路由接管 开关卡片 -->
         <com.google.android.material.card.MaterialCardView
             style="@style/MirageCard"

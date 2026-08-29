@@ -38,6 +38,9 @@ class VpnRepository(private val context: Context) {
     val connections: StateFlow<List<com.mirage.android.data.model.ConnectionInfo>> = _connections.asStateFlow()
 
     private val prefs = context.getSharedPreferences("mirage_vpn_prefs", Context.MODE_PRIVATE)
+    private val _isBypassLanEnabled = MutableStateFlow(com.mirage.android.core.TunConfigStore.isBypassLanEnabled(context))
+    val isBypassLanEnabled: StateFlow<Boolean> = _isBypassLanEnabled.asStateFlow()
+
     private val _isIpv6Enabled = MutableStateFlow(com.mirage.android.core.TunConfigStore.isIpv6Enabled(context))
     val isIpv6Enabled: StateFlow<Boolean> = _isIpv6Enabled.asStateFlow()
 
@@ -187,6 +190,11 @@ class VpnRepository(private val context: Context) {
             com.mirage.android.data.model.LogLevel.ERROR -> "error"
         }
         return CoreController.setLogLevel(levelStr)
+    }
+
+    fun setBypassLanEnabled(enabled: Boolean) {
+        _isBypassLanEnabled.value = enabled
+        com.mirage.android.core.TunConfigStore.setBypassLanEnabled(context, enabled)
     }
 
     fun setIpv6Enabled(enabled: Boolean) {
