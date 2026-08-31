@@ -13,9 +13,13 @@ import com.mirage.android.core.CoreController
 import com.mirage.android.data.model.RecentRequestInfo
 import com.mirage.android.databinding.DialogRequestDetailBinding
 
-class RequestDetailBottomSheet(
-    private val item: RecentRequestInfo
-) : BottomSheetDialogFragment() {
+class RequestDetailBottomSheet() : BottomSheetDialogFragment() {
+
+    private var item: RecentRequestInfo? = null
+
+    constructor(item: RecentRequestInfo) : this() {
+        this.item = item
+    }
 
     private var _binding: DialogRequestDetailBinding? = null
     private val binding get() = _binding!!
@@ -31,32 +35,33 @@ class RequestDetailBottomSheet(
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        val req = item ?: return
 
-        binding.tvDetailProtocol.text = item.protocol
-        binding.tvDetailTitle.text = item.target
+        binding.tvDetailProtocol.text = req.protocol
+        binding.tvDetailTitle.text = req.target
 
-        binding.tvHostValue.text = item.target
-        binding.tvIpValue.text = item.resolvedIp.ifBlank { "直接转发" }
-        binding.tvOutboundValue.text = item.outbound
-        binding.tvRuleValue.text = item.matchedRule
-        binding.tvStatusValue.text = item.status
+        binding.tvHostValue.text = req.target
+        binding.tvIpValue.text = req.resolvedIp.ifBlank { "直接转发" }
+        binding.tvOutboundValue.text = req.outbound
+        binding.tvRuleValue.text = req.matchedRule
+        binding.tvStatusValue.text = req.status
 
-        binding.tvDurationValue.text = item.durationFormatted
-        binding.tvUploadValue.text = "${item.upFormatted} (${item.upBytes} B)"
-        binding.tvDownloadValue.text = "${item.downFormatted} (${item.downBytes} B)"
+        binding.tvDurationValue.text = req.durationFormatted
+        binding.tvUploadValue.text = "${req.upFormatted} (${req.upBytes} B)"
+        binding.tvDownloadValue.text = "${req.downFormatted} (${req.downBytes} B)"
 
         binding.btnCopyDetail.setOnClickListener {
             val text = """
                 [Mirage Request]
-                Protocol: ${item.protocol}
-                Target: ${item.target}
-                Resolved IP: ${item.resolvedIp}
-                Outbound: ${item.outbound}
-                Matched Rule: ${item.matchedRule}
-                Status: ${item.status}
-                Duration: ${item.durationFormatted}
-                Upload: ${item.upFormatted} (${item.upBytes} B)
-                Download: ${item.downFormatted} (${item.downBytes} B)
+                Protocol: ${req.protocol}
+                Target: ${req.target}
+                Resolved IP: ${req.resolvedIp}
+                Outbound: ${req.outbound}
+                Matched Rule: ${req.matchedRule}
+                Status: ${req.status}
+                Duration: ${req.durationFormatted}
+                Upload: ${req.upFormatted} (${req.upBytes} B)
+                Download: ${req.downFormatted} (${req.downBytes} B)
             """.trimIndent()
 
             val cm = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
@@ -65,9 +70,9 @@ class RequestDetailBottomSheet(
         }
 
         binding.btnCloseConn.setOnClickListener {
-            val ok = CoreController.closeConnection(item.id)
+            val ok = CoreController.closeConnection(req.id)
             if (ok) {
-                Toast.makeText(requireContext(), "已重置并切断连接 #${item.id}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(requireContext(), "已重置并切断连接 #${req.id}", Toast.LENGTH_SHORT).show()
             } else {
                 Toast.makeText(requireContext(), "连接已处于关闭状态", Toast.LENGTH_SHORT).show()
             }

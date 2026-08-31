@@ -1143,4 +1143,88 @@ mod tests {
             RuleAction::Direct
         );
     }
+
+    #[test]
+    fn test_outbound_modes_switching_matrix() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        // 初始化干净路由表 (默认 proxy 动作)
+        set_custom_rules(r#"{"rules":[],"default_action":"proxy"}"#);
+
+        // ── 测试 1: 规则模式 (Mode 0) ──
+        set_outbound_mode(0);
+        assert_eq!(get_outbound_mode(), 0);
+
+        // 1.1 局域网 IP / 路由器域名 -> DIRECT
+        let (action, rule) = route_decision_detailed(Some("router.asus.com"), None, Some(80), Some("tcp"));
+        assert_eq!(action, RuleAction::Direct);
+        assert!(rule.contains("Router"));
+
+        let (action, rule) = route_decision_detailed(None, Some("192.168.1.1".parse().unwrap()), Some(80), Some("tcp"));
+        assert_eq!(action, RuleAction::Direct);
+        assert!(rule.contains("Private IP"));
+
+        // 1.2 境外域名 / 境外 IP -> PROXY (默认回退)
+        let (action, _) = route_decision_detailed(Some("www.google.com"), None, Some(443), Some("tcp"));
+        assert_eq!(action, RuleAction::Proxy);
+
+        let (action, _) = route_decision_detailed(None, Some("8.8.8.8".parse().unwrap()), Some(53), Some("udp"));
+        assert_eq!(action, RuleAction::Proxy);
+
+        // 1.3 国内域名 / 国内 IP -> DIRECT (内置兜底)
+        let (action, rule) = route_decision_detailed(Some("www.bilibili.com"), None, Some(443), Some("tcp"));
+        assert_eq!(action, RuleAction::Direct);
+        assert!(rule.contains("CN Domain"));
+
+        let (action, rule) = route_decision_detailed(None, Some("114.114.114.114".parse().unwrap()), Some(53), Some("udp"));
+        assert_eq!(action, RuleAction::Direct);
+        assert!(rule.contains("CN IP"));
+
+        // ── 测试 2: 全局代理模式 (Mode 1) ──
+        set_outbound_mode(1);
+        assert_eq!(get_outbound_mode(), 1);
+
+        // 2.1 局域网保护依然有效 -> DIRECT
+        let (action, _) = route_decision_detailed(Some("tplogin.cn"), None, Some(80), Some("tcp"));
+        assert_eq!(action, RuleAction::Direct, "全局代理下局域网路由器管理域名必须直连保护");
+
+        let (action, _) = route_decision_detailed(None, Some("10.0.0.1".parse().unwrap()), Some(80), Some("tcp"));
+        assert_eq!(action, RuleAction::Direct, "全局代理下局域网私有 IP 必须直连保护");
+
+        // 2.2 境外域名与国内域名全部无差别走代理 -> PROXY
+        let (action, rule) = route_decision_detailed(Some("www.google.com"), None, Some(443), Some("tcp"));
+        assert_eq!(action, RuleAction::Proxy);
+        assert!(rule.contains("Global Proxy Override"));
+
+        let (action, rule) = route_decision_detailed(Some("www.bilibili.com"), None, Some(443), Some("tcp"));
+        assert_eq!(action, RuleAction::Proxy);
+        assert!(rule.contains("Global Proxy Override"));
+
+        let (action, rule) = route_decision_detailed(None, Some("114.114.114.114".parse().unwrap()), Some(53), Some("udp"));
+        assert_eq!(action, RuleAction::Proxy);
+        assert!(rule.contains("Global Proxy Override"));
+
+        // ── 测试 3: 全局直连模式 (Mode 2) ──
+        set_outbound_mode(2);
+        assert_eq!(get_outbound_mode(), 2);
+
+        // 3.1 局域网 -> DIRECT
+        let (action, _) = route_decision_detailed(None, Some("192.168.1.1".parse().unwrap()), Some(80), Some("tcp"));
+        assert_eq!(action, RuleAction::Direct);
+
+        // 3.2 境外域名与国内域名全部走直连 -> DIRECT
+        let (action, rule) = route_decision_detailed(Some("www.google.com"), None, Some(443), Some("tcp"));
+        assert_eq!(action, RuleAction::Direct);
+        assert!(rule.contains("Global Direct Override"));
+
+        let (action, rule) = route_decision_detailed(Some("www.bilibili.com"), None, Some(443), Some("tcp"));
+        assert_eq!(action, RuleAction::Direct);
+        assert!(rule.contains("Global Direct Override"));
+
+        let (action, rule) = route_decision_detailed(None, Some("8.8.8.8".parse().unwrap()), Some(53), Some("udp"));
+        assert_eq!(action, RuleAction::Direct);
+        assert!(rule.contains("Global Direct Override"));
+
+        // 复原回默认模式
+        set_outbound_mode(0);
+    }
 }
