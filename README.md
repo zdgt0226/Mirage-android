@@ -138,7 +138,7 @@ Mirage-android/
 
 ---
 
-## 🤝 贡献与致谢
+## 🤝 贡献与致谢 (Contributions & Acknowledgments)
 
 本项目由人类开发者与前沿 AI 协同研发、审计与深度实机调优：
 
@@ -149,7 +149,15 @@ Mirage-android/
 | 🤖 **Anthropic Claude** | 原生内核架构重构、FD 泄露治理、独立进程化与工程化迁移 |
 | 🤖 **DeepSeek AI** | 安全审计、Linux/Rust 线程模型缺陷排查与协议栈深度分析 |
 
-特别感谢 [Mirage-rs](https://github.com/zdgt0226/Mirage-rs) 协议的设计与实现。
+### 💡 架构参考与设计借鉴 (Design Inspirations & References)
+
+在 Android 系统级网络调优与跨进程控制架构的演进过程中，特别致谢并借鉴了 **[meow-android](https://github.com/madeye/meow)** 项目的优秀工程实践：
+- **`mimalloc` 原生内存优化**：引入高性能全局内存分配器，有效降低高并发短生命周期连接与 MMDB 扫描下的内存碎片，将原生内核驻留内存（RSS）降低至 ~7.4 MB；
+- **底层物理网络绑定 (`setUnderlyingNetworks`)**：建立 VPN 时即时绑定底层活动物理网卡并监听网络能力变化，解决特定机型防火墙丢包并直通 Linux 内核 eBPF；
+- **`strip_and_inject` 配置安全清洗**：在载入用户/订阅规则前执行自动化清洗，剔除无效格式与自环端口，强制注入局域网私有网段直连与 Fake-IP 系统级保护；
+- **流式日志/流量消费与连接重置**：提供轻量流式接口规避 Android Binder 1MB 事务上限（`TransactionTooLargeException`），并支持细粒度定向斩断僵尸连接。
+
+同时特别感谢 [Mirage-rs](https://github.com/zdgt0226/Mirage-rs) 协议的设计与实现。
 
 ---
 
