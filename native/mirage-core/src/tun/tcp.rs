@@ -301,23 +301,23 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
         }
     }
 
-    let action = crate::direct::route_decision(direct_domain.as_deref(), Some(dst.0), Some(dst.1), Some("tcp"));
+    let (action, matched_rule) = crate::direct::route_decision_detailed(direct_domain.as_deref(), Some(dst.0), Some(dst.1), Some("tcp"));
 
     if action == crate::direct::RuleAction::Block {
         let target_name = direct_domain.as_deref().map(|d| d.to_string()).unwrap_or_else(|| dst.0.to_string());
-        let (cid, _, _, _) = crate::monitor::record_conn_start("TCP", &format!("{}:{}", target_name, dst.1), "规则拦截 (Block)");
-        crate::monitor::record_conn_close(cid, 0, 0);
+        let (cid, _, _, _) = crate::monitor::record_conn_start("TCP", &format!("{}:{}", target_name, dst.1), &dst.0.to_string(), &matched_rule, "BLOCK");
+        crate::monitor::record_conn_close(cid, 0, 0, "Blocked");
         stream.close();
         debug!("[TUN-TCP] 规则拦截: 阻断连接 → {}:{}", target_name, dst.1);
         return;
     }
 
     if action == crate::direct::RuleAction::Direct {
-        relay_direct(stack.clone(), stream, dst, direct_domain.clone(), initial_payload).await;
+        relay_direct(stack.clone(), stream, dst, direct_domain.clone(), initial_payload, matched_rule).await;
         return;
     }
 
-    relay_proxy(stack, stream, dst, direct_domain, initial_payload).await;
+    relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule).await;
 }
 
 /// 代理路径: smoltcp socket ⇄ Mirage 加密隧道
@@ -327,6 +327,7 @@ async fn relay_proxy(
     dst: (std::net::IpAddr, u16),
     direct_domain: Option<String>,
     initial_payload: Vec<u8>,
+    matched_rule: String,
 ) {
     let tunnel = match connect_tunnel(&stack, dst, direct_domain.clone()).await {
         Ok(t) => t,
@@ -341,7 +342,7 @@ async fn relay_proxy(
     } else {
         format!("{}:{}", dst.0, dst.1)
     };
-    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("TCP", &target_name, "隧道代理");
+    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("TCP", &target_name, &dst.0.to_string(), &matched_rule, "PROXY");
 
     // 拆成读写半程: upload (app→tunnel) / download (tunnel→app)
     let (mut tun_reader, mut tun_writer) = (tunnel.reader, tunnel.writer);
@@ -350,7 +351,7 @@ async fn relay_proxy(
     // 如果嗅探期间预读了首包数据，优先推入隧道发送
     if !initial_payload.is_empty() {
         if tun_writer.send_data(&initial_payload).await.is_err() {
-            crate::monitor::record_conn_close(cid, 0, 0);
+            crate::monitor::record_conn_close(cid, 0, 0, "Initial Write Failed");
             return;
         }
         conn_up.fetch_add(initial_payload.len() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -489,7 +490,7 @@ async fn relay_proxy(
             }
         }
     }
-    crate::monitor::record_conn_close(cid, up, down);
+    crate::monitor::record_conn_close(cid, up, down, &format!("{:?}", close_reason));
     let duration_ms = start_time.elapsed().as_millis() as u64;
     let req_total = request_count.load(std::sync::atomic::Ordering::Relaxed);
     // 复用或大流量长连接 (避免单请求大文件下载被误判为一次性短探测触发 zombie decay)
@@ -527,6 +528,7 @@ async fn relay_direct(
     dst: (std::net::IpAddr, u16),
     direct_domain: Option<String>,
     initial_payload: Vec<u8>,
+    matched_rule: String,
 ) {
     let engine = stack.engine();
     let is_fake = engine.is_fake_ip(&dst.0);
@@ -543,7 +545,7 @@ async fn relay_direct(
                 router_ip
             } else {
                 debug!("[TUN-TCP/direct] 直连域名 [{}] 真实解析超时，自动平滑回退走隧道代理", dom);
-                return relay_proxy(stack, stream, dst, direct_domain, initial_payload).await;
+                return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule).await;
             }
         } else {
             debug!("[TUN-TCP/direct] 目标为 Fake-IP ({}) 但无对应域名映射，无法直连", dst.0);
@@ -556,7 +558,7 @@ async fn relay_direct(
     // 严密安全防护: 若 Fake-IP 域名解析出非国内 IP (如境外域名被规则误判或 DNS 污染)，自动回退隧道代理 (私有 IP 豁免)
     if is_fake && !crate::direct::is_cn_ip(target_ip) && !crate::direct::is_direct_ip(target_ip) && !crate::direct::is_private_ip(target_ip) {
         debug!("[TUN-TCP/direct] 域名 [{:?}] 解析为非国内 IP ({})，自动回退走隧道代理", direct_domain, target_ip);
-        return relay_proxy(stack, stream, dst, direct_domain, initial_payload).await;
+        return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule).await;
     }
 
     let target_display = if let Some(ref dom) = direct_domain {
@@ -565,7 +567,7 @@ async fn relay_direct(
         format!("{}:{}", target_ip, dst.1)
     };
 
-    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("TCP", &target_display, "直连");
+    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("TCP", &target_display, &target_ip.to_string(), &matched_rule, "DIRECT");
     TCP_ACTIVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _guard = TcpActiveGuard;
     use std::os::unix::io::AsRawFd;
@@ -577,7 +579,7 @@ async fn relay_direct(
     let sock = match sock {
         Ok(s) => s,
         Err(e) => {
-            crate::monitor::record_conn_close(cid, 0, 0);
+            crate::monitor::record_conn_close(cid, 0, 0, "Socket Creation Failed");
             debug!("[TUN-TCP/direct] 建 socket 失败: {e}");
             return;
         }
@@ -590,14 +592,14 @@ async fn relay_direct(
     ).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
-            crate::monitor::record_conn_close(cid, 0, 0);
+            crate::monitor::record_conn_close(cid, 0, 0, "Connect Failed (Fallback Proxy)");
             debug!("[TUN-TCP/direct] 直连 {addr} 失败: {e}，自动回退走隧道代理");
-            return relay_proxy(stack, stream, dst, direct_domain, initial_payload).await;
+            return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule).await;
         }
         Err(_) => {
-            crate::monitor::record_conn_close(cid, 0, 0);
+            crate::monitor::record_conn_close(cid, 0, 0, "Connect Timeout (Fallback Proxy)");
             debug!("[TUN-TCP/direct] 直连 {addr} 超时，自动回退走隧道代理");
-            return relay_proxy(stack, stream, dst, direct_domain, initial_payload).await;
+            return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule).await;
         }
     };
     let _ = remote.set_nodelay(true);
@@ -605,7 +607,7 @@ async fn relay_direct(
     // 如果嗅探期间读取了首包，先写入真实 socket
     if !initial_payload.is_empty() {
         if remote.write_all(&initial_payload).await.is_err() {
-            crate::monitor::record_conn_close(cid, 0, 0);
+            crate::monitor::record_conn_close(cid, 0, 0, "Write Initial Payload Failed");
             return;
         }
         conn_up.fetch_add(initial_payload.len() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -737,7 +739,7 @@ async fn relay_direct(
             }
         }
     }
-    crate::monitor::record_conn_close(cid, up, down);
+    crate::monitor::record_conn_close(cid, up, down, &format!("{:?}", close_reason));
     let duration_ms = start_time.elapsed().as_millis() as u64;
     let req_total = request_count.load(std::sync::atomic::Ordering::Relaxed);
     let is_reused = req_total >= 2;

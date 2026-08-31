@@ -1,0 +1,52 @@
+package com.mirage.android.data.model
+
+import org.json.JSONObject
+
+/**
+ * Surge 风格 Recent Requests 请求流数据模型。
+ */
+data class RecentRequestInfo(
+    val id: Long,
+    val protocol: String,       // "TCP", "UDP", "DNS"
+    val target: String,         // "api.github.com:443"
+    val resolvedIp: String,     // "140.82.112.4" or "198.18.0.2 (Fake-IP)"
+    val matchedRule: String,    // "Rule: DOMAIN-SUFFIX (github.com)" or "GEOIP: CN"
+    val outbound: String,       // "PROXY" / "DIRECT" / "BLOCK"
+    val status: String,         // "Active", "Closed (200 OK)", "Closed (Timeout)"
+    val upBytes: Long,
+    val downBytes: Long,
+    val startTime: Long,
+    val durationMs: Long
+) {
+    val upFormatted: String get() = formatBytes(upBytes)
+    val downFormatted: String get() = formatBytes(downBytes)
+    val durationFormatted: String get() = if (durationMs >= 1000) "%.1fs".format(durationMs / 1000.0) else "${durationMs}ms"
+
+    companion object {
+        fun fromJson(obj: JSONObject): RecentRequestInfo {
+            return RecentRequestInfo(
+                id = obj.optLong("id", 0),
+                protocol = obj.optString("protocol", "TCP"),
+                target = obj.optString("target", ""),
+                resolvedIp = obj.optString("resolved_ip", ""),
+                matchedRule = obj.optString("matched_rule", ""),
+                outbound = obj.optString("outbound", "PROXY"),
+                status = obj.optString("status", "Active"),
+                upBytes = obj.optLong("up_bytes", 0),
+                downBytes = obj.optLong("down_bytes", 0),
+                startTime = obj.optLong("start_time", 0),
+                durationMs = obj.optLong("duration_ms", 0)
+            )
+        }
+
+        private fun formatBytes(bytes: Long): String {
+            val b = bytes.toDouble()
+            return when {
+                b >= 1 shl 30 -> "%.2f GB".format(b / (1 shl 30))
+                b >= 1 shl 20 -> "%.1f MB".format(b / (1 shl 20))
+                b >= 1 shl 10 -> "%.0f KB".format(b / (1 shl 10))
+                else -> "${bytes} B"
+            }
+        }
+    }
+}

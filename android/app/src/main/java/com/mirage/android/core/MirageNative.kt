@@ -128,6 +128,15 @@ object MirageNative {
     /** 批量切断并重置所有活跃连接。 */
     external fun closeAllConnections(): Int
 
+    /** 设置出站分流模式 (0: 规则, 1: 全局代理, 2: 直连)。 */
+    external fun setOutboundMode(mode: Int): Boolean
+
+    /** 获取当前出站分流模式 (0: 规则, 1: 全局代理, 2: 直连)。 */
+    external fun getOutboundMode(): Int
+
+    /** 获取最近请求流列表 (Surge 级 Recent Requests)。 */
+    external fun getRecentRequestsJson(): String
+
     /**
      * Rust 侧同步调用 (隧道 socket connect 前): 把 fd 交给当前活跃的 VpnService protect。
      * 必须同步返回 (protect 设置 SO_MARK 影响路由, 晚了会导致隧道流量进 TUN 环路)。

@@ -167,17 +167,17 @@ async fn udp_flow_relay(
 
     // 复合分流规则决策
     let reverse_domain = engine.fake_ip_reverse(&key.dst);
-    let action = crate::direct::route_decision(reverse_domain.as_deref(), Some(key.dst), Some(key.dst_port), Some("udp"));
+    let (action, matched_rule) = crate::direct::route_decision_detailed(reverse_domain.as_deref(), Some(key.dst), Some(key.dst_port), Some("udp"));
 
     if action == crate::direct::RuleAction::Block {
         let target_str = reverse_domain.as_deref().map(|d| d.to_string()).unwrap_or_else(|| format!("{}:{}", key.dst, key.dst_port));
-        let (cid, _, _, _) = crate::monitor::record_conn_start("UDP", &target_str, "规则拦截 (Block)");
-        crate::monitor::record_conn_close(cid, 0, 0);
+        let (cid, _, _, _) = crate::monitor::record_conn_start("UDP", &target_str, &key.dst.to_string(), &matched_rule, "BLOCK");
+        crate::monitor::record_conn_close(cid, 0, 0, "Blocked");
         return;
     }
 
     if action == crate::direct::RuleAction::Direct {
-        return udp_flow_direct(stack, engine, key, reverse_domain, rx).await;
+        return udp_flow_direct(stack, engine, key, reverse_domain, rx, matched_rule).await;
     }
 
     // 取出站节点
@@ -199,7 +199,8 @@ async fn udp_flow_relay(
     } else {
         format!("{}:{}", key.dst, key.dst_port)
     };
-    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("UDP", &target_display, "隧道代理");
+    let resolved_str = if let Some(ip) = target_ip { ip.to_string() } else { key.dst.to_string() };
+    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("UDP", &target_display, &resolved_str, &matched_rule, "PROXY");
 
     // ── UDP Mux 路径: 多流复用 K 条长命共享隧道 (脱钩 pool_size 限制) ──
     if crate::proxy::udp_mux::udp_mux_enabled() {
@@ -207,7 +208,7 @@ async fn udp_flow_relay(
             Ok(t) => t,
             Err(e) => {
                 debug!("[TUN-UDP] Mirage-MUX 隧道不可用: {e}");
-                crate::monitor::record_conn_close(cid, 0, 0);
+                crate::monitor::record_conn_close(cid, 0, 0, "Mux Connect Failed");
                 return;
             }
         };
@@ -221,7 +222,7 @@ async fn udp_flow_relay(
             Some(v) => v,
             None => {
                 debug!("[TUN-UDP] Mirage-MUX 单隧道 sid 到上限, 丢弃 (客户端回落 TCP)");
-                crate::monitor::record_conn_close(cid, 0, 0);
+                crate::monitor::record_conn_close(cid, 0, 0, "Mux Sid Limit Reached");
                 return;
             }
         };
@@ -266,7 +267,7 @@ async fn udp_flow_relay(
         }
 
         let recv_bytes = conn_down.load(Ordering::Relaxed);
-        crate::monitor::record_conn_close(cid, sent, recv_bytes);
+        crate::monitor::record_conn_close(cid, sent, recv_bytes, "Closed");
         debug!(
             "[TUN-UDP] #{} Mux 会话关闭 (↑{} ↓{})",
             flow_id,
@@ -281,12 +282,12 @@ async fn udp_flow_relay(
         Ok(t) => t,
         Err(e) => {
             debug!("[TUN-UDP] 隧道不可用: {e}");
-            crate::monitor::record_conn_close(cid, 0, 0);
+            crate::monitor::record_conn_close(cid, 0, 0, "Tunnel Pool Empty");
             return;
         }
     };
     if tunnel.writer.send_data(&[0x00]).await.is_err() {
-        crate::monitor::record_conn_close(cid, 0, 0);
+        crate::monitor::record_conn_close(cid, 0, 0, "Handshake Failed");
         return;
     }
     let writer = Arc::new(Mutex::new(tunnel.writer));
@@ -363,7 +364,7 @@ async fn udp_flow_relay(
     };
 
     let (sent, recv) = tokio::join!(dn, up);
-    crate::monitor::record_conn_close(cid, sent, recv);
+    crate::monitor::record_conn_close(cid, sent, recv, "Closed");
     debug!(
         "[TUN-UDP] {} 关闭 (↑{} ↓{})",
         fmt_flow(&key),
@@ -795,6 +796,7 @@ async fn udp_flow_direct(
     key: FlowKey,
     reverse_domain: Option<String>,
     mut rx: tokio::sync::mpsc::Receiver<(SocketAddr, SocketAddr, Vec<u8>)>,
+    matched_rule: String,
 ) {
     let is_fake = engine.is_fake_ip(&key.dst);
     let target_ip = if is_fake {
@@ -832,7 +834,7 @@ async fn udp_flow_direct(
     let client = SocketAddr::new(key.src, key.src_port);
     debug!("[TUN-UDP/direct] 新流 {} → {}", fmt_flow(&key), dst);
 
-    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("UDP", &target_display, "直连");
+    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("UDP", &target_display, &target_ip.to_string(), &matched_rule, "DIRECT");
     let sock_rc = std::sync::Arc::new(sock);
 
     // 下行: 客户端 → 目标
@@ -883,7 +885,7 @@ async fn udp_flow_direct(
     };
 
     let (sent, recv) = tokio::join!(dn, up);
-    crate::monitor::record_conn_close(cid, sent, recv);
+    crate::monitor::record_conn_close(cid, sent, recv, "Closed");
     debug!("[TUN-UDP/direct] {} 关闭 (↑{} ↓{})", fmt_flow(&key),
         human_bytes(sent), human_bytes(recv));
 }

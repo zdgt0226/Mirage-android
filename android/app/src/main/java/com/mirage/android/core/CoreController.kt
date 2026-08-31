@@ -139,6 +139,12 @@ object CoreController {
         call { it.closeConnection(id) } ?: false
     fun closeAllConnections(): Int =
         call { it.closeAllConnections() } ?: 0
+    fun setOutboundMode(mode: Int): Boolean =
+        call { it.setOutboundMode(mode) } ?: false
+    fun getOutboundMode(): Int =
+        call { it.outboundMode } ?: 0
+    fun getRecentRequestsJson(): String =
+        call { it.recentRequestsJson } ?: "[]"
 
     fun registerCallback(cb: ICoreCallback) {
         callbacks.add(cb)

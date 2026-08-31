@@ -1,6 +1,6 @@
 [package]
 name = "mirage-jni"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Mirage-Android 的 Android JNI 包装层 (cdylib): 控制 mirage-core 的 TUN 引擎"

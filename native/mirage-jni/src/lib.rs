@@ -878,5 +878,37 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_closeAllConnect
     mirage_core::monitor::close_all_connections() as jint
 }
 
+/// `boolean setOutboundMode(int mode)` — 设置出站分流模式 (0: 规则, 1: 全局代理, 2: 直连)
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_setOutboundMode(
+    _env: JNIEnv,
+    _class: JClass,
+    mode: jint,
+) -> jboolean {
+    mirage_core::direct::set_outbound_mode(mode as u8);
+    1
+}
+
+/// `int getOutboundMode()` — 获取当前出站分流模式 (0: 规则, 1: 全局代理, 2: 直连)
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_getOutboundMode(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    mirage_core::direct::get_outbound_mode() as jint
+}
+
+/// `String getRecentRequestsJson()` — 获取最近请求流列表 (Surge 级 Recent Requests)
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_getRecentRequestsJson(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let json = mirage_core::monitor::get_recent_requests_json();
+    env.new_string(json)
+        .unwrap_or_else(|_| JString::from(JObject::null()))
+        .into_raw()
+}
+
 
 

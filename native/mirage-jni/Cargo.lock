@@ -441,7 +441,7 @@ dependencies = [
 
 [[package]]
 name = "mirage-core"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -465,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "mirage-jni"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "jni",

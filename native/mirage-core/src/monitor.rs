@@ -246,6 +246,21 @@ pub struct ConnectionRecord {
     pub duration_secs: u64,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RecentRequestRecord {
+    pub id: u64,
+    pub protocol: String,       // "TCP", "UDP", "DNS"
+    pub target: String,         // "api.github.com:443"
+    pub resolved_ip: String,    // "140.82.112.4" or "198.18.0.2 (Fake-IP)"
+    pub matched_rule: String,   // "Rule: DOMAIN-SUFFIX (github.com)" or "GEOIP: CN"
+    pub outbound: String,       // "PROXY" / "DIRECT" / "BLOCK"
+    pub status: String,         // "Active", "Closed (200 OK)", "Closed (Timeout)"
+    pub up_bytes: u64,
+    pub down_bytes: u64,
+    pub start_time: u64,
+    pub duration_ms: u64,
+}
+
 pub struct LiveConnection {
     pub id: u64,
     pub protocol: String,
@@ -257,12 +272,20 @@ pub struct LiveConnection {
     pub abort: Arc<tokio::sync::Notify>,
 }
 
+const RECENT_REQUESTS_CAP: usize = 300;
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 static ACTIVE_CONNECTIONS: Mutex<Option<std::collections::HashMap<u64, LiveConnection>>> = Mutex::new(None);
+static RECENT_REQUESTS: Mutex<Option<VecDeque<RecentRequestRecord>>> = Mutex::new(None);
 
 /// 注册新连接，返回 (id, up_atomic, down_atomic, abort_notify)。
 /// 读写协程可直接原子累加，无需争抢全局大锁，实现实时无锁流量统计与定向中断。
-pub fn record_conn_start(protocol: &str, target: &str, outbound: &str) -> (u64, Arc<AtomicU64>, Arc<AtomicU64>, Arc<tokio::sync::Notify>) {
+pub fn record_conn_start(
+    protocol: &str,
+    target: &str,
+    resolved_ip: &str,
+    matched_rule: &str,
+    outbound: &str,
+) -> (u64, Arc<AtomicU64>, Arc<AtomicU64>, Arc<tokio::sync::Notify>) {
     let id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
     let start_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -284,9 +307,34 @@ pub fn record_conn_start(protocol: &str, target: &str, outbound: &str) -> (u64, 
         abort: abort.clone(),
     };
 
-    let mut lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
-    let map = lock.get_or_insert_with(|| std::collections::HashMap::with_capacity(128));
-    map.insert(id, record);
+    let req_item = RecentRequestRecord {
+        id,
+        protocol: protocol.to_string(),
+        target: target.to_string(),
+        resolved_ip: resolved_ip.to_string(),
+        matched_rule: matched_rule.to_string(),
+        outbound: outbound.to_string(),
+        status: "Active".to_string(),
+        up_bytes: 0,
+        down_bytes: 0,
+        start_time,
+        duration_ms: 0,
+    };
+
+    {
+        let mut lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+        let map = lock.get_or_insert_with(|| std::collections::HashMap::with_capacity(128));
+        map.insert(id, record);
+    }
+    {
+        let mut q_lock = RECENT_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let q = q_lock.get_or_insert_with(|| VecDeque::with_capacity(RECENT_REQUESTS_CAP));
+        if q.len() >= RECENT_REQUESTS_CAP {
+            q.pop_back();
+        }
+        q.push_front(req_item);
+    }
+
     (id, up_bytes, down_bytes, abort)
 }
 
@@ -316,11 +364,34 @@ pub fn close_all_connections() -> usize {
     }
 }
 
-/// 关闭连接：从活跃连接列表中彻底移除，符合真正的“活跃连接”语义。
-pub fn record_conn_close(id: u64, _up: u64, _down: u64) {
-    let mut lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(map) = lock.as_mut() {
-        map.remove(&id);
+/// 关闭连接：从活跃连接列表中彻底移除，并在 Recent Requests 队列中标记完成状态与耗时。
+pub fn record_conn_close(id: u64, up: u64, down: u64, status: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut start_time = now;
+    {
+        let mut lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(map) = lock.as_mut() {
+            if let Some(live) = map.remove(&id) {
+                start_time = live.start_time;
+            }
+        }
+    }
+
+    let duration_ms = now.saturating_sub(start_time) * 1000;
+    {
+        let mut q_lock = RECENT_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(q) = q_lock.as_mut() {
+            if let Some(item) = q.iter_mut().find(|r| r.id == id) {
+                item.up_bytes = up;
+                item.down_bytes = down;
+                item.duration_ms = duration_ms;
+                item.status = status.to_string();
+            }
+        }
     }
 }
 
@@ -351,6 +422,17 @@ pub fn get_connections_json() -> String {
         if list.len() > 100 {
             list.truncate(100);
         }
+        serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
+    } else {
+        "[]".to_string()
+    }
+}
+
+/// 获取 Surge 级 Recent Requests 请求流列表 (最新排前，包含已关闭与活跃请求)
+pub fn get_recent_requests_json() -> String {
+    let q_lock = RECENT_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(q) = q_lock.as_ref() {
+        let list: Vec<&RecentRequestRecord> = q.iter().collect();
         serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
     } else {
         "[]".to_string()

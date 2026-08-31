@@ -262,6 +262,11 @@ class CoreService : VpnService() {
         runCatching { GeoManager.loadGeoFilesToNative(this) }
         runCatching { MirageNative.setRules(RuleStore.toJson(this)) }
         runCatching {
+            val routingPrefs = getSharedPreferences("mirage_routing_prefs", Context.MODE_PRIVATE)
+            val mode = routingPrefs.getInt("outbound_mode", 0)
+            MirageNative.setOutboundMode(mode)
+        }
+        runCatching {
             val dnsPrefs = getSharedPreferences("mirage_dns_prefs", Context.MODE_PRIVATE)
             val directDns = dnsPrefs.getString("direct_dns", "223.5.5.5") ?: "223.5.5.5"
             val remoteDns = dnsPrefs.getString("remote_dns", "1.1.1.1") ?: "1.1.1.1"
@@ -778,6 +783,21 @@ class CoreService : VpnService() {
             runCatching { MirageNative.closeConnection(id) }.getOrDefault(false)
         override fun closeAllConnections(): Int =
             runCatching { MirageNative.closeAllConnections() }.getOrDefault(0)
+        override fun setOutboundMode(mode: Int): Boolean {
+            getSharedPreferences("mirage_routing_prefs", Context.MODE_PRIVATE)
+                .edit().putInt("outbound_mode", mode).apply()
+            return runCatching { MirageNative.setOutboundMode(mode) }.getOrDefault(false)
+        }
+        override fun getOutboundMode(): Int {
+            return if (MirageNative.isRunning()) {
+                MirageNative.getOutboundMode()
+            } else {
+                getSharedPreferences("mirage_routing_prefs", Context.MODE_PRIVATE)
+                    .getInt("outbound_mode", 0)
+            }
+        }
+        override fun getRecentRequestsJson(): String =
+            runCatching { MirageNative.getRecentRequestsJson() }.getOrDefault("[]")
         override fun registerCallback(cb: ICoreCallback?) = registerCallbackInternal(cb)
         override fun unregisterCallback(cb: ICoreCallback?) = unregisterCallbackInternal(cb)
     }

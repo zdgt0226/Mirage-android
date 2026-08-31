@@ -505,27 +505,60 @@ pub fn reset_rule_hits() {
     rule_hits().lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
-/// 综合决策请求的目标动作 (支持传入 域名、IP、端口、协议)
-pub fn route_decision(
+/// 出站模式 (Outbound Mode)
+/// 0 = Rule (规则模式，默认)
+/// 1 = GlobalProxy (全局代理模式)
+/// 2 = Direct (全局直连模式)
+static OUTBOUND_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn set_outbound_mode(mode: u8) {
+    OUTBOUND_MODE.store(mode, std::sync::atomic::Ordering::Relaxed);
+    tracing::info!("[ROUTER] 出站模式已切换为: {}", match mode {
+        1 => "全局代理 (GlobalProxy)",
+        2 => "直接连接 (Direct)",
+        _ => "规则分流 (Rule)",
+    });
+}
+
+pub fn get_outbound_mode() -> u8 {
+    OUTBOUND_MODE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 综合决策请求的目标动作与匹配细节 (用于 Surge 级 Recent Requests 请求流展示)
+pub fn route_decision_detailed(
     domain: Option<&str>,
     ip: Option<IpAddr>,
     port: Option<u16>,
     protocol: Option<&str>,
-) -> RuleAction {
+) -> (RuleAction, String) {
+    // 0. 私有 IP / 局域网主机与路由器后台域名内置本地直连 (最高保护，任何模式均不破坏 LAN)
+    if let Some(ip_addr) = ip {
+        if is_private_ip(ip_addr) {
+            return (RuleAction::Direct, "Private IP (LAN)".to_string());
+        }
+    }
+    if let Some(dom) = domain {
+        if is_lan_or_router_domain(dom) {
+            return (RuleAction::Direct, "Router / LAN Domain".to_string());
+        }
+    }
+
+    // 1. 全局模式判断 (Global Proxy / Direct Override)
+    let mode = get_outbound_mode();
+    if mode == 1 {
+        return (RuleAction::Proxy, "Global Proxy Override".to_string());
+    } else if mode == 2 {
+        return (RuleAction::Direct, "Global Direct Override".to_string());
+    }
+
     let r = router_store().read().unwrap_or_else(|e| e.into_inner());
 
-    // 1. 优先遍历用户自定义复合规则 (自上而下，首条命中即返回)
+    // 2. 遍历用户自定义复合规则 (自上而下，首条命中即返回)
     for rule in &r.rules {
         if rule.matches(domain, ip, port, protocol) {
-            // ⚠️ geosite:cn → direct 特判: geosite cn 数据可能误含境外域名
-            // (实测 update.googleapis.com / gstatic.com 被 cn 标签命中), 若直接
-            // 直连 → Play 等 Google 服务被 DNS 污染 IP 拖慢。cn 直连只对"严格
-            // 国内域名"生效 (内置白名单 / .cn 后缀 / 内置 CN IP 段), 否则跳过该
-            // 规则让后续 proxy 规则 (geosite:google 等) 命中。
             let cn_direct = rule.action == RuleAction::Direct
                 && rule.conditions.iter().any(|c| matches!(c, ConditionKind::GeoSite(t) if t.eq_ignore_ascii_case("cn")));
             if cn_direct {
-                // 用**纯内置**判定 (不查 Geo 数据), 避免 geosite cn 误含境外域名时放行
                 let strictly_cn = match domain {
                     Some(d) => is_cn_domain_strict(d),
                     None => ip.is_some_and(|i| is_cn_ip(i)),
@@ -541,43 +574,42 @@ pub fn route_decision(
                 }
             }
             record_rule_hit(&rule.id, &rule.name, rule.action.as_str());
-            return rule.action;
-        }
-    }
-
-    // 2. 私有 IP / 局域网主机与路由器后台域名内置本地直连 (RFC 1918 / mDNS / 局域网组播与广播)
-    if let Some(ip_addr) = ip {
-        if is_private_ip(ip_addr) {
-            return RuleAction::Direct;
-        }
-    }
-    if let Some(dom) = domain {
-        if is_lan_or_router_domain(dom) {
-            return RuleAction::Direct;
+            return (rule.action, format!("Rule: {}", rule.name));
         }
     }
 
     // 3. 检查直连 IP 标记 (DNS 阶段标记的直连真实 IP)
     if let Some(ip_addr) = ip {
         if is_direct_ip(ip_addr) {
-            return RuleAction::Direct;
+            return (RuleAction::Direct, "Direct IP (DNS Tagged)".to_string());
         }
     }
 
     // 4. 国内流量智能直连兜底 (在用户未配置规则/冷启动状态下，确保国内域名/IP 默认直连)
     if let Some(dom) = domain {
         if is_cn_domain(dom) {
-            return RuleAction::Direct;
+            return (RuleAction::Direct, "CN Domain (Direct)".to_string());
         }
     }
     if let Some(ip_addr) = ip {
         if is_cn_ip(ip_addr) {
-            return RuleAction::Direct;
+            return (RuleAction::Direct, "CN IP (Direct)".to_string());
         }
     }
 
-    // 4. 回退至默认动作 (境外未命中规则默认走 proxy)
-    r.default_action
+    // 5. 回退至默认动作 (境外未命中规则默认走 proxy)
+    let action = r.default_action;
+    (action, format!("Default {:?}", action))
+}
+
+/// 综合决策请求的目标动作 (支持传入 域名、IP、端口、协议)
+pub fn route_decision(
+    domain: Option<&str>,
+    ip: Option<IpAddr>,
+    port: Option<u16>,
+    protocol: Option<&str>,
+) -> RuleAction {
+    route_decision_detailed(domain, ip, port, protocol).0
 }
 
 /// 域名决策 (DNS 阶段使用)

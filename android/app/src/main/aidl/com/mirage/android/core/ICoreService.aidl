@@ -48,6 +48,9 @@ interface ICoreService {
     String getLogs();
     boolean closeConnection(long id);
     int closeAllConnections();
+    boolean setOutboundMode(int mode);
+    int getOutboundMode();
+    String getRecentRequestsJson();
     void registerCallback(ICoreCallback cb);
     void unregisterCallback(ICoreCallback cb);
 }

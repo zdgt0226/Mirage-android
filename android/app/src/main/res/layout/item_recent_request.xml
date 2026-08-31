@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="utf-8"?>
+<com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginHorizontal="2dp"
+    android:layout_marginVertical="3dp"
+    app:cardBackgroundColor="@color/meow_card"
+    app:cardCornerRadius="10dp"
+    app:cardElevation="0dp"
+    app:strokeColor="@color/meow_outline"
+    app:strokeWidth="0.8dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="10dp"
+        android:paddingVertical="9dp">
+
+        <!-- 协议小方标 (TCP / UDP / DNS) -->
+        <TextView
+            android:id="@+id/tvProtocolBadge"
+            android:layout_width="34dp"
+            android:layout_height="34dp"
+            android:background="@drawable/bg_telegram_avatar"
+            android:gravity="center"
+            android:text="TCP"
+            android:textColor="@color/meow_blue"
+            android:textSize="10sp"
+            android:textStyle="bold" />
+
+        <!-- 目标域名、解析 IP 与命中规则 -->
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="9dp"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/tvTarget"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="middle"
+                android:fontFamily="sans-serif-medium"
+                android:maxLines="1"
+                android:textColor="@color/meow_ink"
+                android:textSize="13.5sp"
+                tools:text="api.github.com:443" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2.5dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/tvOutboundBadge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_telegram_pill"
+                    android:paddingHorizontal="5dp"
+                    android:paddingVertical="0.5dp"
+                    android:textColor="@color/meow_blue"
+                    android:textSize="9.5sp"
+                    android:textStyle="bold"
+                    tools:text="PROXY" />
+
+                <TextView
+                    android:id="@+id/tvRuleInfo"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="5dp"
+                    android:layout_weight="1"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:textColor="@color/meow_ink_secondary"
+                    android:textSize="10.5sp"
+                    tools:text="Rule: DOMAIN-SUFFIX (github.com)" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- 耗时、状态与上下行流量 -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="end"
+            android:orientation="vertical">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/tvDuration"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:fontFeatureSettings="tnum"
+                    android:textColor="@color/meow_ink"
+                    android:textSize="11.5sp"
+                    android:textStyle="bold"
+                    tools:text="42ms" />
+
+                <TextView
+                    android:id="@+id/tvStatusDot"
+                    android:layout_width="6dp"
+                    android:layout_height="6dp"
+                    android:layout_marginStart="5dp"
+                    android:background="@drawable/bg_telegram_avatar" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/tvTrafficBytes"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2.5dp"
+                android:fontFeatureSettings="tnum"
+                android:textColor="@color/meow_ink_secondary"
+                android:textSize="10sp"
+                tools:text="↑1.2K ↓45.8K" />
+        </LinearLayout>
+    </LinearLayout>
+</com.google.android.material.card.MaterialCardView>

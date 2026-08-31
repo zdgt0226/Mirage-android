@@ -86,10 +86,17 @@ class NodeAdapter(
                 }
             }
 
+            binding.tvLatency.setOnClickListener {
+                com.mirage.android.util.Haptic.tap(it)
+                onTest(bindingAdapterPosition, node)
+            }
+
             binding.cardNode.setOnClickListener {
+                com.mirage.android.util.Haptic.tap(it)
                 onSelect(bindingAdapterPosition, node)
             }
             binding.radioSelected.setOnClickListener {
+                com.mirage.android.util.Haptic.tap(it)
                 onSelect(bindingAdapterPosition, node)
             }
 

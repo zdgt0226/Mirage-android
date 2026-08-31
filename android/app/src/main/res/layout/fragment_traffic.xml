@@ -4,22 +4,22 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
     android:background="@color/meow_canvas"
-    android:padding="16dp">
+    android:orientation="vertical"
+    android:padding="12dp">
 
-    <!-- 顶栏速率统计卡片 (Telegram 扁平设计) -->
+    <!-- 顶栏速率统计卡片 (Surge Inset Grouped 风格) -->
     <com.google.android.material.card.MaterialCardView
         style="@style/MirageCard"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        app:cardCornerRadius="16dp">
+        app:cardCornerRadius="14dp">
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="16dp">
+            android:padding="12dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -37,7 +37,7 @@
                         android:layout_height="wrap_content"
                         android:text="↑ 上行速率"
                         android:textColor="@color/meow_upload"
-                        android:textSize="12sp"
+                        android:textSize="11.5sp"
                         android:textStyle="bold" />
 
                     <TextView
@@ -45,9 +45,10 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="2dp"
+                        android:fontFeatureSettings="tnum"
                         android:text="0 B/s"
                         android:textColor="@color/meow_ink"
-                        android:textSize="22sp"
+                        android:textSize="20sp"
                         android:textStyle="bold" />
                 </LinearLayout>
 
@@ -62,7 +63,7 @@
                         android:layout_height="wrap_content"
                         android:text="↓ 下行速率"
                         android:textColor="@color/meow_download"
-                        android:textSize="12sp"
+                        android:textSize="11.5sp"
                         android:textStyle="bold" />
 
                     <TextView
@@ -70,17 +71,18 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="2dp"
+                        android:fontFeatureSettings="tnum"
                         android:text="0 B/s"
                         android:textColor="@color/meow_ink"
-                        android:textSize="22sp"
+                        android:textSize="20sp"
                         android:textStyle="bold" />
                 </LinearLayout>
             </LinearLayout>
 
             <View
                 android:layout_width="match_parent"
-                android:layout_height="1dp"
-                android:layout_marginVertical="10dp"
+                android:layout_height="0.6dp"
+                android:layout_marginVertical="8dp"
                 android:background="@color/meow_outline" />
 
             <LinearLayout
@@ -93,103 +95,80 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
+                    android:fontFeatureSettings="tnum"
                     android:text="累计上行: 0 B"
                     android:textColor="@color/meow_ink_secondary"
-                    android:textSize="12sp" />
+                    android:textSize="11sp" />
 
                 <TextView
                     android:id="@+id/totalDown"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
+                    android:fontFeatureSettings="tnum"
                     android:text="累计下行: 0 B"
                     android:textColor="@color/meow_ink_secondary"
-                    android:textSize="12sp" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:id="@+id/conns"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="活跃连接: TCP 0 · UDP 0"
-                    android:textColor="@color/meow_ink_secondary"
-                    android:textSize="12sp" />
-
-                <TextView
-                    android:id="@+id/dnsCount"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="DNS 查询: 0"
-                    android:textColor="@color/meow_ink_secondary"
-                    android:textSize="12sp" />
+                    android:textSize="11sp" />
             </LinearLayout>
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
-    <!-- 实时曲线卡片 -->
+    <!-- 实时平滑双线曲线卡片 -->
     <com.google.android.material.card.MaterialCardView
         style="@style/MirageCard"
         android:layout_width="match_parent"
-        android:layout_height="115dp"
-        android:layout_marginTop="8dp"
-        app:cardCornerRadius="14dp">
+        android:layout_height="60dp"
+        android:layout_marginTop="4dp"
+        app:cardCornerRadius="10dp">
 
         <com.mirage.android.TrafficChart
             android:id="@+id/chart"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:padding="8dp" />
+            android:padding="4dp" />
     </com.google.android.material.card.MaterialCardView>
 
-    <!-- 底部功能切换栏: 日志 vs 活跃连接 -->
+    <!-- 底部功能切换栏: 请求流 vs 运行日志 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="6dp"
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
         <LinearLayout
             android:layout_width="wrap_content"
-            android:layout_height="36dp"
+            android:layout_height="32dp"
             android:background="@drawable/bg_telegram_pill"
             android:orientation="horizontal"
             android:padding="2dp">
 
             <TextView
-                android:id="@+id/btnTabLogs"
+                android:id="@+id/btnTabRequests"
                 android:layout_width="wrap_content"
                 android:layout_height="match_parent"
                 android:background="@drawable/bg_telegram_pill_active"
                 android:clickable="true"
                 android:focusable="true"
                 android:gravity="center"
-                android:paddingHorizontal="14dp"
-                android:text="运行日志"
+                android:paddingHorizontal="12dp"
+                android:text="请求流 (Recent)"
                 android:textColor="@android:color/white"
-                android:textSize="12sp"
+                android:textSize="11.5sp"
                 android:textStyle="bold" />
 
             <TextView
-                android:id="@+id/btnTabConns"
+                android:id="@+id/btnTabLogs"
                 android:layout_width="wrap_content"
                 android:layout_height="match_parent"
                 android:background="@android:color/transparent"
                 android:clickable="true"
                 android:focusable="true"
                 android:gravity="center"
-                android:paddingHorizontal="14dp"
-                android:text="连接信息"
+                android:paddingHorizontal="12dp"
+                android:text="运行日志"
                 android:textColor="@color/meow_ink_secondary"
-                android:textSize="12sp" />
+                android:textSize="11.5sp" />
         </LinearLayout>
 
         <View
@@ -199,8 +178,8 @@
 
         <ImageButton
             android:id="@+id/btnExportLogs"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
             android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="导出诊断包"
             android:src="@android:drawable/ic_menu_save"
@@ -208,8 +187,8 @@
 
         <ImageButton
             android:id="@+id/btnCopyLogs"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
             android:layout_marginStart="4dp"
             android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="复制"
@@ -218,8 +197,8 @@
 
         <ImageButton
             android:id="@+id/btnClearLogs"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
             android:layout_marginStart="4dp"
             android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="清空"
@@ -227,13 +206,125 @@
             app:tint="@color/meow_ink_secondary" />
     </LinearLayout>
 
-    <!-- 容器1: 日志控制台与 Level 筛选 -->
+    <!-- 容器1: Surge 级 Recent Requests 请求流 (默认展示) -->
+    <LinearLayout
+        android:id="@+id/boxRecentRequests"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <!-- 搜索框与筛选 Chips -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <EditText
+                android:id="@+id/etSearchRequests"
+                android:layout_width="0dp"
+                android:layout_height="34dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_telegram_pill"
+                android:hint="🔍 搜索域名 / IP..."
+                android:imeOptions="actionDone"
+                android:inputType="text"
+                android:maxLines="1"
+                android:paddingHorizontal="10dp"
+                android:textColor="@color/meow_ink"
+                android:textColorHint="@color/meow_ink_secondary"
+                android:textSize="11.5sp" />
+        </LinearLayout>
+
+        <HorizontalScrollView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:scrollbars="none">
+
+            <com.google.android.material.chip.ChipGroup
+                android:id="@+id/chipGroupRequestFilter"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                app:singleSelection="true">
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chipFilterAll"
+                    style="@style/Widget.Material3.Chip.Filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:checked="true"
+                    android:text="全部"
+                    android:textSize="10.5sp" />
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chipFilterProxy"
+                    style="@style/Widget.Material3.Chip.Filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="PROXY"
+                    android:textSize="10.5sp" />
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chipFilterDirect"
+                    style="@style/Widget.Material3.Chip.Filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="DIRECT"
+                    android:textSize="10.5sp" />
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chipFilterBlock"
+                    style="@style/Widget.Material3.Chip.Filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="BLOCK"
+                    android:textSize="10.5sp" />
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chipFilterDns"
+                    style="@style/Widget.Material3.Chip.Filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="DNS"
+                    android:textSize="10.5sp" />
+            </com.google.android.material.chip.ChipGroup>
+        </HorizontalScrollView>
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1">
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/recyclerRecentRequests"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:clipToPadding="false"
+                android:paddingVertical="2dp" />
+
+            <TextView
+                android:id="@+id/tvEmptyRequests"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:text="暂无请求流记录 (发起网络请求后实时刷新)"
+                android:textColor="@color/meow_ink_secondary"
+                android:textSize="12sp"
+                android:visibility="gone" />
+        </FrameLayout>
+    </LinearLayout>
+
+    <!-- 容器2: 运行日志控制台 (切换展示) -->
     <LinearLayout
         android:id="@+id/boxLogs"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:orientation="vertical">
+        android:orientation="vertical"
+        android:visibility="gone">
 
         <HorizontalScrollView
             android:layout_width="match_parent"
@@ -254,7 +345,7 @@
                     android:layout_height="wrap_content"
                     android:checked="true"
                     android:text="全部"
-                    android:textSize="11sp" />
+                    android:textSize="10.5sp" />
 
                 <com.google.android.material.chip.Chip
                     android:id="@+id/chipLevelInfo"
@@ -262,7 +353,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="INFO"
-                    android:textSize="11sp" />
+                    android:textSize="10.5sp" />
 
                 <com.google.android.material.chip.Chip
                     android:id="@+id/chipLevelWarn"
@@ -270,7 +361,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="WARN"
-                    android:textSize="11sp" />
+                    android:textSize="10.5sp" />
 
                 <com.google.android.material.chip.Chip
                     android:id="@+id/chipLevelError"
@@ -278,7 +369,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="ERROR"
-                    android:textSize="11sp" />
+                    android:textSize="10.5sp" />
 
                 <com.google.android.material.chip.Chip
                     android:id="@+id/chipLevelDebug"
@@ -286,15 +377,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="DEBUG"
-                    android:textSize="11sp" />
-
-                <com.google.android.material.chip.Chip
-                    android:id="@+id/chipLevelTrace"
-                    style="@style/Widget.Material3.Chip.Filter"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="TRACE"
-                    android:textSize="11sp" />
+                    android:textSize="10.5sp" />
             </com.google.android.material.chip.ChipGroup>
         </HorizontalScrollView>
 
@@ -304,54 +387,28 @@
             android:layout_marginTop="4dp"
             android:layout_weight="1"
             app:cardBackgroundColor="@color/meow_console_bg"
-            app:cardCornerRadius="12dp"
+            app:cardCornerRadius="10dp"
             app:cardElevation="0dp"
             app:strokeColor="#2C353F"
-            app:strokeWidth="1dp">
+            app:strokeWidth="0.8dp">
 
             <ScrollView
                 android:id="@+id/scrollLogs"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
-                android:padding="10dp">
+                android:padding="8dp">
 
                 <TextView
                     android:id="@+id/trafficLogView"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:fontFamily="monospace"
+                    android:fontFeatureSettings="tnum"
                     android:lineSpacingExtra="3dp"
                     android:textColor="#94A3B8"
-                    android:textSize="11sp"
+                    android:textSize="10.5sp"
                     tools:text="[core] Mirage 内核运行中..." />
             </ScrollView>
         </com.google.android.material.card.MaterialCardView>
     </LinearLayout>
-
-    <!-- 容器2: 实时连接信息列表 (RecyclerView) -->
-    <FrameLayout
-        android:id="@+id/boxConnections"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_marginTop="4dp"
-        android:layout_weight="1"
-        android:visibility="gone">
-
-        <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/recyclerConnections"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:clipToPadding="false"
-            android:paddingVertical="4dp" />
-
-        <TextView
-            android:id="@+id/tvEmptyConnections"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center"
-            android:text="暂无活跃/转发连接"
-            android:textColor="@color/meow_ink_secondary"
-            android:textSize="13sp"
-            android:visibility="gone" />
-    </FrameLayout>
 </LinearLayout>

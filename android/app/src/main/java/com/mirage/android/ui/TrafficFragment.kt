@@ -5,8 +5,10 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Color
 import android.os.Bundle
+import android.text.Editable
 import android.text.Spannable
 import android.text.SpannableStringBuilder
+import android.text.TextWatcher
 import android.text.style.ForegroundColorSpan
 import android.view.LayoutInflater
 import android.view.View
@@ -21,12 +23,12 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import com.mirage.android.R
 import com.mirage.android.data.model.LogLevel
 import com.mirage.android.databinding.FragmentTrafficBinding
-import com.mirage.android.ui.adapter.ConnectionAdapter
+import com.mirage.android.ui.adapter.RecentRequestAdapter
 import com.mirage.android.ui.viewmodel.TrafficViewModel
 import kotlinx.coroutines.launch
 
 /**
- * 流量监测 Tab: 实时平滑双线曲线 + 连接度量 + 实时连接信息监控 + 日志级别过滤控制台。
+ * 流量监控与活动 Tab (Surge 级 Recent Requests 请求流瀑布 + 实时双线速率图 + 运行日志控制台)。
  */
 class TrafficFragment : Fragment() {
 
@@ -34,7 +36,7 @@ class TrafficFragment : Fragment() {
     private val binding get() = _binding!!
 
     private val viewModel: TrafficViewModel by viewModels()
-    private lateinit var connAdapter: ConnectionAdapter
+    private lateinit var recentAdapter: RecentRequestAdapter
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -48,7 +50,8 @@ class TrafficFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
-        setupConnectionsRecycler()
+        setupRequestsRecycler()
+        setupSearchAndFilters()
         setupToggleMode()
         setupLogLevelChips()
 
@@ -68,15 +71,15 @@ class TrafficFragment : Fragment() {
                     Toast.makeText(requireContext(), "当前没有可复制的日志", Toast.LENGTH_SHORT).show()
                 }
             } else {
-                val conns = viewModel.connections.value.joinToString("\n") {
-                    "${it.protocol} | ${it.target} | ${it.outbound} | ${it.status} | ↑${it.upFormatted} ↓${it.downFormatted}"
+                val reqs = viewModel.filteredRecentRequests.value.joinToString("\n") {
+                    "${it.protocol} | ${it.target} | ${it.outbound} | ${it.matchedRule} | ${it.status} | ↑${it.upFormatted} ↓${it.downFormatted} | ${it.durationFormatted}"
                 }
-                if (conns.isNotBlank()) {
+                if (reqs.isNotBlank()) {
                     val cm = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                    cm?.setPrimaryClip(ClipData.newPlainText("Mirage Connections", conns))
-                    Toast.makeText(requireContext(), "已复制连接信息到剪贴板", Toast.LENGTH_SHORT).show()
+                    cm?.setPrimaryClip(ClipData.newPlainText("Mirage Recent Requests", reqs))
+                    Toast.makeText(requireContext(), "已复制最近请求流记录到剪贴板", Toast.LENGTH_SHORT).show()
                 } else {
-                    Toast.makeText(requireContext(), "当前没有活跃连接信息", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(requireContext(), "当前暂无请求流记录", Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -95,44 +98,78 @@ class TrafficFragment : Fragment() {
         observeState()
     }
 
-    private fun setupConnectionsRecycler() {
-        connAdapter = ConnectionAdapter()
-        binding.recyclerConnections.layoutManager = LinearLayoutManager(requireContext())
-        binding.recyclerConnections.adapter = connAdapter
+    private fun setupRequestsRecycler() {
+        recentAdapter = RecentRequestAdapter { item ->
+            RequestDetailBottomSheet(item).show(childFragmentManager, RequestDetailBottomSheet.TAG)
+        }
+        binding.recyclerRecentRequests.layoutManager = LinearLayoutManager(requireContext())
+        binding.recyclerRecentRequests.adapter = recentAdapter
     }
 
-    private var currentMode = 0 // 0: 日志, 1: 连接信息
+    private fun setupSearchAndFilters() {
+        binding.etSearchRequests.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                viewModel.setSearchQuery(s?.toString() ?: "")
+            }
+            override fun afterTextChanged(s: Editable?) {}
+        })
+
+        binding.chipGroupRequestFilter.setOnCheckedStateChangeListener { _, checkedIds ->
+            when (checkedIds.firstOrNull()) {
+                R.id.chipFilterProxy -> {
+                    viewModel.setProtocolFilter("ALL")
+                    viewModel.setOutboundFilter("PROXY")
+                }
+                R.id.chipFilterDirect -> {
+                    viewModel.setProtocolFilter("ALL")
+                    viewModel.setOutboundFilter("DIRECT")
+                }
+                R.id.chipFilterBlock -> {
+                    viewModel.setProtocolFilter("ALL")
+                    viewModel.setOutboundFilter("BLOCK")
+                }
+                R.id.chipFilterDns -> {
+                    viewModel.setProtocolFilter("DNS")
+                    viewModel.setOutboundFilter("ALL")
+                }
+                else -> {
+                    viewModel.setProtocolFilter("ALL")
+                    viewModel.setOutboundFilter("ALL")
+                }
+            }
+        }
+    }
 
     private fun setupToggleMode() {
         fun updateModeUI(mode: Int) {
-            currentMode = mode
             if (mode == 0) {
-                binding.btnTabLogs.setBackgroundResource(R.drawable.bg_telegram_pill_active)
-                binding.btnTabLogs.setTextColor(Color.WHITE)
-                binding.btnTabLogs.typeface = android.graphics.Typeface.DEFAULT_BOLD
-
-                binding.btnTabConns.setBackgroundColor(Color.TRANSPARENT)
-                binding.btnTabConns.setTextColor(requireContext().getColor(R.color.meow_ink_secondary))
-                binding.btnTabConns.typeface = android.graphics.Typeface.DEFAULT
-
-                binding.boxLogs.visibility = View.VISIBLE
-                binding.boxConnections.visibility = View.GONE
-            } else {
-                binding.btnTabConns.setBackgroundResource(R.drawable.bg_telegram_pill_active)
-                binding.btnTabConns.setTextColor(Color.WHITE)
-                binding.btnTabConns.typeface = android.graphics.Typeface.DEFAULT_BOLD
+                binding.btnTabRequests.setBackgroundResource(R.drawable.bg_telegram_pill_active)
+                binding.btnTabRequests.setTextColor(Color.WHITE)
+                binding.btnTabRequests.typeface = android.graphics.Typeface.DEFAULT_BOLD
 
                 binding.btnTabLogs.setBackgroundColor(Color.TRANSPARENT)
                 binding.btnTabLogs.setTextColor(requireContext().getColor(R.color.meow_ink_secondary))
                 binding.btnTabLogs.typeface = android.graphics.Typeface.DEFAULT
 
+                binding.boxRecentRequests.visibility = View.VISIBLE
                 binding.boxLogs.visibility = View.GONE
-                binding.boxConnections.visibility = View.VISIBLE
+            } else {
+                binding.btnTabLogs.setBackgroundResource(R.drawable.bg_telegram_pill_active)
+                binding.btnTabLogs.setTextColor(Color.WHITE)
+                binding.btnTabLogs.typeface = android.graphics.Typeface.DEFAULT_BOLD
+
+                binding.btnTabRequests.setBackgroundColor(Color.TRANSPARENT)
+                binding.btnTabRequests.setTextColor(requireContext().getColor(R.color.meow_ink_secondary))
+                binding.btnTabRequests.typeface = android.graphics.Typeface.DEFAULT
+
+                binding.boxRecentRequests.visibility = View.GONE
+                binding.boxLogs.visibility = View.VISIBLE
             }
         }
 
-        binding.btnTabLogs.setOnClickListener { updateModeUI(0) }
-        binding.btnTabConns.setOnClickListener { updateModeUI(1) }
+        binding.btnTabRequests.setOnClickListener { updateModeUI(0) }
+        binding.btnTabLogs.setOnClickListener { updateModeUI(1) }
         updateModeUI(0)
     }
 
@@ -143,7 +180,6 @@ class TrafficFragment : Fragment() {
                 R.id.chipLevelWarn -> LogLevel.WARN
                 R.id.chipLevelError -> LogLevel.ERROR
                 R.id.chipLevelDebug -> LogLevel.DEBUG
-                R.id.chipLevelTrace -> LogLevel.TRACE
                 else -> LogLevel.ALL
             }
             viewModel.setLogLevel(level)
@@ -159,8 +195,6 @@ class TrafficFragment : Fragment() {
                         binding.downRate.text = stats.downRateFormatted
                         binding.totalUp.text = "累计上行: ${stats.upTotalFormatted}"
                         binding.totalDown.text = "累计下行: ${stats.downTotalFormatted}"
-                        binding.conns.text = "活跃连接: TCP ${stats.tcpConns} · UDP ${stats.udpFlows}"
-                        binding.dnsCount.text = "DNS 查询: ${stats.dnsQueries}"
                     }
                 }
                 launch {
@@ -174,16 +208,15 @@ class TrafficFragment : Fragment() {
                     }
                 }
                 launch {
-                    viewModel.connections.collect { conns ->
-                        connAdapter.submitList(conns)
-                        binding.btnTabConns.text = if (conns.isNotEmpty()) "连接信息 (${conns.size})" else "连接信息"
-                        binding.tvEmptyConnections.visibility = if (conns.isEmpty()) View.VISIBLE else View.GONE
+                    viewModel.filteredRecentRequests.collect { reqs ->
+                        recentAdapter.submitList(reqs)
+                        binding.btnTabRequests.text = if (reqs.isNotEmpty()) "请求流 (${reqs.size})" else "请求流"
+                        binding.tvEmptyRequests.visibility = if (reqs.isEmpty()) View.VISIBLE else View.GONE
                     }
                 }
                 launch {
                     viewModel.filteredLogs.collect { logLines ->
                         renderColoredLogs(logLines)
-                        // 自动滚动到底部
                         binding.scrollLogs.post {
                             binding.scrollLogs.fullScroll(View.FOCUS_DOWN)
                         }
@@ -208,15 +241,15 @@ class TrafficFragment : Fragment() {
             val upper = line.uppercase()
             val color = when {
                 upper.contains("ERROR") || upper.contains("FATAL") || upper.contains("EXCEPTION") || upper.contains("FAILED") ->
-                    Color.parseColor("#FF6B6B") // 亮红
+                    Color.parseColor("#FF6B6B")
                 upper.contains("WARN") || upper.contains("WARNING") ->
-                    Color.parseColor("#FFD166") // 琥珀黄
+                    Color.parseColor("#FFD166")
                 upper.contains("OK=TRUE") || upper.contains("已启动") || upper.contains("成功") ->
-                    Color.parseColor("#06D6A0") // 翡翠绿
-                upper.contains("[CORE]") || upper.contains("[LOADER]") || upper.contains("[APP]") ->
-                    Color.parseColor("#4CC9F0") // 天空蓝
+                    Color.parseColor("#06D6A0")
+                upper.contains("[CORE]") || upper.contains("[ROUTER]") || upper.contains("[TUN-") ->
+                    Color.parseColor("#4CC9F0")
                 else ->
-                    Color.parseColor("#CBD5E1") // 浅灰
+                    Color.parseColor("#CBD5E1")
             }
 
             builder.setSpan(ForegroundColorSpan(color), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)

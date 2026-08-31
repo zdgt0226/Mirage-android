@@ -364,34 +364,41 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, serv
     let Some((domain, qtype, question_len)) = parse_query(query) else { return };
     DNS_QUERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    let decision = direct::route_decision(Some(&domain), None, Some(53), Some("udp"));
+    let (decision, matched_rule) = direct::route_decision_detailed(Some(&domain), None, Some(53), Some("udp"));
 
     if decision == direct::RuleAction::Block {
         let (cid, _conn_up, _conn_down, _) = crate::monitor::record_conn_start(
             "DNS",
             &format!("{domain}:53"),
-            "规则拦截 (Block)",
+            &client.ip().to_string(),
+            &matched_rule,
+            "BLOCK",
         );
         tracing::info!("[TUN-DNS] 规则拦截 (Block): {} (qtype={}) from {}", domain, qtype, client);
         let a = if qtype == 1 { Some([0, 0, 0, 0]) } else { None };
         send_dns_reply(&stack, client, server, query, &domain, qtype, a, question_len);
-        crate::monitor::record_conn_close(cid, query.len() as u64, 64);
+        crate::monitor::record_conn_close(cid, query.len() as u64, 64, "Blocked");
         return;
     }
 
     if qtype == 1 {
         // A 记录: 全量统一分配 Fake-IP (0ms 秒回，避免上游 DNS 排队与 GFW 污染注入系统 DNS 缓存)
         let a = stack.engine().fake_ip_allocate(&domain).map(|ip| ip.octets());
-        if let Some(ref oct) = a {
+        let fake_ip_str = if let Some(ref oct) = a {
             tracing::debug!("[TUN-DNS] Fake-IP 分配: {} → 198.18.{}.{} (qtype=1) from {}", domain, oct[2], oct[3], client);
-        }
+            format!("198.18.{}.{}", oct[2], oct[3])
+        } else {
+            "198.18.0.2".to_string()
+        };
         let (cid, _conn_up, _conn_down, _) = crate::monitor::record_conn_start(
             "DNS",
             &format!("{domain}:53"),
-            "Fake-IP 秒回",
+            &fake_ip_str,
+            &matched_rule,
+            "Fake-IP",
         );
         send_dns_reply(&stack, client, server, query, &domain, qtype, a, question_len);
-        crate::monitor::record_conn_close(cid, query.len() as u64, 64);
+        crate::monitor::record_conn_close(cid, query.len() as u64, 64, "Resolved (Fake-IP)");
     } else {
         // 非 A 记录 (AAAA/HTTPS/TXT): 返回空应答 (NOERROR)，引导客户端立即回退 IPv4
         tracing::debug!("[TUN-DNS] 非 A 记录查询: {} (type={}) from {} → 空应答", domain, qtype, client);

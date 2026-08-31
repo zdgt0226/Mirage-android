@@ -92,13 +92,32 @@ class HomeFragment : Fragment() {
             showDnsConfigDialog()
         }
 
-        binding.tunCard.setOnClickListener {
-            com.mirage.android.util.Haptic.tap(it)
-            showTunConfigDialog()
-        }
+        setupOutboundModeToggle()
         updateTunSummary()
 
         observeState()
+    }
+
+    private fun setupOutboundModeToggle() {
+        binding.toggleOutboundMode.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (isChecked) {
+                com.mirage.android.util.Haptic.tap(binding.toggleOutboundMode)
+                val targetMode = when (checkedId) {
+                    R.id.btnModeProxy -> 1
+                    R.id.btnModeDirect -> 2
+                    else -> 0
+                }
+                if (viewModel.outboundMode.value != targetMode) {
+                    viewModel.setOutboundMode(targetMode)
+                    val modeName = when (targetMode) {
+                        1 -> "全局代理 (Global)"
+                        2 -> "直接连接 (Direct)"
+                        else -> "规则分流 (Rule)"
+                    }
+                    Toast.makeText(requireContext(), "分流模式已切换为: $modeName", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
     }
 
     private fun performConnect() {
@@ -146,14 +165,36 @@ class HomeFragment : Fragment() {
                         binding.upRate.text = stats.upRateFormatted
                         binding.downRate.text = stats.downRateFormatted
                         binding.totalFlow.text =
-                            "累计流量: ↑${stats.upTotalFormatted} / ↓${stats.downTotalFormatted}"
+                            "累计: ↑${stats.upTotalFormatted} / ↓${stats.downTotalFormatted}"
                         binding.connsInfo.text =
-                            "活跃连接: TCP ${stats.tcpConns} · UDP ${stats.udpFlows} · DNS ${stats.dnsQueries}"
+                            "连接: ${stats.tcpConns + stats.udpFlows}"
                         // 今日/本月用量 (持久化统计)
                         val today = com.mirage.android.core.TrafficStatsStore.getToday(requireContext())
                         val month = com.mirage.android.core.TrafficStatsStore.getThisMonth(requireContext())
                         binding.todayUsage.text =
-                            "今日: ↑${fmtBytes(today.first.toDouble())} / ↓${fmtBytes(today.second.toDouble())} · 本月: ↑${fmtBytes(month.first.toDouble())} / ↓${fmtBytes(month.second.toDouble())}"
+                            "今日用量: ↑${fmtBytes(today.first.toDouble())} / ↓${fmtBytes(today.second.toDouble())} · 本月: ↑${fmtBytes(month.first.toDouble())} / ↓${fmtBytes(month.second.toDouble())}"
+                    }
+                }
+                launch {
+                    viewModel.historyUp.collect { upList ->
+                        binding.homeChart.setData(upList, viewModel.historyDown.value)
+                    }
+                }
+                launch {
+                    viewModel.historyDown.collect { downList ->
+                        binding.homeChart.setData(viewModel.historyUp.value, downList)
+                    }
+                }
+                launch {
+                    viewModel.outboundMode.collect { mode ->
+                        val targetBtn = when (mode) {
+                            1 -> R.id.btnModeProxy
+                            2 -> R.id.btnModeDirect
+                            else -> R.id.btnModeRule
+                        }
+                        if (binding.toggleOutboundMode.checkedButtonId != targetBtn) {
+                            binding.toggleOutboundMode.check(targetBtn)
+                        }
                     }
                 }
                 launch {

@@ -22,10 +22,38 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     val vpnState: StateFlow<VpnState> = vpnRepo.vpnState
     val trafficStats: StateFlow<TrafficStats> = vpnRepo.trafficStats
     val latencyMs: StateFlow<Long> = vpnRepo.latencyMs
+    val outboundMode: StateFlow<Int> = vpnRepo.outboundMode
 
     val selectedNode: StateFlow<Node?> = combine(nodeRepo.nodes, nodeRepo.selectedIndex) { nodes, index ->
         if (index in nodes.indices) nodes[index] else null
     }.stateIn(viewModelScope, SharingStarted.Eagerly, nodeRepo.getSelectedNode())
+
+    private val _historyUp = kotlinx.coroutines.flow.MutableStateFlow<List<Float>>(emptyList())
+    val historyUp: StateFlow<List<Float>> = _historyUp
+
+    private val _historyDown = kotlinx.coroutines.flow.MutableStateFlow<List<Float>>(emptyList())
+    val historyDown: StateFlow<List<Float>> = _historyDown
+
+    private val maxHistoryPoints = 60
+    private val upList = ArrayDeque<Float>()
+    private val downList = ArrayDeque<Float>()
+
+    init {
+        viewModelScope.launch {
+            trafficStats.collect { s ->
+                upList.addLast(s.upRate.toFloat())
+                downList.addLast(s.downRate.toFloat())
+                while (upList.size > maxHistoryPoints) upList.removeFirst()
+                while (downList.size > maxHistoryPoints) downList.removeFirst()
+                _historyUp.value = upList.toList()
+                _historyDown.value = downList.toList()
+            }
+        }
+    }
+
+    fun setOutboundMode(mode: Int) {
+        vpnRepo.setOutboundMode(mode)
+    }
 
     fun toggleConnection(onRequirePermission: () -> Unit, onProceedConnect: () -> Unit) {
         if (vpnState.value.isRunning) {
@@ -60,5 +88,4 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun checkCurrentState() {
         vpnRepo.checkCurrentState()
     }
-
 }

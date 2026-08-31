@@ -1,6 +1,6 @@
 [package]
 name = "mirage-core"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 description = "Mirage-rs 移动端裁剪内核: Mirage 隧道协议 + TUN 引擎 (平台无关)"

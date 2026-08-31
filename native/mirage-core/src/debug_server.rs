@@ -208,6 +208,51 @@ fn handle_request(
             )
         }
 
+        ("GET", "/requests") | ("GET", "/debug/requests") => {
+            let reqs_json: serde_json::Value = serde_json::from_str(&crate::monitor::get_recent_requests_json())
+                .unwrap_or_else(|_| serde_json::json!([]));
+            (
+                "200 OK",
+                serde_json::json!({
+                    "requests": reqs_json,
+                    "count": reqs_json.as_array().map(|a| a.len()).unwrap_or(0),
+                }),
+            )
+        }
+
+        ("GET", "/mode") | ("GET", "/debug/mode") => {
+            let mode = crate::direct::get_outbound_mode();
+            (
+                "200 OK",
+                serde_json::json!({
+                    "mode": mode,
+                    "mode_name": match mode {
+                        1 => "GlobalProxy",
+                        2 => "Direct",
+                        _ => "Rule",
+                    }
+                }),
+            )
+        }
+
+        ("POST", "/mode") | ("POST", "/debug/mode") => {
+            let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+            let mode = parsed.get("mode").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+            crate::direct::set_outbound_mode(mode);
+            (
+                "200 OK",
+                serde_json::json!({
+                    "success": true,
+                    "mode": mode,
+                    "mode_name": match mode {
+                        1 => "GlobalProxy",
+                        2 => "Direct",
+                        _ => "Rule",
+                    }
+                }),
+            )
+        }
+
         ("GET", "/logs") | ("GET", "/debug/logs") => {
             let logs = crate::monitor::drain_recent_logs();
             (

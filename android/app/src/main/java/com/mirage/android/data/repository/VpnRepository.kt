@@ -37,6 +37,13 @@ class VpnRepository(private val context: Context) {
     private val _connections = MutableStateFlow<List<com.mirage.android.data.model.ConnectionInfo>>(emptyList())
     val connections: StateFlow<List<com.mirage.android.data.model.ConnectionInfo>> = _connections.asStateFlow()
 
+    private val _recentRequests = MutableStateFlow<List<com.mirage.android.data.model.RecentRequestInfo>>(emptyList())
+    val recentRequests: StateFlow<List<com.mirage.android.data.model.RecentRequestInfo>> = _recentRequests.asStateFlow()
+
+    private val routingPrefs = context.getSharedPreferences("mirage_routing_prefs", Context.MODE_PRIVATE)
+    private val _outboundMode = MutableStateFlow(routingPrefs.getInt("outbound_mode", 0))
+    val outboundMode: StateFlow<Int> = _outboundMode.asStateFlow()
+
     private val prefs = context.getSharedPreferences("mirage_vpn_prefs", Context.MODE_PRIVATE)
     private val _isBypassLanEnabled = MutableStateFlow(com.mirage.android.core.TunConfigStore.isBypassLanEnabled(context))
     val isBypassLanEnabled: StateFlow<Boolean> = _isBypassLanEnabled.asStateFlow()
@@ -214,6 +221,12 @@ class VpnRepository(private val context: Context) {
         return CoreController.setUdpMux(enabled)
     }
 
+    fun setOutboundMode(mode: Int): Boolean {
+        _outboundMode.value = mode
+        routingPrefs.edit().putInt("outbound_mode", mode).apply()
+        return CoreController.setOutboundMode(mode)
+    }
+
     private fun startTelemetry() {
         telemetryJob?.cancel()
         telemetryJob = scope.launch(Dispatchers.IO) {
@@ -249,6 +262,18 @@ class VpnRepository(private val context: Context) {
                         _connections.value = parsedList
                     } else {
                         _connections.value = emptyList()
+                    }
+
+                    val reqsJson = CoreController.getRecentRequestsJson()
+                    if (reqsJson.isNotBlank() && reqsJson != "[]") {
+                        val parsedReqs = mutableListOf<com.mirage.android.data.model.RecentRequestInfo>()
+                        runCatching {
+                            val arr = org.json.JSONArray(reqsJson)
+                            for (i in 0 until arr.length()) {
+                                parsedReqs.add(com.mirage.android.data.model.RecentRequestInfo.fromJson(arr.getJSONObject(i)))
+                            }
+                        }
+                        _recentRequests.value = parsedReqs
                     }
                 } else {
                     if (_vpnState.value !is VpnState.Disconnected && _vpnState.value !is VpnState.Connecting && _vpnState.value !is VpnState.Stopping) {
