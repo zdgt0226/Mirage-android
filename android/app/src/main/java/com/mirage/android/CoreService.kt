@@ -240,14 +240,20 @@ class CoreService : VpnService() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             runCatching {
                 val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                val isPhysical = { net: Network ->
+                    val caps = cm?.getNetworkCapabilities(net)
+                    caps != null && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                }
                 val active = cm?.activeNetwork
-                if (active != null) {
-                    val caps = cm.getNetworkCapabilities(active)
-                    if (caps != null && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) {
-                        setUnderlyingNetworks(arrayOf(active))
-                        currentPhysicalNetwork = active
-                        log("[core] 启动即时绑定底层物理网络: $active")
-                    }
+                val physical = if (active != null && isPhysical(active)) {
+                    active
+                } else {
+                    cm?.allNetworks?.firstOrNull { isPhysical(it) }
+                }
+                if (physical != null) {
+                    setUnderlyingNetworks(arrayOf(physical))
+                    currentPhysicalNetwork = physical
+                    log("[core] 启动即时绑定底层物理网络: $physical")
                 }
             }
         }

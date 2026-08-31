@@ -783,6 +783,15 @@ pub fn set_custom_rules(json: &str) -> bool {
         }
     }
 
+    // 清理已删除/已变更旧规则的命中统计，防止 HashMap 无界内存增长
+    let valid_ids: std::collections::HashSet<String> = new_rules.iter().map(|r| r.id.clone()).collect();
+    let mut hits = rule_hits().lock().unwrap_or_else(|e| e.into_inner());
+    hits.retain(|k, _| {
+        let id = k.split('|').next().unwrap_or("");
+        valid_ids.contains(id)
+    });
+    drop(hits);
+
     let mut store = router_store().write().unwrap_or_else(|e| e.into_inner());
     store.rules = new_rules;
     store.default_action = default_action;

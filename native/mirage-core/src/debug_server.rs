@@ -41,8 +41,8 @@ pub fn start_debug_server(port: u16, engine: Arc<Engine>, stack: Arc<TunStack>) 
 
             tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
-                let n = match socket.read(&mut buf).await {
-                    Ok(n) if n > 0 => n,
+                let n = match tokio::time::timeout(std::time::Duration::from_secs(5), socket.read(&mut buf)).await {
+                    Ok(Ok(n)) if n > 0 => n,
                     _ => return,
                 };
 

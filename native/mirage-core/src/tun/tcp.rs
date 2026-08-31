@@ -492,7 +492,8 @@ async fn relay_proxy(
     crate::monitor::record_conn_close(cid, up, down);
     let duration_ms = start_time.elapsed().as_millis() as u64;
     let req_total = request_count.load(std::sync::atomic::Ordering::Relaxed);
-    let is_reused = req_total >= 2;
+    // 复用或大流量长连接 (避免单请求大文件下载被误判为一次性短探测触发 zombie decay)
+    let is_reused = req_total >= 2 || down >= 512 * 1024 || (up + down) >= 1024 * 1024;
     crate::tun::adaptive_idle::record_conn_metrics(
         direct_domain.as_deref(),
         up,
