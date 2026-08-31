@@ -236,6 +236,22 @@ class CoreService : VpnService() {
         tunFd = fd
         startForegroundCompat()
 
+        // 显式绑定底层物理网络 (解决 Xiaomi HyperOS / Samsung OneUI / 5G 防火墙静默丢包与内核 eBPF 穿透)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            runCatching {
+                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                val active = cm?.activeNetwork
+                if (active != null) {
+                    val caps = cm.getNetworkCapabilities(active)
+                    if (caps != null && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) {
+                        setUnderlyingNetworks(arrayOf(active))
+                        currentPhysicalNetwork = active
+                        log("[core] 启动即时绑定底层物理网络: $active")
+                    }
+                }
+            }
+        }
+
         // 注入规则、Geo 文件与 DNS 配置 (修复 M5: 自主完成全量注入，杜绝冷启动 AIDL 竞态)
         runCatching { GeoManager.loadGeoFilesToNative(this) }
         runCatching { MirageNative.setRules(RuleStore.toJson(this)) }
@@ -314,6 +330,14 @@ class CoreService : VpnService() {
                         runCatching { MirageNative.flushPool() }
                     }
                     currentPhysicalNetwork = network
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        runCatching { setUnderlyingNetworks(arrayOf(network)) }
+                    }
+                }
+                override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                    if (networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) || !networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) {
+                        return
+                    }
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                         runCatching { setUnderlyingNetworks(arrayOf(network)) }
                     }

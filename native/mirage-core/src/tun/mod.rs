@@ -366,18 +366,31 @@ impl TunStack {
         self.cfg.dns_addr.into()
     }
 
-    /// 直接把一个 IP 包写回 TUN fd (UDP 回程/DNS 应答用)。无锁内核直写。
+    /// 直接把一个 IP 包写回 TUN fd (UDP 回程/DNS 应答用)。无锁内核直写 (带 EAGAIN 重试)。
     pub fn write_raw(&self, pkt: &[u8]) {
         let fd = self.fd.load(Ordering::SeqCst);
         if fd < 0 || self.stopped.load(Ordering::SeqCst) {
             return;
         }
-        unsafe {
-            libc::write(fd, pkt.as_ptr() as *const libc::c_void, pkt.len());
+        let mut retries = 0;
+        loop {
+            let written = unsafe {
+                libc::write(fd, pkt.as_ptr() as *const libc::c_void, pkt.len())
+            };
+            if written >= 0 {
+                break;
+            }
+            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            if errno == libc::EAGAIN && retries < 3 {
+                retries += 1;
+                std::thread::yield_now();
+                continue;
+            }
+            break;
         }
     }
 
-    /// 把 smoltcp 产出的出站包全部写回 TUN fd。**锁外无锁内核直写**。
+    /// 把 smoltcp 产出的出站包全部写回 TUN fd。**锁外无锁内核直写 (带 EAGAIN 重试)**。
     fn drain_tx(&self) {
         let fd = self.fd.load(Ordering::SeqCst);
         if fd < 0 || self.stopped.load(Ordering::SeqCst) {
@@ -394,8 +407,21 @@ impl TunStack {
             return;
         }
         for p in &out {
-            unsafe {
-                libc::write(fd, p.as_ptr() as *const libc::c_void, p.len());
+            let mut retries = 0;
+            loop {
+                let written = unsafe {
+                    libc::write(fd, p.as_ptr() as *const libc::c_void, p.len())
+                };
+                if written >= 0 {
+                    break;
+                }
+                let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                if errno == libc::EAGAIN && retries < 3 {
+                    retries += 1;
+                    std::thread::yield_now();
+                    continue;
+                }
+                break;
             }
         }
     }

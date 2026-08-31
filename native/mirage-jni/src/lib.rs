@@ -24,6 +24,9 @@ use mirage_core::engine::{Engine, NodeInfo};
 use mirage_core::tun::{TunConfig, TunStack};
 use mirage_core::node_uri::NodeUri;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 // ── 全局运行时状态 ──────────────────────────────────────────────────────────
 
 static STARTED: AtomicBool = AtomicBool::new(false);
