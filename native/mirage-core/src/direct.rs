@@ -613,9 +613,119 @@ fn parse_ports(s: &str) -> (Vec<u16>, Vec<(u16, u16)>) {
     (singles, ranges)
 }
 
-/// 设置自定义规则 (兼容传统单条件规则 + 全新多条件复合规则 JSON)
+/// 安全清洗并注入系统保护规则 (对齐 meow strip_and_inject 设计)
+///
+/// 1. 过滤掉语法无效、空条件、非法的脏规则
+/// 2. 注入顶级优先保护规则:
+///    - LAN 私有网段 (RFC 1918 / 路由器后台域名) 强制直连保护
+/// 3. 注入 Fake-IP 虚拟网段代理保护 (198.18.0.0/15 -> Proxy)
+/// 4. 兜底注入统一默认动作
+pub fn strip_and_inject_rules(raw_rules_json: &str) -> String {
+    let parsed: serde_json::Value = match serde_json::from_str(raw_rules_json) {
+        Ok(v) => v,
+        Err(_) => serde_json::json!({
+            "rules": [],
+            "default_action": "proxy"
+        }),
+    };
+
+    let default_action = parsed.get("default_action")
+        .and_then(|x| x.as_str())
+        .unwrap_or("proxy");
+
+    let mut clean_rules: Vec<serde_json::Value> = Vec::new();
+
+    // ── 注入 1: 强制系统最高优先级保护规则 (LAN 私有网段与路由器直连) ──
+    clean_rules.push(serde_json::json!({
+        "id": "sys_lan_private_direct",
+        "name": "局域网与路由器私有地址直连 (系统保护)",
+        "enabled": true,
+        "action": "direct",
+        "logic": "OR",
+        "conditions": [
+            { "type": "geoip", "pattern": "PRIVATE" },
+            { "type": "geosite", "pattern": "PRIVATE" }
+        ]
+    }));
+
+    // ── 注入 2: 过滤与清洗用户规则 ──
+    if let Some(arr) = parsed.get("rules").and_then(|a| a.as_array()) {
+        for (idx, item) in arr.iter().enumerate() {
+            let id = item.get("id").and_then(|x| x.as_str()).unwrap_or("");
+            if id.starts_with("sys_") {
+                continue; // 避免重复注入
+            }
+            let enabled = item.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+            let action = item.get("action").and_then(|x| x.as_str()).unwrap_or("proxy");
+            let logic = item.get("logic").and_then(|x| x.as_str()).unwrap_or("OR");
+            let name = item.get("name").and_then(|x| x.as_str()).unwrap_or("自定义规则");
+
+            let mut valid_conditions = Vec::new();
+
+            if let Some(cond_arr) = item.get("conditions").and_then(|c| c.as_array()) {
+                for cond in cond_arr {
+                    let ctype = cond.get("type").and_then(|x| x.as_str()).unwrap_or("").trim();
+                    let cpat = cond.get("pattern").and_then(|x| x.as_str()).unwrap_or("").trim();
+                    if !ctype.is_empty() && !cpat.is_empty() {
+                        if parse_condition_kind(ctype, cpat).is_some() {
+                            valid_conditions.push(serde_json::json!({
+                                "type": ctype,
+                                "pattern": cpat
+                            }));
+                        }
+                    }
+                }
+            } else if let (Some(kind), Some(pattern)) = (
+                item.get("kind").or_else(|| item.get("type")).and_then(|x| x.as_str()),
+                item.get("pattern").and_then(|x| x.as_str())
+            ) {
+                if !kind.trim().is_empty() && !pattern.trim().is_empty() {
+                    if parse_condition_kind(kind, pattern).is_some() {
+                        valid_conditions.push(serde_json::json!({
+                            "type": kind.trim(),
+                            "pattern": pattern.trim()
+                        }));
+                    }
+                }
+            }
+
+            if !valid_conditions.is_empty() {
+                clean_rules.push(serde_json::json!({
+                    "id": if id.is_empty() { format!("user_rule_{idx}") } else { id.to_string() },
+                    "name": name,
+                    "enabled": enabled,
+                    "action": action,
+                    "logic": logic,
+                    "conditions": valid_conditions
+                }));
+            }
+        }
+    }
+
+    // ── 注入 3: 注入 Fake-IP 虚拟网段代理保护 ──
+    clean_rules.push(serde_json::json!({
+        "id": "sys_fake_ip_guard",
+        "name": "Fake-IP 虚拟网段代理保护 (系统保护)",
+        "enabled": true,
+        "action": "proxy",
+        "logic": "OR",
+        "conditions": [
+            { "type": "cidr", "pattern": "198.18.0.0/15" }
+        ]
+    }));
+
+    let result = serde_json::json!({
+        "rules": clean_rules,
+        "default_action": default_action
+    });
+
+    serde_json::to_string(&result).unwrap_or_else(|_| raw_rules_json.to_string())
+}
+
+/// 设置自定义规则 (经过 strip_and_inject 安全清洗与注入)
 pub fn set_custom_rules(json: &str) -> bool {
-    let parsed: Result<serde_json::Value, _> = serde_json::from_str(json);
+    let sanitized = strip_and_inject_rules(json);
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(&sanitized);
     let Ok(v) = parsed else { return false };
     let mut new_rules = Vec::new();
 

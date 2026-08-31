@@ -843,5 +843,40 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_isUdpMux(
     }
 }
 
+/// `String getLogs()` — 导出并排空待处理的内核日志 (流式消费，防止 Binder 事务溢出)。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_getLogs(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let joined = mirage_core::monitor::drain_recent_logs().join("\n");
+    env.new_string(joined)
+        .unwrap_or_else(|_| JString::from(JObject::null()))
+        .into_raw()
+}
+
+/// `boolean closeConnection(long id)` — 定向切断指定 ID 的活跃连接。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_closeConnection(
+    _env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+) -> jboolean {
+    if id > 0 && mirage_core::monitor::close_connection(id as u64) {
+        1
+    } else {
+        0
+    }
+}
+
+/// `int closeAllConnections()` — 批量切断并重置所有活跃连接。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_closeAllConnections(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    mirage_core::monitor::close_all_connections() as jint
+}
+
 
 

@@ -119,6 +119,15 @@ object MirageNative {
     /** 获取包含详细条目数量的 GeoSite 和 GeoIP 列表 (JSON)。 */
     external fun getGeoTagsDetail(): String
 
+    /** 导出并排空待处理的内核日志 (流式消费，防止 Binder 事务溢出)。 */
+    external fun getLogs(): String
+
+    /** 定向切断指定 ID 的活跃连接。 */
+    external fun closeConnection(id: Long): Boolean
+
+    /** 批量切断并重置所有活跃连接。 */
+    external fun closeAllConnections(): Int
+
     /**
      * Rust 侧同步调用 (隧道 socket connect 前): 把 fd 交给当前活跃的 VpnService protect。
      * 必须同步返回 (protect 设置 SO_MARK 影响路由, 晚了会导致隧道流量进 TUN 环路)。

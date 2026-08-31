@@ -171,7 +171,7 @@ async fn udp_flow_relay(
 
     if action == crate::direct::RuleAction::Block {
         let target_str = reverse_domain.as_deref().map(|d| d.to_string()).unwrap_or_else(|| format!("{}:{}", key.dst, key.dst_port));
-        let (cid, _, _) = crate::monitor::record_conn_start("UDP", &target_str, "规则拦截 (Block)");
+        let (cid, _, _, _) = crate::monitor::record_conn_start("UDP", &target_str, "规则拦截 (Block)");
         crate::monitor::record_conn_close(cid, 0, 0);
         return;
     }
@@ -199,7 +199,7 @@ async fn udp_flow_relay(
     } else {
         format!("{}:{}", key.dst, key.dst_port)
     };
-    let (cid, conn_up, conn_down) = crate::monitor::record_conn_start("UDP", &target_display, "隧道代理");
+    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("UDP", &target_display, "隧道代理");
 
     // ── UDP Mux 路径: 多流复用 K 条长命共享隧道 (脱钩 pool_size 限制) ──
     if crate::proxy::udp_mux::udp_mux_enabled() {
@@ -832,7 +832,7 @@ async fn udp_flow_direct(
     let client = SocketAddr::new(key.src, key.src_port);
     debug!("[TUN-UDP/direct] 新流 {} → {}", fmt_flow(&key), dst);
 
-    let (cid, conn_up, conn_down) = crate::monitor::record_conn_start("UDP", &target_display, "直连");
+    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("UDP", &target_display, "直连");
     let sock_rc = std::sync::Arc::new(sock);
 
     // 下行: 客户端 → 目标

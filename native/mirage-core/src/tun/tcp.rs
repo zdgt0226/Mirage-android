@@ -305,7 +305,7 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
 
     if action == crate::direct::RuleAction::Block {
         let target_name = direct_domain.as_deref().map(|d| d.to_string()).unwrap_or_else(|| dst.0.to_string());
-        let (cid, _, _) = crate::monitor::record_conn_start("TCP", &format!("{}:{}", target_name, dst.1), "规则拦截 (Block)");
+        let (cid, _, _, _) = crate::monitor::record_conn_start("TCP", &format!("{}:{}", target_name, dst.1), "规则拦截 (Block)");
         crate::monitor::record_conn_close(cid, 0, 0);
         stream.close();
         debug!("[TUN-TCP] 规则拦截: 阻断连接 → {}:{}", target_name, dst.1);
@@ -341,7 +341,7 @@ async fn relay_proxy(
     } else {
         format!("{}:{}", dst.0, dst.1)
     };
-    let (cid, conn_up, conn_down) = crate::monitor::record_conn_start("TCP", &target_name, "隧道代理");
+    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("TCP", &target_name, "隧道代理");
 
     // 拆成读写半程: upload (app→tunnel) / download (tunnel→app)
     let (mut tun_reader, mut tun_writer) = (tunnel.reader, tunnel.writer);
@@ -462,6 +462,10 @@ async fn relay_proxy(
     let close_reason;
 
     tokio::select! {
+        _ = conn_abort.notified() => {
+            tracing::info!("[TUN-TCP] 连接 #{} 被主动切断 (DELETE /connections/{})", cid, cid);
+            close_reason = crate::tun::adaptive_idle::CloseReason::ClientClosed;
+        }
         (u, u_timeout) = &mut upload => {
             up = u;
             if u_timeout {
@@ -560,7 +564,7 @@ async fn relay_direct(
         format!("{}:{}", target_ip, dst.1)
     };
 
-    let (cid, conn_up, conn_down) = crate::monitor::record_conn_start("TCP", &target_display, "直连");
+    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("TCP", &target_display, "直连");
     TCP_ACTIVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _guard = TcpActiveGuard;
     use std::os::unix::io::AsRawFd;
@@ -705,6 +709,10 @@ async fn relay_direct(
     let close_reason;
 
     tokio::select! {
+        _ = conn_abort.notified() => {
+            tracing::info!("[TUN-TCP/direct] 直连 #{} 被主动切断", cid);
+            close_reason = crate::tun::adaptive_idle::CloseReason::ClientClosed;
+        }
         (u, u_timeout) = &mut to_tunnel => {
             up = u;
             if u_timeout {

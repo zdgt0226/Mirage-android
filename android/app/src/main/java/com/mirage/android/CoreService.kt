@@ -766,6 +766,12 @@ class CoreService : VpnService() {
             runCatching { java.io.File(this@CoreService.filesDir, "core.log").delete() }
             return runCatching { MirageNative.clearNativeLogs() }.getOrDefault(false)
         }
+        override fun getLogs(): String =
+            runCatching { MirageNative.getLogs() }.getOrDefault("")
+        override fun closeConnection(id: Long): Boolean =
+            runCatching { MirageNative.closeConnection(id) }.getOrDefault(false)
+        override fun closeAllConnections(): Int =
+            runCatching { MirageNative.closeAllConnections() }.getOrDefault(0)
         override fun registerCallback(cb: ICoreCallback?) = registerCallbackInternal(cb)
         override fun unregisterCallback(cb: ICoreCallback?) = unregisterCallbackInternal(cb)
     }

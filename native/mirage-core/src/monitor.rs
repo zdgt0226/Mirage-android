@@ -132,6 +132,11 @@ impl MemoryWriter {
         q.iter().cloned().collect()
     }
 
+    pub fn drain_logs(&self) -> Vec<String> {
+        let mut q = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        q.drain(..).collect()
+    }
+
     pub fn clear(&self) {
         let mut q = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
         q.clear();
@@ -167,6 +172,11 @@ pub fn global_logger() -> &'static MemoryWriter {
 /// 最近 N 条日志 (App 日志面板用)。
 pub fn recent_logs() -> Vec<String> {
     global_logger().get_logs()
+}
+
+/// 导出并清空待处理日志 (流式消费语义，规避 Binder 事务溢出)。
+pub fn drain_recent_logs() -> Vec<String> {
+    global_logger().drain_logs()
 }
 
 /// 清空全局内存日志。
@@ -244,14 +254,15 @@ pub struct LiveConnection {
     pub up_bytes: Arc<AtomicU64>,
     pub down_bytes: Arc<AtomicU64>,
     pub start_time: u64,
+    pub abort: Arc<tokio::sync::Notify>,
 }
 
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 static ACTIVE_CONNECTIONS: Mutex<Option<std::collections::HashMap<u64, LiveConnection>>> = Mutex::new(None);
 
-/// 注册新连接，返回 (id, up_atomic, down_atomic)。
-/// 读写协程可直接原子累加，无需争抢全局大锁，实现实时无锁流量统计。
-pub fn record_conn_start(protocol: &str, target: &str, outbound: &str) -> (u64, Arc<AtomicU64>, Arc<AtomicU64>) {
+/// 注册新连接，返回 (id, up_atomic, down_atomic, abort_notify)。
+/// 读写协程可直接原子累加，无需争抢全局大锁，实现实时无锁流量统计与定向中断。
+pub fn record_conn_start(protocol: &str, target: &str, outbound: &str) -> (u64, Arc<AtomicU64>, Arc<AtomicU64>, Arc<tokio::sync::Notify>) {
     let id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
     let start_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -260,6 +271,7 @@ pub fn record_conn_start(protocol: &str, target: &str, outbound: &str) -> (u64, 
 
     let up_bytes = Arc::new(AtomicU64::new(0));
     let down_bytes = Arc::new(AtomicU64::new(0));
+    let abort = Arc::new(tokio::sync::Notify::new());
 
     let record = LiveConnection {
         id,
@@ -269,12 +281,39 @@ pub fn record_conn_start(protocol: &str, target: &str, outbound: &str) -> (u64, 
         up_bytes: up_bytes.clone(),
         down_bytes: down_bytes.clone(),
         start_time,
+        abort: abort.clone(),
     };
 
     let mut lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
     let map = lock.get_or_insert_with(|| std::collections::HashMap::with_capacity(128));
     map.insert(id, record);
-    (id, up_bytes, down_bytes)
+    (id, up_bytes, down_bytes, abort)
+}
+
+/// 定向中断并关闭指定 ID 的活跃连接 (对齐 DELETE /connections/{id})
+pub fn close_connection(id: u64) -> bool {
+    let lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(map) = lock.as_ref() {
+        if let Some(c) = map.get(&id) {
+            c.abort.notify_waiters();
+            return true;
+        }
+    }
+    false
+}
+
+/// 批量中断并重置所有活跃连接 (对齐 DELETE /connections)
+pub fn close_all_connections() -> usize {
+    let lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(map) = lock.as_ref() {
+        let count = map.len();
+        for c in map.values() {
+            c.abort.notify_waiters();
+        }
+        count
+    } else {
+        0
+    }
 }
 
 /// 关闭连接：从活跃连接列表中彻底移除，符合真正的“活跃连接”语义。

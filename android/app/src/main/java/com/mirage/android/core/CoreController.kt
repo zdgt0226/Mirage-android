@@ -133,6 +133,12 @@ object CoreController {
         call { it.diagnosticSnapshotJson } ?: "{}"
     fun clearNativeLogs(): Boolean =
         call { it.clearNativeLogs() } ?: true
+    fun getLogs(): String =
+        call { it.logs } ?: ""
+    fun closeConnection(id: Long): Boolean =
+        call { it.closeConnection(id) } ?: false
+    fun closeAllConnections(): Int =
+        call { it.closeAllConnections() } ?: 0
 
     fun registerCallback(cb: ICoreCallback) {
         callbacks.add(cb)

@@ -45,6 +45,9 @@ interface ICoreService {
     String getGeoTagsDetail();
     String getDiagnosticSnapshotJson();
     boolean clearNativeLogs();
+    String getLogs();
+    boolean closeConnection(long id);
+    int closeAllConnections();
     void registerCallback(ICoreCallback cb);
     void unregisterCallback(ICoreCallback cb);
 }

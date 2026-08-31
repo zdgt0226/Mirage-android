@@ -367,7 +367,7 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, serv
     let decision = direct::route_decision(Some(&domain), None, Some(53), Some("udp"));
 
     if decision == direct::RuleAction::Block {
-        let (cid, _conn_up, _conn_down) = crate::monitor::record_conn_start(
+        let (cid, _conn_up, _conn_down, _) = crate::monitor::record_conn_start(
             "DNS",
             &format!("{domain}:53"),
             "规则拦截 (Block)",
@@ -385,7 +385,7 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, serv
         if let Some(ref oct) = a {
             tracing::debug!("[TUN-DNS] Fake-IP 分配: {} → 198.18.{}.{} (qtype=1) from {}", domain, oct[2], oct[3], client);
         }
-        let (cid, _conn_up, _conn_down) = crate::monitor::record_conn_start(
+        let (cid, _conn_up, _conn_down, _) = crate::monitor::record_conn_start(
             "DNS",
             &format!("{domain}:53"),
             "Fake-IP 秒回",

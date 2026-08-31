@@ -208,6 +208,83 @@ fn handle_request(
             )
         }
 
+        ("GET", "/logs") | ("GET", "/debug/logs") => {
+            let logs = crate::monitor::drain_recent_logs();
+            (
+                "200 OK",
+                serde_json::json!({
+                    "logs": logs,
+                    "count": logs.len()
+                }),
+            )
+        }
+
+        ("GET", "/traffic") | ("GET", "/debug/traffic") => {
+            let (up_total, down_total, up_rate, down_rate) = crate::monitor::sample();
+            let tcp = crate::tun::tcp::TCP_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
+            let udp = crate::tun::udp::flow_count_global();
+            let dns = crate::tun::dns::DNS_QUERIES.load(std::sync::atomic::Ordering::Relaxed);
+
+            (
+                "200 OK",
+                serde_json::json!({
+                    "up_total_bytes": up_total,
+                    "down_total_bytes": down_total,
+                    "up_rate_bps": up_rate,
+                    "down_rate_bps": down_rate,
+                    "active_tcp": tcp,
+                    "active_udp": udp,
+                    "total_dns_queries": dns,
+                }),
+            )
+        }
+
+        ("POST", "/rules") | ("POST", "/debug/rules") => {
+            let ok = crate::direct::set_custom_rules(body);
+            if ok {
+                (
+                    "200 OK",
+                    serde_json::json!({"success": true, "message": "规则已安全清洗并热更新生效"}),
+                )
+            } else {
+                (
+                    "400 Bad Request",
+                    serde_json::json!({"success": false, "error": "规则 JSON 解析失败"}),
+                )
+            }
+        }
+
+        ("DELETE", p) if p == "/connections" || p == "/debug/connections" => {
+            let closed = crate::monitor::close_all_connections();
+            (
+                "200 OK",
+                serde_json::json!({"success": true, "closed_connections_count": closed}),
+            )
+        }
+
+        ("DELETE", p) if p.starts_with("/connections/") || p.starts_with("/debug/connections/") => {
+            let id_str = p.rsplit('/').next().unwrap_or("");
+            if let Ok(id) = id_str.parse::<u64>() {
+                let found = crate::monitor::close_connection(id);
+                if found {
+                    (
+                        "200 OK",
+                        serde_json::json!({"success": true, "closed_conn_id": id}),
+                    )
+                } else {
+                    (
+                        "404 Not Found",
+                        serde_json::json!({"success": false, "error": "connection not found or already closed"}),
+                    )
+                }
+            } else {
+                (
+                    "400 Bad Request",
+                    serde_json::json!({"success": false, "error": "invalid connection id"}),
+                )
+            }
+        }
+
         ("POST", "/debug/control") => {
             let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
             let action = parsed.get("action").and_then(|v| v.as_str()).unwrap_or("");
@@ -241,11 +318,26 @@ fn handle_request(
                         serde_json::json!({"success": true, "block_quic": false}),
                     )
                 }
+                "close_conn" => {
+                    let id = parsed.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let found = crate::monitor::close_connection(id);
+                    (
+                        "200 OK",
+                        serde_json::json!({"success": found, "closed_conn_id": id}),
+                    )
+                }
+                "close_all_conns" => {
+                    let closed = crate::monitor::close_all_connections();
+                    (
+                        "200 OK",
+                        serde_json::json!({"success": true, "closed_connections_count": closed}),
+                    )
+                }
                 _ => (
                     "400 Bad Request",
                     serde_json::json!({
                         "error": "unknown action",
-                        "supported": ["clear_dns", "flush_pool", "block_quic_on", "block_quic_off"]
+                        "supported": ["clear_dns", "flush_pool", "block_quic_on", "block_quic_off", "close_conn", "close_all_conns"]
                     }),
                 ),
             }
