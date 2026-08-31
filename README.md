@@ -157,8 +157,6 @@ Mirage-android/
 - **`strip_and_inject` 配置安全清洗**：在载入用户/订阅规则前执行自动化清洗，剔除无效格式与自环端口，强制注入局域网私有网段直连与 Fake-IP 系统级保护；
 - **流式日志/流量消费与连接重置**：提供轻量流式接口规避 Android Binder 1MB 事务上限（`TransactionTooLargeException`），并支持细粒度定向斩断僵尸连接。
 
-同时特别感谢 [Mirage-rs](https://github.com/zdgt0226/Mirage-rs) 协议的设计与实现。
-
 ---
 
 ## 📄 开源许可证
