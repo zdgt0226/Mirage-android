@@ -35,7 +35,7 @@ class NodeRepository(private val context: Context) {
     private val _isTestingAll = MutableStateFlow(false)
     val isTestingAll: StateFlow<Boolean> = _isTestingAll.asStateFlow()
 
-    private val _poolSize = MutableStateFlow(8)
+    private val _poolSize = MutableStateFlow(16)
     val poolSize: StateFlow<Int> = _poolSize.asStateFlow()
 
     private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())

@@ -114,6 +114,8 @@ class MainActivity : AppCompatActivity() {
 
         if (intent?.getBooleanExtra("auto_connect", false) == true) {
             requestVpnPermissionAndConnect()
+        } else if (intent?.getBooleanExtra("auto_disconnect", false) == true) {
+            homeViewModel.disconnect()
         }
     }
 
@@ -139,6 +141,8 @@ class MainActivity : AppCompatActivity() {
         handleIncomingUri(intent)
         if (intent.getBooleanExtra("auto_connect", false)) {
             requestVpnPermissionAndConnect()
+        } else if (intent.getBooleanExtra("auto_disconnect", false)) {
+            homeViewModel.disconnect()
         }
     }
 

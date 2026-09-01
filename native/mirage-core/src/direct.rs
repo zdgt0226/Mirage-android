@@ -423,6 +423,25 @@ pub fn is_cn_ip(ip: IpAddr) -> bool {
         if found.is_ok() {
             return true;
         }
+    } else if let IpAddr::V6(v6) = ip {
+        let segs = v6.segments();
+        let top = segs[0];
+        // 中国大陆主要 IPv6 运营商/教育/科研地址块:
+        // - 2408::/16 (中国联通)
+        // - 2409::/16 (中国移动)
+        // - 240a::/16 (CERNET 教育网)
+        // - 240b::/16 (CSTNET 科技网)
+        // - 240c::/16, 240d::/16, 240e::/16 (中国电信)
+        // - 240f::/16 (中国铁通)
+        // - 2400::/12 (亚太/中国联合分配块)
+        // - 2001:da8::/32 (CERNET2)
+        // - 2001:250::/32 (CNGrid 科技网)
+        if (top >= 0x2408 && top <= 0x240f)
+            || (top >= 0x2400 && top <= 0x2403)
+            || (top == 0x2001 && (segs[1] == 0xda8 || segs[1] == 0x250))
+        {
+            return true;
+        }
     }
     false
 }
@@ -432,8 +451,10 @@ pub fn is_known_non_cn_domain(domain: &str) -> bool {
     let d = domain.trim_end_matches('.').to_ascii_lowercase();
     const NON_CN_ROOTS: &[&str] = &[
         "google.com", "googleapis.com", "googlevideo.com", "gstatic.com", "ggpht.com",
+        "gvt1.com", "gvt2.com", "1e100.net", "googleusercontent.com",
+        "googleadservices.com", "googlesyndication.com", "google-analytics.com", "doubleclick.net",
         "youtube.com", "youtu.be", "ytimg.com", "yt.be",
-        "android.com", "g.co", "goo.gl", "googleusercontent.com",
+        "android.com", "g.co", "goo.gl",
         "telegram.org", "t.me", "telesco.pe", "tdesktop.com",
         "twitter.com", "x.com", "twimg.com", "t.co",
         "facebook.com", "fbcdn.net", "instagram.com", "cdninstagram.com", "whatsapp.com", "threads.net",
