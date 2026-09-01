@@ -555,8 +555,11 @@ async fn relay_direct(
         dst.0
     };
 
-    // 严密安全防护: 若 Fake-IP 域名解析出非国内 IP (如境外域名被规则误判或 DNS 污染)，自动回退隧道代理 (私有 IP 豁免)
-    if is_fake && !crate::direct::is_cn_ip(target_ip) && !crate::direct::is_direct_ip(target_ip) && !crate::direct::is_private_ip(target_ip) {
+    // 严密安全防护: 若 Fake-IP 域名解析出非国内 IP (如境外域名被规则误判或 DNS 污染)，且非严格国内域名，自动回退隧道代理 (私有 IP 豁免)
+    let is_strict_cn = direct_domain.as_deref().map(crate::direct::is_cn_domain_strict).unwrap_or(false);
+    if is_strict_cn {
+        crate::direct::mark_direct_ip(target_ip);
+    } else if is_fake && !crate::direct::is_cn_ip(target_ip) && !crate::direct::is_direct_ip(target_ip) && !crate::direct::is_private_ip(target_ip) {
         debug!("[TUN-TCP/direct] 域名 [{:?}] 解析为非国内 IP ({})，自动回退走隧道代理", direct_domain, target_ip);
         return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule).await;
     }
@@ -568,8 +571,6 @@ async fn relay_direct(
     };
 
     let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("TCP", &target_display, &target_ip.to_string(), &matched_rule, "DIRECT");
-    TCP_ACTIVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let _guard = TcpActiveGuard;
     use std::os::unix::io::AsRawFd;
     let addr = std::net::SocketAddr::new(target_ip, dst.1);
     let sock = match addr {

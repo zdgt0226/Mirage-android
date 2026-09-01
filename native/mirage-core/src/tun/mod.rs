@@ -437,10 +437,13 @@ impl TunStack {
                 let age = g.created_at.get(h).copied().unwrap_or(now);
                 match s {
                     smoltcp::socket::Socket::Tcp(t) => {
-                        // 仅回收超时未收到 SYN/ACK 的空闲 catcher (无 4 元组)
-                        t.state() == stcp::State::Listen
+                        // 1. 回收超时未收到 SYN/ACK 的空闲 catcher (无 4 元组)
+                        (t.state() == stcp::State::Listen
                             && t.remote_endpoint().is_none()
-                            && now.duration_since(age) >= CATCHER_TTL
+                            && now.duration_since(age) >= CATCHER_TTL)
+                        // 2. 深度回收残留的 Closed / TimeWait 僵尸 socket (防止 socket 集合无限膨胀拖慢轮询)
+                        || (t.state() == stcp::State::Closed || t.state() == stcp::State::TimeWait)
+                            && now.duration_since(age) >= std::time::Duration::from_secs(5)
                     }
                     _ => false,
                 }
@@ -448,7 +451,7 @@ impl TunStack {
             .map(|(h, _)| h)
             .collect();
         if !stale.is_empty() {
-            debug!("[TUN] 回收 {} 个过期 catcher socket", stale.len());
+            debug!("[TUN] 回收 {} 个过期 / 僵尸 smoltcp socket", stale.len());
         }
         for h in stale {
             g.created_at.remove(&h);

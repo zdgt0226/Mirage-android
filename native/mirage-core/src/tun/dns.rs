@@ -169,23 +169,70 @@ fn parse_a_answer(buf: &[u8], qname_len: usize) -> Option<[u8; 4]> {
     None
 }
 
-/// 异步向上游查询真实 IP (采用双上游并发竞速解析与极速兜底)。
+use tokio::sync::watch;
+
+type FlightMap = StdMutex<HashMap<String, watch::Receiver<Option<std::net::Ipv4Addr>>>>;
+fn flight_map() -> &'static FlightMap {
+    static F: OnceLock<FlightMap> = OnceLock::new();
+    F.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+/// 异步向上游查询真实 IP (带 Single-Flight 防击穿并发聚合、双上游竞速与内存高速缓存)。
 pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
+    let domain_clean = domain.trim_end_matches('.').to_ascii_lowercase();
+    // 1. 优先查高速缓存
     {
         let map = direct_cache().lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((ip, at)) = map.get(domain) {
+        if let Some((ip, at)) = map.get(&domain_clean) {
             if at.elapsed() < CACHE_TTL {
-                tracing::info!("[TUN-DNS] 命中直连 DNS 缓存: {} → {}", domain, ip);
+                tracing::debug!("[TUN-DNS] 命中直连 DNS 缓存: {} → {}", domain_clean, ip);
                 return Some(*ip);
             }
         }
     }
-    // 防 FD 耗尽: 限制同时进行的上游 DNS UDP Socket 并发总数不超过 32 个 (适度放宽以容纳冷启动并发潮)
-    static DNS_UPSTREAM_SEM: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(32);
-    let _permit = match tokio::time::timeout(Duration::from_millis(600), DNS_UPSTREAM_SEM.acquire()).await {
+
+    // 2. Single-Flight 并发防击穿: 若同一域名已有解析任务在进行，挂载监听其结果，避免重复发包
+    let (mut rx, is_initiator, tx) = {
+        let mut flights = flight_map().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing_rx) = flights.get(&domain_clean) {
+            (existing_rx.clone(), false, None)
+        } else {
+            let (tx, rx) = watch::channel(None);
+            flights.insert(domain_clean.clone(), rx.clone());
+            (rx, true, Some(tx))
+        }
+    };
+
+    if !is_initiator {
+        // 等待发起者解析完成
+        if rx.borrow().is_none() {
+            let _ = tokio::time::timeout(Duration::from_millis(1500), rx.changed()).await;
+        }
+        return *rx.borrow();
+    }
+
+    // 发起者执行实际上游查询
+    let result = resolve_upstream_internal(&domain_clean).await;
+
+    // 广播结果并清理 FlightMap
+    if let Some(tx) = tx {
+        let _ = tx.send(result);
+    }
+    {
+        let mut flights = flight_map().lock().unwrap_or_else(|e| e.into_inner());
+        flights.remove(&domain_clean);
+    }
+
+    result
+}
+
+async fn resolve_upstream_internal(domain: &str) -> Option<std::net::Ipv4Addr> {
+    // 限制同时进行的上游 DNS UDP Socket 并发总数不超过 128 个 (适度放宽以容纳冷启动并发潮)
+    static DNS_UPSTREAM_SEM: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(128);
+    let _permit = match tokio::time::timeout(Duration::from_millis(1500), DNS_UPSTREAM_SEM.acquire()).await {
         Ok(Ok(p)) => p,
         _ => {
-            tracing::warn!("[TUN-DNS] 上游直连解析并发达到上限 (32 并发)，触发快速降级");
+            tracing::warn!("[TUN-DNS] 上游直连解析并发达到上限 (128 并发)，触发快速降级");
             return None;
         }
     };
@@ -217,7 +264,7 @@ pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
 
     let mut buf = [0u8; 1024];
     let start_time = std::time::Instant::now();
-    match tokio::time::timeout(Duration::from_millis(1000), sock.recv_from(&mut buf)).await {
+    match tokio::time::timeout(Duration::from_millis(1200), sock.recv_from(&mut buf)).await {
         Ok(Ok((v, from))) => {
             // S2 安全加固: 严格校验回包来源与随机化 ID，杜绝局域网恶意注入欺骗
             if (from == up1 || from == up2) && v >= 2 && u16::from_be_bytes([buf[0], buf[1]]) == id {
@@ -227,7 +274,7 @@ pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
                         let direct_v4 = std::net::Ipv4Addr::from(ip);
                         insert_direct_cache(domain.to_string(), direct_v4);
                         crate::direct::mark_direct_ip(std::net::IpAddr::V4(direct_v4));
-                        tracing::info!(
+                        tracing::debug!(
                             "[TUN-DNS] 上游直连解析成功: {} → {} (耗时: {}ms, 上游: {})",
                             domain, direct_v4, start_time.elapsed().as_millis(), from
                         );
@@ -244,7 +291,7 @@ pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
                             let direct_v4 = std::net::Ipv4Addr::from(ip);
                             insert_direct_cache(domain.to_string(), direct_v4);
                             crate::direct::mark_direct_ip(std::net::IpAddr::V4(direct_v4));
-                            tracing::info!(
+                            tracing::debug!(
                                 "[TUN-DNS] 上游直连解析成功 (备选包): {} → {} (耗时: {}ms, 上游: {})",
                                 domain, direct_v4, start_time.elapsed().as_millis(), from2
                             );
@@ -399,6 +446,15 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, serv
         );
         send_dns_reply(&stack, client, server, query, &domain, qtype, a, question_len);
         crate::monitor::record_conn_close(cid, query.len() as u64, 64, "Resolved (Fake-IP)");
+
+        // 异步预解析: 若判定为国内直连域名，立即在后台异步拉取真实 IP 存入缓存
+        // 使得后续 2~5ms 到达的 TCP SYN 在 relay_direct 时 100% 命中内存缓存，消除首包延迟与排队
+        if decision == direct::RuleAction::Direct || direct::should_direct(Some(&domain), None) {
+            let d = domain.clone();
+            tokio::spawn(async move {
+                let _ = resolve_upstream(&d).await;
+            });
+        }
     } else {
         // 非 A 记录 (AAAA/HTTPS/TXT): 返回空应答 (NOERROR)，引导客户端立即回退 IPv4
         tracing::debug!("[TUN-DNS] 非 A 记录查询: {} (type={}) from {} → 空应答", domain, qtype, client);

@@ -404,9 +404,9 @@ pub fn record_conn_metrics(
         // 静态规则 (MediaCdn/PushIm/Interactive) 超时绝对锁定，不参与衰减
         if !profile.is_static_rule && profile.category == TrafficCategory::GeneralApi {
             if close_reason == CloseReason::IdleTimeout && !is_reused {
-                // 僵尸空闲衰减: 达到超时但全程无多请求复用，向下收敛 20% (下限 10s)
+                // 僵尸空闲衰减: 达到超时但全程无多请求复用，向下收敛 20% (下限 20s，防止移动端连接池抖动)
                 let old_timeout = profile.assigned_idle_secs;
-                profile.assigned_idle_secs = (profile.assigned_idle_secs * 8 / 10).max(10);
+                profile.assigned_idle_secs = (profile.assigned_idle_secs * 8 / 10).max(20);
                 profile.zombie_decays += 1;
                 debug!(
                     "[AdaptiveProfile] 域名 [{}] 触发僵尸空闲衰减 (超时未复用): {}s -> {}s (累计衰减 {} 次)",
