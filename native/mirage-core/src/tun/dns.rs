@@ -36,7 +36,9 @@ fn remote_dns_server() -> &'static StdMutex<std::net::IpAddr> {
     S.get_or_init(|| StdMutex::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1))))
 }
 
-pub const DNS_RESPONSE_TTL: u32 = 60;
+/// 遵循 Surge / Clash 标准: Fake-IP 响应采用 1s 极短 TTL
+/// 确保用户断开 VPN 后，系统及各 App 进程内 DNS 缓存在 1 秒内瞬间失效并回落到真实物理网络 DNS，彻底杜绝 Fake-IP 污染
+pub const DNS_RESPONSE_TTL: u32 = 1;
 const CACHE_TTL: Duration = Duration::from_secs(300);
 
 /// 设置国内直连 DNS
@@ -526,7 +528,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dns_response_ttl_is_60s() {
+    fn dns_response_ttl_is_1s() {
         let query = build_a_query("example.com", 0x1234);
         let qname_end = {
             let mut p = 12usize;
@@ -540,7 +542,7 @@ mod tests {
         let a_offset = resp.len() - 16;
         let ttl_bytes = &resp[a_offset + 6..a_offset + 10];
         let ttl = u32::from_be_bytes([ttl_bytes[0], ttl_bytes[1], ttl_bytes[2], ttl_bytes[3]]);
-        assert_eq!(ttl, 60, "Fake-IP 应答 TTL 必须为 60s");
+        assert_eq!(ttl, 1, "Fake-IP 应答 TTL 必须为 1s");
     }
 
     #[test]

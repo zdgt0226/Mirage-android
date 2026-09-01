@@ -525,6 +525,7 @@ class CoreService : VpnService() {
         log("[core] stop()")
         cancelAllJobs()
         flushLogsAndStats()
+        runCatching { MirageNative.clearDnsCache() }
         runCatching { MirageNative.stop() }
         tunFd?.let { runCatching { it.close() } }
         tunFd = null

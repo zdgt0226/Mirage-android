@@ -322,9 +322,11 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_stop(
 ) {
     let state = RUNTIME.lock().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(state) = state {
+        state.engine.reset_dns_and_fake_ip();
         state.stack.stop();
         drop(state);
     }
+    mirage_core::tun::dns::clear_direct_cache();
     STARTED.store(false, Ordering::SeqCst);
     tracing::info!("MirageCore 已停止");
 }
