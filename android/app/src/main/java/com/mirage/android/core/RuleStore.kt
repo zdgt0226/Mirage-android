@@ -16,35 +16,196 @@ object RuleStore {
     private const val KEY_RULES = "rules_json"
     private const val KEY_DEFAULT = "default_action"  // "proxy" | "direct" | "block"
 
+    /** 模板 1: 🌟 经典国内外分流 + 去广告 (推荐) */
     fun createDefaultRules(): List<Rule> {
         return listOf(
             Rule(
-                id = java.util.UUID.randomUUID().toString(),
+                id = "builtin_lan_captive",
+                name = "局域网与连网认证直连 (LAN & Captive Portal)",
+                enabled = true,
+                action = "direct",
+                logic = "OR",
+                conditions = listOf(
+                    RuleCondition("geoip", "private"),
+                    RuleCondition("domain_suffix", "local"),
+                    RuleCondition("domain_suffix", "lan"),
+                    RuleCondition("domain_suffix", "internal"),
+                    RuleCondition("domain_keyword", "connectivitycheck"),
+                    RuleCondition("domain_exact", "captive.apple.com")
+                )
+            ),
+            Rule(
+                id = "builtin_adblock",
+                name = "广告与隐私追踪拦截 (AdBlock & Analytics)",
+                enabled = true,
+                action = "block",
+                logic = "OR",
+                conditions = listOf(
+                    RuleCondition("geosite", "category-ads-all"),
+                    RuleCondition("domain_suffix", "doubleclick.net"),
+                    RuleCondition("domain_suffix", "googleadservices.com"),
+                    RuleCondition("domain_suffix", "google-analytics.com"),
+                    RuleCondition("domain_suffix", "pglstatp-toutiao.com"),
+                    RuleCondition("domain_suffix", "gdt.qq.com"),
+                    RuleCondition("domain_suffix", "mobads.baidu.com"),
+                    RuleCondition("domain_suffix", "adukwai.com")
+                )
+            ),
+            Rule(
+                id = "builtin_ai_proxy",
+                name = "海外 AI 专区加速 (OpenAI / Claude / Gemini / Copilot / Grok)",
+                enabled = true,
+                action = "proxy",
+                logic = "OR",
+                conditions = listOf(
+                    RuleCondition("geosite", "openai"),
+                    RuleCondition("geosite", "anthropic"),
+                    RuleCondition("geosite", "google-gemini"),
+                    RuleCondition("domain_suffix", "openai.com"),
+                    RuleCondition("domain_suffix", "chatgpt.com"),
+                    RuleCondition("domain_suffix", "oaistatic.com"),
+                    RuleCondition("domain_suffix", "claude.ai"),
+                    RuleCondition("domain_suffix", "anthropic.com"),
+                    RuleCondition("domain_suffix", "gemini.google.com"),
+                    RuleCondition("domain_suffix", "x.ai"),
+                    RuleCondition("domain_suffix", "grok.com")
+                )
+            ),
+            Rule(
+                id = "builtin_streaming_social",
+                name = "海外流媒体与社交平台 (YouTube / Netflix / Telegram / X / TikTok / Spotify)",
+                enabled = true,
+                action = "proxy",
+                logic = "OR",
+                conditions = listOf(
+                    RuleCondition("geosite", "youtube"),
+                    RuleCondition("geosite", "netflix"),
+                    RuleCondition("geosite", "telegram"),
+                    RuleCondition("geosite", "twitter"),
+                    RuleCondition("geosite", "tiktok"),
+                    RuleCondition("geosite", "spotify"),
+                    RuleCondition("geosite", "github"),
+                    RuleCondition("domain_suffix", "youtube.com"),
+                    RuleCondition("domain_suffix", "googlevideo.com"),
+                    RuleCondition("domain_suffix", "ytimg.com"),
+                    RuleCondition("domain_suffix", "netflix.com"),
+                    RuleCondition("domain_suffix", "telegram.org"),
+                    RuleCondition("domain_suffix", "t.me"),
+                    RuleCondition("domain_suffix", "twitter.com"),
+                    RuleCondition("domain_suffix", "x.com"),
+                    RuleCondition("domain_suffix", "tiktok.com"),
+                    RuleCondition("domain_suffix", "github.com")
+                )
+            ),
+            Rule(
+                id = "builtin_cn_geosite",
+                name = "国内域名直连 (GeoSite CN)",
+                enabled = true,
+                action = "direct",
+                conditions = listOf(RuleCondition("geosite", "cn"))
+            ),
+            Rule(
+                id = "builtin_cn_geoip",
+                name = "国内 IP 直连 (GeoIP CN)",
+                enabled = true,
+                action = "direct",
+                conditions = listOf(RuleCondition("geoip", "cn"))
+            )
+        )
+    }
+
+    /** 模板 2: 🇨🇳 白名单模式 (极速省流: 国内直连，其余所有未知站点默认走代理) */
+    fun createWhitelistRules(): List<Rule> {
+        return listOf(
+            Rule(
+                id = "wl_lan",
                 name = "局域网私有 IP 直连 (GeoIP Private)",
                 enabled = true,
                 action = "direct",
                 conditions = listOf(RuleCondition("geoip", "private"))
             ),
             Rule(
-                id = java.util.UUID.randomUUID().toString(),
-                name = "国内域名直连 (GeoSite)",
+                id = "wl_adblock",
+                name = "广告拦截 (GeoSite Ads)",
+                enabled = true,
+                action = "block",
+                conditions = listOf(RuleCondition("geosite", "category-ads-all"))
+            ),
+            Rule(
+                id = "wl_cn_domains",
+                name = "国内域名直连 (GeoSite CN)",
                 enabled = true,
                 action = "direct",
                 conditions = listOf(RuleCondition("geosite", "cn"))
             ),
             Rule(
-                id = java.util.UUID.randomUUID().toString(),
-                name = "国内 IP 直连 (GeoIP)",
+                id = "wl_cn_ips",
+                name = "国内 IP 直连 (GeoIP CN)",
                 enabled = true,
                 action = "direct",
                 conditions = listOf(RuleCondition("geoip", "cn"))
-            ),
+            )
+        )
+    }
+
+    /** 模板 3: 🛡️ 黑名单模式 (GFWList 模式: 被阻断域名走代理，其余所有站点默认直连) */
+    fun createBlacklistRules(): List<Rule> {
+        return listOf(
             Rule(
-                id = java.util.UUID.randomUUID().toString(),
+                id = "bl_adblock",
                 name = "广告拦截 (GeoSite Ads)",
                 enabled = true,
                 action = "block",
                 conditions = listOf(RuleCondition("geosite", "category-ads-all"))
+            ),
+            Rule(
+                id = "bl_ai",
+                name = "AI 服务专区代理 (OpenAI / Claude / Gemini)",
+                enabled = true,
+                action = "proxy",
+                logic = "OR",
+                conditions = listOf(
+                    RuleCondition("geosite", "openai"),
+                    RuleCondition("geosite", "anthropic"),
+                    RuleCondition("domain_suffix", "chatgpt.com"),
+                    RuleCondition("domain_suffix", "claude.ai")
+                )
+            ),
+            Rule(
+                id = "bl_gfw",
+                name = "GFW 境外被阻断域名代理 (GeoSite GFW)",
+                enabled = true,
+                action = "proxy",
+                logic = "OR",
+                conditions = listOf(
+                    RuleCondition("geosite", "gfw"),
+                    RuleCondition("geosite", "youtube"),
+                    RuleCondition("geosite", "telegram"),
+                    RuleCondition("geosite", "twitter")
+                )
+            )
+        )
+    }
+
+    /** 模板 4: 🚫 仅去广告直连模式 (全系统直连 + 强效去广告) */
+    fun createAdBlockOnlyRules(): List<Rule> {
+        return listOf(
+            Rule(
+                id = "ad_only_all",
+                name = "全量广告与隐私追踪拦截 (AdBlock & Analytics)",
+                enabled = true,
+                action = "block",
+                logic = "OR",
+                conditions = listOf(
+                    RuleCondition("geosite", "category-ads-all"),
+                    RuleCondition("domain_suffix", "doubleclick.net"),
+                    RuleCondition("domain_suffix", "googleadservices.com"),
+                    RuleCondition("domain_suffix", "google-analytics.com"),
+                    RuleCondition("domain_suffix", "pglstatp-toutiao.com"),
+                    RuleCondition("domain_suffix", "gdt.qq.com"),
+                    RuleCondition("domain_suffix", "mobads.baidu.com"),
+                    RuleCondition("domain_suffix", "adukwai.com")
+                )
             )
         )
     }

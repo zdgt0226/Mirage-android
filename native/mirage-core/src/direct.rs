@@ -299,7 +299,7 @@ pub fn is_private_ip(ip: IpAddr) -> bool {
     }
 }
 
-/// 静态局域网与路由器管理域名列表
+/// 静态局域网与路由器管理域名列表 (含系统 Captive Portal 连网认证与连通性探测)
 const LAN_ROUTER_EXACT_DOMAINS: &[&str] = &[
     "router.asus.com",
     "asusrouter.com",
@@ -324,6 +324,14 @@ const LAN_ROUTER_EXACT_DOMAINS: &[&str] = &[
     "repeater.setup",
     "router.ctc",
     "gateway.zte",
+    // 系统 Captive Portal 与 WiFi 连通性探测 (直连放行，确保公共 WiFi 登录页秒弹)
+    "captive.apple.com",
+    "connectivitycheck.gstatic.com",
+    "connectivitycheck.android.com",
+    "wifi.connectivitycheck.android.com",
+    "detectportal.firefox.com",
+    "msftconnecttest.com",
+    "www.msftconnecttest.com",
 ];
 
 const LAN_DOMAIN_SUFFIXES: &[&str] = &[
@@ -384,6 +392,8 @@ pub fn is_cn_ip(ip: IpAddr) -> bool {
     if match_geoip_code("CN", ip) {
         return true;
     }
+
+    // 2. 静态内置网段兜底二分查找
     if let IpAddr::V4(v4) = ip {
         let target = u32::from(v4);
         static CN_RANGES: std::sync::LazyLock<Vec<(u32, u32)>> = std::sync::LazyLock::new(|| {
@@ -450,29 +460,42 @@ pub fn is_cn_ip(ip: IpAddr) -> bool {
 pub fn is_known_non_cn_domain(domain: &str) -> bool {
     let d = domain.trim_end_matches('.').to_ascii_lowercase();
     const NON_CN_ROOTS: &[&str] = &[
+        // Google 生态
         "google.com", "googleapis.com", "googlevideo.com", "gstatic.com", "ggpht.com",
         "gvt1.com", "gvt2.com", "1e100.net", "googleusercontent.com",
         "googleadservices.com", "googlesyndication.com", "google-analytics.com", "doubleclick.net",
         "youtube.com", "youtu.be", "ytimg.com", "yt.be",
         "android.com", "g.co", "goo.gl",
-        "telegram.org", "t.me", "telesco.pe", "tdesktop.com",
+        // Telegram
+        "telegram.org", "t.me", "telesco.pe", "tdesktop.com", "telegra.ph", "telegram.me",
+        // Twitter / X
         "twitter.com", "x.com", "twimg.com", "t.co",
+        // Meta (Facebook, Instagram, WhatsApp, Threads)
         "facebook.com", "fbcdn.net", "instagram.com", "cdninstagram.com", "whatsapp.com", "threads.net",
-        "netflix.com", "nflxvideo.net", "nflximg.net",
+        // 国际流媒体
+        "netflix.com", "nflxvideo.net", "nflximg.net", "nflxext.com",
         "spotify.com", "scdn.co", "spotifycdn.com",
+        "disneyplus.com", "disney.com", "hbo.com", "max.com", "paramountplus.com", "ted.com", "tedcdn.com",
+        // 开发者平台与代码托管
         "github.com", "githubusercontent.com", "github.io", "git.io",
+        "gitlab.com", "bitbucket.org", "docker.com", "docker.io", "npmjs.org", "npmjs.com", "pypi.org", "crates.io",
+        // AI 专区
         "openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com",
-        "anthropic.com", "claude.ai",
+        "anthropic.com", "claude.ai", "x.ai", "grok.com", "midjourney.com",
+        "huggingface.co", "perplexity.ai", "cursor.com", "cursor.sh", "groq.com", "mistral.ai", "cohere.com",
+        // 国际社交与媒体
         "tiktok.com", "tiktokv.com", "byteoversea.com", "ibytedtos.com", "musical.ly",
-        "wikipedia.org", "wikimedia.org",
-        "discord.com", "discordapp.com", "discord.gg",
+        "wikipedia.org", "wikimedia.org", "reddit.com", "redd.it", "medium.com", "pinterest.com", "quora.com",
+        "discord.com", "discordapp.com", "discord.gg", "line.me", "kakao.com",
+        // 云基础设施与企业服务
         "cloudflare.com", "cloudflare-dns.com",
         "apple.com", "icloud.com", "aaplimg.com", "mzstatic.com",
         "microsoft.com", "live.com", "office.com", "azure.com", "bing.com", "windows.com", "msn.com",
         "amazon.com", "amazonaws.com",
-        "steamcommunity.com", "steampowered.com",
-        "docker.com", "docker.io",
+        "steamcommunity.com", "steampowered.com", "epicgames.com", "playstation.com", "nintendo.com", "nintendo.net",
         "notion.so", "figma.com", "slack.com",
+        // 国际支付与金融
+        "paypal.com", "stripe.com", "binance.com", "coinbase.com", "okx.com",
     ];
     for &root in NON_CN_ROOTS {
         if d == root || d.ends_with(&format!(".{root}")) {

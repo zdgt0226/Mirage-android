@@ -83,6 +83,33 @@ class RuleRepository(private val context: Context) {
         _defaultAction.value = action
     }
 
+    fun applyPresetTemplate(templateId: Int): Boolean {
+        when (templateId) {
+            0 -> {
+                // 经典国内外分流 + 去广告 (推荐)
+                RuleStore.saveRules(context, RuleStore.createDefaultRules())
+                RuleStore.setDefaultAction(context, "proxy")
+            }
+            1 -> {
+                // 白名单模式 (国内直连，其余走代理)
+                RuleStore.saveRules(context, RuleStore.createWhitelistRules())
+                RuleStore.setDefaultAction(context, "proxy")
+            }
+            2 -> {
+                // 黑名单模式 (被阻断走代理，其余直连)
+                RuleStore.saveRules(context, RuleStore.createBlacklistRules())
+                RuleStore.setDefaultAction(context, "direct")
+            }
+            3 -> {
+                // 仅去广告模式 (全直连 + 广告拦截)
+                RuleStore.saveRules(context, RuleStore.createAdBlockOnlyRules())
+                RuleStore.setDefaultAction(context, "direct")
+            }
+        }
+        loadData()
+        return applyRules()
+    }
+
     fun applyRules(): Boolean {
         val json = RuleStore.toJson(context)
         return CoreController.setRules(json)

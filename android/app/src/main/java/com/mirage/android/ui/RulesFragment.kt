@@ -252,17 +252,30 @@ class RulesFragment : Fragment() {
     }
 
     /**
-     * 常用 Geo 预设规则快捷添加弹窗
+     * 常用 Geo 预设规则与经典分流模板快捷弹窗
      */
     private fun showQuickGeoPresetDialog() {
         val ctx = requireContext()
+        val templateNames = arrayOf(
+            "🌟 经典国内外分流 + 去广告 (推荐)",
+            "🇨🇳 白名单模式 (国内直连，其余走代理)",
+            "🛡️ 黑名单模式 (被阻断走代理，其余直连)",
+            "🚫 仅去广告模式 (全直连 + 强效广告拦截)"
+        )
+        val templateDescriptions = arrayOf(
+            "包含: 局域网放行 + 广告/统计拦截 + 海外AI(OpenAI/Claude/Gemini)加速 + 流媒体(YouTube/Netflix/TG)加速 + 国内(GeoSite/GeoIP CN)直连 + 默认代理",
+            "包含: 局域网直连 + 广告拦截 + 国内域名/IP 直连 + 默认走代理 (适合国外未知站点一律加速)",
+            "包含: 广告拦截 + AI 专区代理 + GFWList/海外被墙域名代理 + 默认直连 (适合只翻被墙站点，省流量)",
+            "包含: 全局广告与隐私追踪 SDK 强力丢弃 + 默认直连 (不耗费任何代理流量)"
+        )
+
         val layout = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(40, 20, 40, 10)
         }
 
         val tvDesc = TextView(ctx).apply {
-            text = "选择常用的 GeoSite / GeoIP 规则模板，可快速添加为自定义分流规则："
+            text = "支持一键应用 Shadowrocket 级经典规则模板，或单独添加 Geo 标签规则："
             textSize = 13f
             setTextColor(ContextCompat.getColor(ctx, R.color.meow_ink))
             setPadding(0, 0, 0, 16)
@@ -276,7 +289,7 @@ class RulesFragment : Fragment() {
             setPadding(0, 16, 0, 16)
         }
         layout.addView(TextView(ctx).apply {
-            text = "选择常用 Tag 模板:"
+            text = "单条规则快速添加 (选择 Tag):"
             textSize = 12f
             setTextColor(ContextCompat.getColor(ctx, R.color.meow_ink_secondary))
         })
@@ -320,9 +333,9 @@ class RulesFragment : Fragment() {
         }
 
         AlertDialog.Builder(ctx)
-            .setTitle("常用 Geo 规则预设")
+            .setTitle("分流预设与模板")
             .setView(layout)
-            .setPositiveButton("添加此规则") { _, _ ->
+            .setPositiveButton("添加此单条规则") { _, _ ->
                 val pos = presetSpinner.selectedItemPosition
                 if (pos in GeoManager.PRESET_GEO_TAGS.indices) {
                     val preset = GeoManager.PRESET_GEO_TAGS[pos]
@@ -341,28 +354,15 @@ class RulesFragment : Fragment() {
                     Toast.makeText(ctx, "已添加规则: ${preset.kind}:${preset.tag} -> $action", Toast.LENGTH_SHORT).show()
                 }
             }
-            .setNeutralButton("一键添加推荐组合") { _, _ ->
-                val bundle = listOf(
-                    Triple("category-ads-all", "geosite", "block"),
-                    Triple("google", "geosite", "proxy"),
-                    Triple("openai", "geosite", "proxy"),
-                    Triple("telegram", "geosite", "proxy"),
-                    Triple("cn", "geosite", "direct")
-                )
-                for ((tag, kind, act) in bundle) {
-                    val rule = Rule(
-                        name = "Geo: $tag",
-                        enabled = true,
-                        logic = "OR",
-                        conditions = listOf(RuleCondition(kind, tag)),
-                        type = kind,
-                        kind = kind,
-                        pattern = tag,
-                        action = act
-                    )
-                    viewModel.saveRule(null, rule)
-                }
-                Toast.makeText(ctx, "已一键添加 5 条推荐常用 Geo 规则！", Toast.LENGTH_SHORT).show()
+            .setNeutralButton("一键切换分流模板") { _, _ ->
+                AlertDialog.Builder(ctx)
+                    .setTitle("选择分流方案模板")
+                    .setItems(templateNames) { _, which ->
+                        viewModel.applyPresetTemplate(which)
+                        Toast.makeText(ctx, "已应用模板: ${templateNames[which]}", Toast.LENGTH_LONG).show()
+                    }
+                    .setNegativeButton("取消", null)
+                    .show()
             }
             .setNegativeButton("取消", null)
             .show()

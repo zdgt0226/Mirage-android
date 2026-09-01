@@ -110,6 +110,10 @@ class RulesViewModel(application: Application) : AndroidViewModel(application) {
         ruleRepo.setDefaultAction(action)
     }
 
+    fun applyPresetTemplate(templateId: Int): Boolean {
+        return ruleRepo.applyPresetTemplate(templateId)
+    }
+
     fun applyRules(): Boolean {
         return ruleRepo.applyRules()
     }
