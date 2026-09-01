@@ -43,11 +43,11 @@ class TrafficViewModel(application: Application) : AndroidViewModel(application)
             val matchesOutbound = outbound == "ALL" || item.outbound.contains(outbound, ignoreCase = true)
             matchesQuery && matchesProto && matchesOutbound
         }
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val filteredLogs: StateFlow<List<String>> = combine(rawLogs, selectedLogLevel) { logs, level ->
         if (level == LogLevel.ALL) logs else logs.filter { level.matches(it) }
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _historyUp = MutableStateFlow<List<Float>>(emptyList())
     val historyUp: StateFlow<List<Float>> = _historyUp.asStateFlow()

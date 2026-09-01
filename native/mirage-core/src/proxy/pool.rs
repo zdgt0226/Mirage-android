@@ -1049,11 +1049,18 @@ impl WarmPool {
     /// 动态热更新连接池目标与最大容量 (零停机、无需重建底层引擎与销毁已有 Fake-IP/连接)
     pub fn set_pool_size(&self, new_size: usize) {
         let size = new_size.max(1);
-        self.max_size.store(size, Ordering::Relaxed);
+        let old_max = self.max_size.swap(size, Ordering::Relaxed);
         let cur = self.target_size.load(Ordering::Relaxed);
-        self.target_size.store(cur.min(size).max(1), Ordering::Relaxed);
+        let new_target = if size > old_max {
+            // 容量上限上调（如亮屏/突发高并发）：迅速抬升初始水位至至少 size / 2，缩短冷启动爬坡延迟
+            cur.max(size / 2).min(size).max(1)
+        } else {
+            // 容量上限下调（如息屏低功耗模式）：平滑收敛至新上限
+            cur.min(size).max(1)
+        };
+        self.target_size.store(new_target, Ordering::Relaxed);
         self.notify.notify_waiters();
-        tracing::info!("[WarmPool] 动态调整连接池容量上限: {size} (当前目标: {})", self.target_size.load(Ordering::Relaxed));
+        tracing::info!("[WarmPool] 动态调整连接池容量上限: {size} (原上限: {old_max}, 当前目标水位: {new_target})");
     }
 
     pub fn get_pool_size(&self) -> usize {
