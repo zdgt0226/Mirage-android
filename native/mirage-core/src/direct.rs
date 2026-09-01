@@ -427,12 +427,38 @@ pub fn is_cn_ip(ip: IpAddr) -> bool {
     false
 }
 
+/// 已知典型境外主流服务根域名 (防止 GeoSite:CN 上游数据库污染误将 Google/YouTube/Telegram/X 等判定为国内直连)
+pub fn is_known_non_cn_domain(domain: &str) -> bool {
+    let d = domain.trim_end_matches('.').to_ascii_lowercase();
+    const NON_CN_ROOTS: &[&str] = &[
+        "google.com", "googleapis.com", "googlevideo.com", "gstatic.com", "ggpht.com",
+        "youtube.com", "youtu.be", "ytimg.com", "yt.be",
+        "android.com", "g.co", "goo.gl", "googleusercontent.com",
+        "telegram.org", "t.me", "telesco.pe", "tdesktop.com",
+        "twitter.com", "x.com", "twimg.com", "t.co",
+        "facebook.com", "fbcdn.net", "instagram.com", "cdninstagram.com", "whatsapp.com", "threads.net",
+        "netflix.com", "nflxvideo.net", "nflximg.net",
+        "spotify.com", "scdn.co", "spotifycdn.com",
+        "github.com", "githubusercontent.com", "github.io", "git.io",
+        "openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com",
+        "anthropic.com", "claude.ai",
+        "tiktok.com", "tiktokv.com", "byteoversea.com", "ibytedtos.com", "musical.ly",
+        "wikipedia.org", "wikimedia.org",
+        "discord.com", "discordapp.com", "discord.gg",
+    ];
+    for &root in NON_CN_ROOTS {
+        if d == root || d.ends_with(&format!(".{root}")) {
+            return true;
+        }
+    }
+    false
+}
+
 /// 严格国内域名判定 (只查内置白名单 + .cn 后缀, 不查 Geo 数据)。
-///
-/// ⚠️ 不能直接用 `is_cn_domain`: 它第一步查 `match_geosite_tag("CN")`, 而 geosite cn
-/// 数据**可能误含境外域名** (实测 update.googleapis.com / gstatic.com 在 cn 标签里,
-/// 这是 Play 更新慢的根因之一: cn 规则把 Google 服务劫持去直连 DNS 污染的假 IP)。
 pub fn is_cn_domain_strict(domain: &str) -> bool {
+    if is_known_non_cn_domain(domain) {
+        return false;
+    }
     let d_lower = domain.trim_end_matches('.').to_ascii_lowercase();
     if d_lower.ends_with(".cn") || d_lower == "cn" {
         return true;
@@ -446,6 +472,9 @@ pub fn is_cn_domain_strict(domain: &str) -> bool {
 }
 
 pub fn is_cn_domain(domain: &str) -> bool {
+    if is_known_non_cn_domain(domain) {
+        return false;
+    }
     if match_geosite_tag("CN", domain) {
         return true;
     }
@@ -1226,5 +1255,50 @@ mod tests {
 
         // 复原回默认模式
         set_outbound_mode(0);
+    }
+
+    #[test]
+    fn test_known_non_cn_domains_never_routed_to_direct_by_cn_rule() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        set_custom_rules(r#"{"rules":[],"default_action":"proxy"}"#);
+        set_outbound_mode(0);
+
+        let non_cn_test_domains = [
+            "update.googleapis.com",
+            "play.googleapis.com",
+            "youtubei.googleapis.com",
+            "rr1---sn-xxx.googlevideo.com",
+            "i.ytimg.com",
+            "yt3.ggpht.com",
+            "api.twitter.com",
+            "t.co",
+            "api.telegram.org",
+            "api.spotify.com",
+            "api.tiktokv.com",
+            "api.openai.com",
+            "api.anthropic.com",
+            "claude.ai",
+        ];
+
+        for &dom in &non_cn_test_domains {
+            assert!(
+                is_known_non_cn_domain(dom),
+                "{dom} 必须被识别为已知境外主流域名"
+            );
+            assert!(
+                !is_cn_domain(dom),
+                "{dom} 绝不能被 is_cn_domain 误判为国内域名"
+            );
+            assert!(
+                !is_cn_domain_strict(dom),
+                "{dom} 绝不能被 is_cn_domain_strict 误判为国内域名"
+            );
+            let (action, _) = route_decision_detailed(Some(dom), None, Some(443), Some("tcp"));
+            assert_eq!(
+                action,
+                RuleAction::Proxy,
+                "{dom} 在规则模式下必须命中 PROXY"
+            );
+        }
     }
 }
