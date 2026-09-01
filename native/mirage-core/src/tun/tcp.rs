@@ -574,12 +574,16 @@ async fn relay_direct(
         dst.0
     };
 
-    // 严密安全防护: 若 Fake-IP 域名解析出非国内 IP (如境外域名被规则误判或 DNS 污染)，且非严格国内域名，自动回退隧道代理 (私有 IP 豁免)
-    let is_strict_cn = direct_domain.as_deref().map(crate::direct::is_cn_domain_strict).unwrap_or(false);
-    if is_strict_cn {
+    // 方案 D (双重置信校验):
+    // 1. 若目标 IP 为私有 IP / 局域网管理 IP，直接允许直连；
+    // 2. 若目标 IP 经校验属于中国大陆公网 IP (is_cn_ip)，放心直连并标记为 direct_ip；
+    // 3. 若目标 IP 为境外 IP (如未收录的生僻境外域名被规则误判、或 DNS 污染劫持 IP)，双重置信校验立即拦截并平滑回退走隧道代理！
+    if crate::direct::is_private_ip(target_ip) {
+        // 私有局域网 IP 直连
+    } else if crate::direct::is_cn_ip(target_ip) {
         crate::direct::mark_direct_ip(target_ip);
-    } else if is_fake && !crate::direct::is_cn_ip(target_ip) && !crate::direct::is_direct_ip(target_ip) && !crate::direct::is_private_ip(target_ip) {
-        debug!("[TUN-TCP/direct] 域名 [{:?}] 解析为非国内 IP ({})，自动回退走隧道代理", direct_domain, target_ip);
+    } else if is_fake {
+        debug!("[TUN-TCP/direct] 方案D双重置信拦截: 域名 [{:?}] 本地解析 IP ({}) 属于非国内 IP，自动切换走隧道代理", direct_domain, target_ip);
         return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule).await;
     }
 

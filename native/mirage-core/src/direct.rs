@@ -466,6 +466,13 @@ pub fn is_known_non_cn_domain(domain: &str) -> bool {
         "tiktok.com", "tiktokv.com", "byteoversea.com", "ibytedtos.com", "musical.ly",
         "wikipedia.org", "wikimedia.org",
         "discord.com", "discordapp.com", "discord.gg",
+        "cloudflare.com", "cloudflare-dns.com",
+        "apple.com", "icloud.com", "aaplimg.com", "mzstatic.com",
+        "microsoft.com", "live.com", "office.com", "azure.com", "bing.com", "windows.com", "msn.com",
+        "amazon.com", "amazonaws.com",
+        "steamcommunity.com", "steampowered.com",
+        "docker.com", "docker.io",
+        "notion.so", "figma.com", "slack.com",
     ];
     for &root in NON_CN_ROOTS {
         if d == root || d.ends_with(&format!(".{root}")) {
@@ -606,21 +613,13 @@ pub fn route_decision_detailed(
     // 2. 遍历用户自定义复合规则 (自上而下，首条命中即返回)
     for rule in &r.rules {
         if rule.matches(domain, ip, port, protocol) {
-            let cn_direct = rule.action == RuleAction::Direct
-                && rule.conditions.iter().any(|c| matches!(c, ConditionKind::GeoSite(t) if t.eq_ignore_ascii_case("cn")));
-            if cn_direct {
-                let strictly_cn = match domain {
-                    Some(d) => is_cn_domain_strict(d),
-                    None => ip.is_some_and(|i| is_cn_ip(i)),
-                };
-                if !strictly_cn {
-                    tracing::debug!(
-                        "[ROUTER] geosite:cn 命中但非严格国内 ({:?}), 跳过该规则继续匹配",
-                        domain.map(|d| d.to_string())
-                            .or(ip.map(|i| i.to_string()))
-                            .unwrap_or_default()
-                    );
-                    continue;
+            // 防污染守卫: 若规则命中但动作是 Direct，且域名明确属于已知境外服务，跳过该直连规则
+            if rule.action == RuleAction::Direct {
+                if let Some(d) = domain {
+                    if is_known_non_cn_domain(d) {
+                        tracing::debug!("[ROUTER] 域名 [{d}] 属于已知境外服务，忽略直连规则: {}", rule.name);
+                        continue;
+                    }
                 }
             }
             record_rule_hit(&rule.id, &rule.name, rule.action.as_str());
@@ -1321,5 +1320,42 @@ mod tests {
                 "{dom} 在规则模式下必须命中 PROXY"
             );
         }
+    }
+
+    #[test]
+    fn test_dual_verification_routing_scheme_d() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        // 设置规则: geosite:cn -> direct, 默认 proxy
+        set_custom_rules(r#"{
+            "rules": [
+                {
+                    "id": "cn_direct",
+                    "name": "国内直连",
+                    "enabled": true,
+                    "logic": "OR",
+                    "conditions": [
+                        { "type": "geosite", "value": "cn" }
+                    ],
+                    "action": "direct"
+                }
+            ],
+            "default_action": "proxy"
+        }"#);
+        set_outbound_mode(0);
+
+        // 1. 国内顶级 .com 域名: 经 is_cn_domain / geosite:cn 判定，必须走 DIRECT (不要求 .cn 后缀)
+        assert!(is_cn_domain("bilibili.com") || is_cn_domain("qq.com") || is_cn_domain("baidu.com"));
+        let (action_bili, _) = route_decision_detailed(Some("api.bilibili.com"), None, Some(443), Some("tcp"));
+        assert_eq!(action_bili, RuleAction::Direct);
+
+        // 2. 境外 Google / YouTube / Telegram: 即使在 geosite:cn 规则存在的情况下，依然被 NON_CN_ROOTS 防污染守卫拦截，走 PROXY
+        let (action_google, _) = route_decision_detailed(Some("play.googleapis.com"), None, Some(443), Some("tcp"));
+        assert_eq!(action_google, RuleAction::Proxy);
+
+        let (action_yt, _) = route_decision_detailed(Some("rr1---sn-xxx.googlevideo.com"), None, Some(443), Some("tcp"));
+        assert_eq!(action_yt, RuleAction::Proxy);
+
+        let (action_cf, _) = route_decision_detailed(Some("dash.cloudflare.com"), None, Some(443), Some("tcp"));
+        assert_eq!(action_cf, RuleAction::Proxy);
     }
 }
