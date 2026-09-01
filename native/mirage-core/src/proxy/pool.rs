@@ -154,7 +154,7 @@ pub(crate) fn decide_new_target(
     } else {
         wait_events as f64 / total_gets as f64
     };
-    let floor = max_size; // floor 直接设为用户配置的 pool_size 容量，保持预热连接常驻充足
+    let floor = (max_size / 2).max(2).min(max_size);
 
     if wait_ratio > 0.2 && cur_target < max_size {
         let increment = (cur_target / 5).max(1);
@@ -175,8 +175,8 @@ mod feedback_tests {
 
     #[test]
     fn idle_at_floor_stays() {
-        assert_eq!(decide_new_target(32, 0, 0, 0, 32), 32);
-        assert_eq!(decide_new_target(5, 0, 0, 0, 5), 5);
+        assert_eq!(decide_new_target(16, 0, 0, 0, 32), 16);
+        assert_eq!(decide_new_target(2, 0, 0, 0, 4), 2);
     }
 
     #[test]
@@ -1049,10 +1049,11 @@ impl WarmPool {
     /// 动态热更新连接池目标与最大容量 (零停机、无需重建底层引擎与销毁已有 Fake-IP/连接)
     pub fn set_pool_size(&self, new_size: usize) {
         let size = new_size.max(1);
-        self.target_size.store(size, Ordering::Relaxed);
         self.max_size.store(size, Ordering::Relaxed);
+        let cur = self.target_size.load(Ordering::Relaxed);
+        self.target_size.store(cur.min(size).max(1), Ordering::Relaxed);
         self.notify.notify_waiters();
-        tracing::info!("[WarmPool] 动态调整连接池容量: {size}");
+        tracing::info!("[WarmPool] 动态调整连接池容量上限: {size} (当前目标: {})", self.target_size.load(Ordering::Relaxed));
     }
 
     pub fn get_pool_size(&self) -> usize {

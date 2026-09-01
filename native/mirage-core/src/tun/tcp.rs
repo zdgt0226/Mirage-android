@@ -342,7 +342,12 @@ async fn relay_proxy(
     } else {
         format!("{}:{}", dst.0, dst.1)
     };
-    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("TCP", &target_name, &dst.0.to_string(), &matched_rule, "PROXY");
+    let resolved_ip_display = if crate::direct::is_fake_ip(dst.0) {
+        "远程代理解析 (Fake-IP)".to_string()
+    } else {
+        dst.0.to_string()
+    };
+    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("TCP", &target_name, &resolved_ip_display, &matched_rule, "PROXY");
 
     // 拆成读写半程: upload (app→tunnel) / download (tunnel→app)
     let (mut tun_reader, mut tun_writer) = (tunnel.reader, tunnel.writer);
@@ -374,12 +379,12 @@ async fn relay_proxy(
         let mut up_bytes: u64 = 0;
         let mut timed_out = false;
         let mut buf = [0u8; 65536];
+        let mut timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
+            dst_port,
+            dom_ref,
+            false,
+        );
         loop {
-            let timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
-                dst_port,
-                dom_ref,
-                up_bytes > 0,
-            );
             match tokio::time::timeout(timeout_dur, local_rd.read(&mut buf)).await {
                 Ok(Ok(0)) => {
                     let _ = tun_writer.send_close_notify().await;
@@ -388,6 +393,13 @@ async fn relay_proxy(
                 Ok(Ok(n)) => {
                     if tun_writer.send_data(&buf[..n]).await.is_err() {
                         break;
+                    }
+                    if up_bytes == 0 {
+                        timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
+                            dst_port,
+                            dom_ref,
+                            true,
+                        );
                     }
                     up_bytes += n as u64;
                     up_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
@@ -424,14 +436,21 @@ async fn relay_proxy(
     let download = async move {
         let mut down_bytes: u64 = 0;
         let mut timed_out = false;
+        let mut timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
+            dst_port,
+            dom_ref,
+            false,
+        );
         loop {
-            let timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
-                dst_port,
-                dom_ref,
-                down_bytes > 0,
-            );
             match tokio::time::timeout(timeout_dur, tun_reader.recv_data_to(&mut local_wr)).await {
                 Ok(Ok(Some(n))) => {
+                    if down_bytes == 0 {
+                        timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
+                            dst_port,
+                            dom_ref,
+                            true,
+                        );
+                    }
                     down_bytes += n as u64;
                     down_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     last_act_down.store(crate::tun::adaptive_idle::unix_now_secs(), std::sync::atomic::Ordering::Relaxed);
@@ -636,16 +655,23 @@ async fn relay_direct(
         let mut up_bytes: u64 = 0;
         let mut timed_out = false;
         let mut buf = [0u8; 65536];
+        let mut timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
+            dst_port,
+            dom_ref,
+            false,
+        );
         loop {
-            let timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
-                dst_port,
-                dom_ref,
-                up_bytes > 0,
-            );
             match tokio::time::timeout(timeout_dur, lr.read(&mut buf)).await {
                 Ok(Ok(0)) => break,
                 Ok(Ok(n)) => {
                     if rw.write_all(&buf[..n]).await.is_err() { break; }
+                    if up_bytes == 0 {
+                        timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
+                            dst_port,
+                            dom_ref,
+                            true,
+                        );
+                    }
                     up_bytes += n as u64;
                     up_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     crate::monitor::add_up(n as u64);
@@ -676,16 +702,23 @@ async fn relay_direct(
         let mut down_bytes: u64 = 0;
         let mut timed_out = false;
         let mut buf = [0u8; 65536];
+        let mut timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
+            dst_port,
+            dom_ref,
+            false,
+        );
         loop {
-            let timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
-                dst_port,
-                dom_ref,
-                down_bytes > 0,
-            );
             match tokio::time::timeout(timeout_dur, rr.read(&mut buf)).await {
                 Ok(Ok(0)) => break,
                 Ok(Ok(n)) => {
                     if lw.write_all(&buf[..n]).await.is_err() { break; }
+                    if down_bytes == 0 {
+                        timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
+                            dst_port,
+                            dom_ref,
+                            true,
+                        );
+                    }
                     down_bytes += n as u64;
                     down_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     crate::monitor::add_down(n as u64);

@@ -230,7 +230,11 @@ class VpnRepository(private val context: Context) {
     private fun startTelemetry() {
         telemetryJob?.cancel()
         telemetryJob = scope.launch(Dispatchers.IO) {
+            var tick = 0L
+            var lastConnJson = ""
+            var lastReqsJson = ""
             while (isActive) {
+                tick++
                 val isRunning = CoreController.isRunning()
                 if (isRunning) {
                     if (_vpnState.value !is VpnState.Connected) {
@@ -238,6 +242,7 @@ class VpnRepository(private val context: Context) {
                             _vpnState.value = VpnState.Connected(nodeRepo.getSelectedNode())
                         }
                     }
+                    // 1. 每 1s: 极轻量基础流量与延迟 (7个浮点 + 1个长整型，0 CPU/GC 开销)
                     val statsArr = CoreController.getStats()
                     if (statsArr != null && statsArr.size >= 7) {
                         _trafficStats.value = TrafficStats.fromArray(statsArr)
@@ -245,35 +250,47 @@ class VpnRepository(private val context: Context) {
                     val lat = CoreController.latencyMs()
                     _latencyMs.value = lat
 
-                    val remoteLogs = CoreController.recentLogs().toList()
-                    if (remoteLogs.isNotEmpty()) {
-                        _logs.value = remoteLogs.takeLast(150)
-                    }
+                    // 2. 每 2s: 日志与活跃连接拉取 (避免高频 IPC 与解析)
+                    if (tick % 2 == 0L) {
+                        val remoteLogs = CoreController.recentLogs().toList()
+                        if (remoteLogs.isNotEmpty()) {
+                            _logs.value = remoteLogs.takeLast(150)
+                        }
 
-                    val connJson = CoreController.getConnectionsJson()
-                    if (connJson.isNotBlank() && connJson != "[]") {
-                        val parsedList = mutableListOf<com.mirage.android.data.model.ConnectionInfo>()
-                        runCatching {
-                            val arr = org.json.JSONArray(connJson)
-                            for (i in 0 until arr.length()) {
-                                parsedList.add(com.mirage.android.data.model.ConnectionInfo.fromJson(arr.getJSONObject(i)))
+                        val connJson = CoreController.getConnectionsJson()
+                        if (connJson != lastConnJson) {
+                            lastConnJson = connJson
+                            if (connJson.isNotBlank() && connJson != "[]") {
+                                val parsedList = mutableListOf<com.mirage.android.data.model.ConnectionInfo>()
+                                runCatching {
+                                    val arr = org.json.JSONArray(connJson)
+                                    for (i in 0 until arr.length()) {
+                                        parsedList.add(com.mirage.android.data.model.ConnectionInfo.fromJson(arr.getJSONObject(i)))
+                                    }
+                                }
+                                _connections.value = parsedList
+                            } else {
+                                _connections.value = emptyList()
                             }
                         }
-                        _connections.value = parsedList
-                    } else {
-                        _connections.value = emptyList()
                     }
 
-                    val reqsJson = CoreController.getRecentRequestsJson()
-                    if (reqsJson.isNotBlank() && reqsJson != "[]") {
-                        val parsedReqs = mutableListOf<com.mirage.android.data.model.RecentRequestInfo>()
-                        runCatching {
-                            val arr = org.json.JSONArray(reqsJson)
-                            for (i in 0 until arr.length()) {
-                                parsedReqs.add(com.mirage.android.data.model.RecentRequestInfo.fromJson(arr.getJSONObject(i)))
+                    // 3. 每 3s: 最近请求历史 (300 条 JSON)，仅在内容变化时才反序列化
+                    if (tick % 3 == 0L) {
+                        val reqsJson = CoreController.getRecentRequestsJson()
+                        if (reqsJson != lastReqsJson) {
+                            lastReqsJson = reqsJson
+                            if (reqsJson.isNotBlank() && reqsJson != "[]") {
+                                val parsedReqs = mutableListOf<com.mirage.android.data.model.RecentRequestInfo>()
+                                runCatching {
+                                    val arr = org.json.JSONArray(reqsJson)
+                                    for (i in 0 until arr.length()) {
+                                        parsedReqs.add(com.mirage.android.data.model.RecentRequestInfo.fromJson(arr.getJSONObject(i)))
+                                    }
+                                }
+                                _recentRequests.value = parsedReqs
                             }
                         }
-                        _recentRequests.value = parsedReqs
                     }
                 } else {
                     if (_vpnState.value !is VpnState.Disconnected && _vpnState.value !is VpnState.Connecting && _vpnState.value !is VpnState.Stopping) {

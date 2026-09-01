@@ -10,7 +10,7 @@ import kotlinx.coroutines.withContext
 
 class AppListRepository(private val context: Context) {
 
-    private val iconCache = mutableMapOf<String, Drawable>()
+    private val iconCache = object : android.util.LruCache<String, Drawable>(128) {}
 
     suspend fun getInstalledApps(selectedSet: Set<String>): List<AppInfo> = withContext(Dispatchers.IO) {
         val pm = context.packageManager
@@ -35,10 +35,12 @@ class AppListRepository(private val context: Context) {
     }
 
     fun getAppIcon(packageName: String): Drawable? {
-        return iconCache.getOrPut(packageName) {
-            runCatching {
-                context.packageManager.getApplicationIcon(packageName)
-            }.getOrNull() ?: context.packageManager.defaultActivityIcon
-        }
+        val cached = iconCache.get(packageName)
+        if (cached != null) return cached
+        val icon = runCatching {
+            context.packageManager.getApplicationIcon(packageName)
+        }.getOrNull() ?: context.packageManager.defaultActivityIcon
+        icon?.let { iconCache.put(packageName, it) }
+        return icon
     }
 }
