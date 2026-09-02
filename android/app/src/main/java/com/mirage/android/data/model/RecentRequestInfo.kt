@@ -16,11 +16,18 @@ data class RecentRequestInfo(
     val upBytes: Long,
     val downBytes: Long,
     val startTime: Long,
-    val durationMs: Long
+    val durationMs: Long,
+    val dnsMs: Long = 0,
+    val connectMs: Long = 0,
+    val tlsMs: Long = 0,
+    val ttfbMs: Long = 0
 ) {
     val upFormatted: String get() = formatBytes(upBytes)
     val downFormatted: String get() = formatBytes(downBytes)
     val durationFormatted: String get() = if (durationMs >= 1000) "%.1fs".format(durationMs / 1000.0) else "${durationMs}ms"
+    val ttfbFormatted: String get() = if (ttfbMs > 0) "${ttfbMs}ms" else "-"
+    val connectFormatted: String get() = if (connectMs > 0) "${connectMs}ms" else "-"
+    val dnsFormatted: String get() = if (dnsMs > 0) "${dnsMs}ms" else if (resolvedIp.contains("Fake-IP")) "0ms (Fake-IP)" else "-"
 
     companion object {
         fun fromJson(obj: JSONObject): RecentRequestInfo {
@@ -35,7 +42,11 @@ data class RecentRequestInfo(
                 upBytes = obj.optLong("up_bytes", 0),
                 downBytes = obj.optLong("down_bytes", 0),
                 startTime = obj.optLong("start_time", 0),
-                durationMs = obj.optLong("duration_ms", 0)
+                durationMs = obj.optLong("duration_ms", 0),
+                dnsMs = obj.optLong("dns_ms", 0),
+                connectMs = obj.optLong("connect_ms", 0),
+                tlsMs = obj.optLong("tls_ms", 0),
+                ttfbMs = obj.optLong("ttfb_ms", 0)
             )
         }
 

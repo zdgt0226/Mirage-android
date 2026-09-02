@@ -71,7 +71,12 @@ class RecentRequestAdapter(
                 }
             }
 
-            binding.tvDuration.text = item.durationFormatted
+            val durationText = if (item.ttfbMs > 0) {
+                "${item.durationFormatted} · ⚡${item.ttfbMs}ms"
+            } else {
+                item.durationFormatted
+            }
+            binding.tvDuration.text = durationText
             binding.tvTrafficBytes.text = "↑${item.upFormatted} ↓${item.downFormatted}"
 
             // 状态小圆点

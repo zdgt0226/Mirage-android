@@ -204,6 +204,245 @@
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
+    <!-- 耗时瀑布流卡片 (Timing Waterfall Breakdown) -->
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/cardWaterfall"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        app:cardBackgroundColor="@color/meow_card"
+        app:cardCornerRadius="12dp"
+        app:cardElevation="0dp"
+        app:strokeColor="@color/meow_outline"
+        app:strokeWidth="0.8dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="12dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:fontFamily="sans-serif-medium"
+                    android:text="耗时阶段瀑布流"
+                    android:textColor="@color/meow_ink"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvWaterfallTotal"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:fontFeatureSettings="tnum"
+                    android:textColor="@color/meow_blue"
+                    android:textSize="12.5sp"
+                    android:textStyle="bold"
+                    tools:text="总耗时 120ms" />
+            </LinearLayout>
+
+            <!-- 组合可视化进度条 (Multi-Segment Waterfall Bar) -->
+            <LinearLayout
+                android:id="@+id/barWaterfallContainer"
+                android:layout_width="match_parent"
+                android:layout_height="8dp"
+                android:layout_marginTop="10dp"
+                android:layout_marginBottom="12dp"
+                android:background="@drawable/bg_telegram_pill"
+                android:clipToOutline="true"
+                android:orientation="horizontal">
+
+                <View
+                    android:id="@+id/barDns"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:background="#2196F3" />
+
+                <View
+                    android:id="@+id/barConnect"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="2"
+                    android:background="#4CAF50" />
+
+                <View
+                    android:id="@+id/barTls"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:background="#FF9800" />
+
+                <View
+                    android:id="@+id/barTtfb"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="3"
+                    android:background="#9C27B0" />
+            </LinearLayout>
+
+            <!-- 阶段 1: DNS 解析 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <View
+                    android:layout_width="8dp"
+                    android:layout_height="8dp"
+                    android:layout_marginEnd="8dp"
+                    android:background="@drawable/bg_telegram_avatar"
+                    android:backgroundTint="#2196F3" />
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="DNS 解析 (DNS Lookup)"
+                    android:textColor="@color/meow_ink_secondary"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tvDnsValue"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:fontFeatureSettings="tnum"
+                    android:textColor="@color/meow_ink"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    tools:text="0 ms (Fake-IP)" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="0.6dp"
+                android:layout_marginVertical="6dp"
+                android:background="@color/meow_outline" />
+
+            <!-- 阶段 2: TCP 建连 / 隧道获取 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <View
+                    android:layout_width="8dp"
+                    android:layout_height="8dp"
+                    android:layout_marginEnd="8dp"
+                    android:background="@drawable/bg_telegram_avatar"
+                    android:backgroundTint="#4CAF50" />
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="TCP 建连 / 隧道分配 (Connect)"
+                    android:textColor="@color/meow_ink_secondary"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tvConnectValue"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:fontFeatureSettings="tnum"
+                    android:textColor="@color/meow_ink"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    tools:text="35 ms" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="0.6dp"
+                android:layout_marginVertical="6dp"
+                android:background="@color/meow_outline" />
+
+            <!-- 阶段 3: TLS 握手 / 嗅探协商 -->
+            <LinearLayout
+                android:id="@+id/rowTls"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <View
+                    android:layout_width="8dp"
+                    android:layout_height="8dp"
+                    android:layout_marginEnd="8dp"
+                    android:background="@drawable/bg_telegram_avatar"
+                    android:backgroundTint="#FF9800" />
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="TLS 嗅探与协商 (TLS Handshake)"
+                    android:textColor="@color/meow_ink_secondary"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tvTlsValue"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:fontFeatureSettings="tnum"
+                    android:textColor="@color/meow_ink"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    tools:text="15 ms" />
+            </LinearLayout>
+
+            <View
+                android:id="@+id/divTls"
+                android:layout_width="match_parent"
+                android:layout_height="0.6dp"
+                android:layout_marginVertical="6dp"
+                android:background="@color/meow_outline" />
+
+            <!-- 阶段 4: 首字节响应 (TTFB) -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <View
+                    android:layout_width="8dp"
+                    android:layout_height="8dp"
+                    android:layout_marginEnd="8dp"
+                    android:background="@drawable/bg_telegram_avatar"
+                    android:backgroundTint="#9C27B0" />
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="首字节响应 (TTFB / First Byte)"
+                    android:textColor="@color/meow_ink_secondary"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tvTtfbValue"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:fontFeatureSettings="tnum"
+                    android:textColor="@color/meow_ink"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    tools:text="68 ms" />
+            </LinearLayout>
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
     <!-- 传输指标卡片 (Inset Grouped) -->
     <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"

@@ -259,6 +259,14 @@ pub struct RecentRequestRecord {
     pub down_bytes: u64,
     pub start_time: u64,
     pub duration_ms: u64,
+    #[serde(default)]
+    pub dns_ms: u32,
+    #[serde(default)]
+    pub connect_ms: u32,
+    #[serde(default)]
+    pub tls_ms: u32,
+    #[serde(default)]
+    pub ttfb_ms: u32,
 }
 
 pub struct LiveConnection {
@@ -319,6 +327,10 @@ pub fn record_conn_start(
         down_bytes: 0,
         start_time,
         duration_ms: 0,
+        dns_ms: 0,
+        connect_ms: 0,
+        tls_ms: 0,
+        ttfb_ms: 0,
     };
 
     {
@@ -336,6 +348,19 @@ pub fn record_conn_start(
     }
 
     (id, up_bytes, down_bytes, abort)
+}
+
+/// 记录连接关键阶段耗时瀑布流指标 (DNS 解析、TCP 握手/建连、TLS 协商、首字节响应 TTFB)
+pub fn record_conn_timings(id: u64, dns_ms: u32, connect_ms: u32, tls_ms: u32, ttfb_ms: u32) {
+    let mut q_lock = RECENT_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(q) = q_lock.as_mut() {
+        if let Some(item) = q.iter_mut().find(|r| r.id == id) {
+            if dns_ms > 0 { item.dns_ms = dns_ms; }
+            if connect_ms > 0 { item.connect_ms = connect_ms; }
+            if tls_ms > 0 { item.tls_ms = tls_ms; }
+            if ttfb_ms > 0 { item.ttfb_ms = ttfb_ms; }
+        }
+    }
 }
 
 /// 定向中断并关闭指定 ID 的活跃连接 (对齐 DELETE /connections/{id})
@@ -364,24 +389,15 @@ pub fn close_all_connections() -> usize {
     }
 }
 
-/// 关闭连接：从活跃连接列表中彻底移除，并在 Recent Requests 队列中标记完成状态与耗时。
-pub fn record_conn_close(id: u64, up: u64, down: u64, status: &str) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let mut start_time = now;
+/// 关闭连接：从活跃连接列表中彻底移除，并在 Recent Requests 队列中标记完成状态与精准耗时。
+pub fn record_conn_close_with_duration(id: u64, up: u64, down: u64, status: &str, duration_ms: u64) {
     {
         let mut lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(map) = lock.as_mut() {
-            if let Some(live) = map.remove(&id) {
-                start_time = live.start_time;
-            }
+            map.remove(&id);
         }
     }
 
-    let duration_ms = now.saturating_sub(start_time) * 1000;
     {
         let mut q_lock = RECENT_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(q) = q_lock.as_mut() {
@@ -393,6 +409,25 @@ pub fn record_conn_close(id: u64, up: u64, down: u64, status: &str) {
             }
         }
     }
+}
+
+pub fn record_conn_close(id: u64, up: u64, down: u64, status: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut start_time = now;
+    {
+        let lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(map) = lock.as_ref() {
+            if let Some(live) = map.get(&id) {
+                start_time = live.start_time;
+            }
+        }
+    }
+    let duration_ms = now.saturating_sub(start_time) * 1000;
+    record_conn_close_with_duration(id, up, down, status, duration_ms);
 }
 
 /// 获取当前所有活跃连接的实时 JSON 快照

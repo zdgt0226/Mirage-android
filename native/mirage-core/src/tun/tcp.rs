@@ -329,6 +329,7 @@ async fn relay_proxy(
     initial_payload: Vec<u8>,
     matched_rule: String,
 ) {
+    let connect_start = std::time::Instant::now();
     let tunnel = match connect_tunnel(&stack, dst, direct_domain.clone()).await {
         Ok(t) => t,
         Err(e) => {
@@ -336,6 +337,7 @@ async fn relay_proxy(
             return;
         }
     };
+    let connect_ms = connect_start.elapsed().as_millis() as u32;
 
     let target_name = if let Some(dom) = &direct_domain {
         format!("{}:{}", dom, dst.1)
@@ -348,6 +350,7 @@ async fn relay_proxy(
         dst.0.to_string()
     };
     let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("TCP", &target_name, &resolved_ip_display, &matched_rule, "PROXY");
+    crate::monitor::record_conn_timings(cid, 0, connect_ms, 0, 0);
 
     // 拆成读写半程: upload (app→tunnel) / download (tunnel→app)
     let (mut tun_reader, mut tun_writer) = (tunnel.reader, tunnel.writer);
@@ -445,6 +448,8 @@ async fn relay_proxy(
             match tokio::time::timeout(timeout_dur, tun_reader.recv_data_to(&mut local_wr)).await {
                 Ok(Ok(Some(n))) => {
                     if down_bytes == 0 {
+                        let ttfb_ms = start_time.elapsed().as_millis() as u32;
+                        crate::monitor::record_conn_timings(cid, 0, connect_ms, 0, ttfb_ms);
                         timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
                             dst_port,
                             dom_ref,
@@ -509,8 +514,8 @@ async fn relay_proxy(
             }
         }
     }
-    crate::monitor::record_conn_close(cid, up, down, &format!("{:?}", close_reason));
     let duration_ms = start_time.elapsed().as_millis() as u64;
+    crate::monitor::record_conn_close_with_duration(cid, up, down, &format!("{:?}", close_reason), duration_ms);
     let req_total = request_count.load(std::sync::atomic::Ordering::Relaxed);
     // 复用或大流量长连接 (避免单请求大文件下载被误判为一次性短探测触发 zombie decay)
     let is_reused = req_total >= 2 || down >= 512 * 1024 || (up + down) >= 1024 * 1024;
@@ -553,15 +558,16 @@ async fn relay_direct(
     let is_fake = engine.is_fake_ip(&dst.0);
 
     // 如果目标是 Fake-IP，必须先解析出真实 IP (或局域网路由器 IP)
-    let target_ip = if is_fake {
+    let (target_ip, dns_ms) = if is_fake {
         if let Some(ref dom) = direct_domain {
+            let dns_start = std::time::Instant::now();
             if let Some(real_ip) = crate::tun::dns::direct_dns_lookup(dom) {
-                real_ip
+                (real_ip, dns_start.elapsed().as_millis() as u32)
             } else if let Some(real_v4) = crate::tun::dns::resolve_upstream(dom).await {
-                std::net::IpAddr::V4(real_v4)
+                (std::net::IpAddr::V4(real_v4), dns_start.elapsed().as_millis() as u32)
             } else if let Some(router_ip) = crate::direct::default_router_ip_for_domain(dom) {
                 debug!("[TUN-TCP/direct] 局域网管理域名 [{}] 使用默认网关 IP: {}", dom, router_ip);
-                router_ip
+                (router_ip, 0)
             } else {
                 debug!("[TUN-TCP/direct] 直连域名 [{}] 真实解析超时，自动平滑回退走隧道代理", dom);
                 return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule).await;
@@ -571,7 +577,7 @@ async fn relay_direct(
             return;
         }
     } else {
-        dst.0
+        (dst.0, 0)
     };
 
     // 方案 D (双重置信校验):
@@ -610,6 +616,7 @@ async fn relay_direct(
     };
     // protect: 直连 socket 也要绕过 TUN (否则 0.0.0.0/0→tun0 环路)
     crate::protect::protect(sock.as_raw_fd());
+    let connect_start = std::time::Instant::now();
     let mut remote = match tokio::time::timeout(
         std::time::Duration::from_secs(8),
         sock.connect(addr),
@@ -626,6 +633,8 @@ async fn relay_direct(
             return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule).await;
         }
     };
+    let connect_ms = connect_start.elapsed().as_millis() as u32;
+    crate::monitor::record_conn_timings(cid, dns_ms, connect_ms, 0, 0);
     let _ = remote.set_nodelay(true);
 
     // 如果嗅探期间读取了首包，先写入真实 socket
@@ -717,6 +726,8 @@ async fn relay_direct(
                 Ok(Ok(n)) => {
                     if lw.write_all(&buf[..n]).await.is_err() { break; }
                     if down_bytes == 0 {
+                        let ttfb_ms = start_time.elapsed().as_millis() as u32;
+                        crate::monitor::record_conn_timings(cid, dns_ms, connect_ms, 0, ttfb_ms);
                         timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
                             dst_port,
                             dom_ref,
@@ -777,8 +788,8 @@ async fn relay_direct(
             }
         }
     }
-    crate::monitor::record_conn_close(cid, up, down, &format!("{:?}", close_reason));
     let duration_ms = start_time.elapsed().as_millis() as u64;
+    crate::monitor::record_conn_close_with_duration(cid, up, down, &format!("{:?}", close_reason), duration_ms);
     let req_total = request_count.load(std::sync::atomic::Ordering::Relaxed);
     let is_reused = req_total >= 2;
     crate::tun::adaptive_idle::record_conn_metrics(
