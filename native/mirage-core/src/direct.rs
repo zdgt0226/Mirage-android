@@ -619,6 +619,11 @@ pub fn route_decision_detailed(
 ) -> (RuleAction, String) {
     // 0. 私有 IP / 局域网主机与路由器后台域名内置本地直连 (最高保护，任何模式均不破坏 LAN)
     if let Some(ip_addr) = ip {
+        // 拦截发往 Mirage 本地 DNS 虚拟地址 (198.19.0.53) 的 TCP 请求 (如 Android 14/15/16 DoT 853 端口探测)
+        // 立即 Block 触发 RST，使 Android 系统 DnsResolver 0ms 快速回退到标准 UDP 53，杜绝 15 秒挂起
+        if ip_addr == IpAddr::V4(std::net::Ipv4Addr::new(198, 19, 0, 53)) {
+            return (RuleAction::Block, "Block: Local DNS Virtual IP TCP".to_string());
+        }
         if is_private_ip(ip_addr) {
             return (RuleAction::Direct, "Private IP (LAN)".to_string());
         }
