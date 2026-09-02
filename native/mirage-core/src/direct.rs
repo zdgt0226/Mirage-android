@@ -436,19 +436,14 @@ pub fn is_cn_ip(ip: IpAddr) -> bool {
     } else if let IpAddr::V6(v6) = ip {
         let segs = v6.segments();
         let top = segs[0];
-        // 中国大陆主要 IPv6 运营商/教育/科研地址块:
-        // - 2408::/16 (中国联通)
-        // - 2409::/16 (中国移动)
-        // - 240a::/16 (CERNET 教育网)
-        // - 240b::/16 (CSTNET 科技网)
-        // - 240c::/16, 240d::/16, 240e::/16 (中国电信)
-        // - 240f::/16 (中国铁通)
-        // - 2400::/12 (亚太/中国联合分配块)
-        // - 2001:da8::/32 (CERNET2)
-        // - 2001:250::/32 (CNGrid 科技网)
-        if (top >= 0x2408 && top <= 0x240f)
-            || (top >= 0x2400 && top <= 0x2403)
-            || (top == 0x2001 && (segs[1] == 0xda8 || segs[1] == 0x250))
+        // 中国大陆主要 IPv6 运营商/教育/科研/云厂商分配地址块 (APNIC / CNNIC):
+        // - 2400::/12 (0x2400 - 0x240F: 涵盖电信 240c/d/e, 移动 2409, 联通 2408, 铁通 240f, 教育网 240a, 科技网 240b, 阿里云/腾讯云/华为云/字节 2401-2407)
+        // - 2001:da8::/32 (CERNET2 中国教育网)
+        // - 2001:250::/32 (CSTNET 中国科技网)
+        // - 2001:cc0::/32 (CERNET)
+        // - 2001:df0::/29 (APNIC 亚太及中国政企专线)
+        if (top >= 0x2400 && top <= 0x240f)
+            || (top == 0x2001 && (segs[1] == 0xda8 || segs[1] == 0x250 || segs[1] == 0xcc0 || (segs[1] >= 0xdf0 && segs[1] <= 0xdf7)))
         {
             return true;
         }
@@ -1142,6 +1137,18 @@ mod tests {
         // 4. 边界地址
         assert!(!is_cn_ip("0.0.0.0".parse().unwrap()));
         assert!(!is_cn_ip("255.255.255.255".parse().unwrap()));
+
+        // 5. IPv6 中国运营商与科研网地址段
+        assert!(is_cn_ip("2408:8000::1".parse().unwrap()), "联通 IPv6 必须命中 CN");
+        assert!(is_cn_ip("2409:8000::1".parse().unwrap()), "移动 IPv6 必须命中 CN");
+        assert!(is_cn_ip("240e:8000::1".parse().unwrap()), "电信 IPv6 必须命中 CN");
+        assert!(is_cn_ip("2400:3200::1".parse().unwrap()), "阿里 DNS IPv6 必须命中 CN");
+        assert!(is_cn_ip("2001:da8::1".parse().unwrap()), "教育网 CERNET2 必须命中 CN");
+        assert!(is_cn_ip("2001:250::1".parse().unwrap()), "科技网 CSTNET 必须命中 CN");
+
+        // 6. IPv6 境外公共 IP 绝不命中
+        assert!(!is_cn_ip("2001:4860:4860::8888".parse().unwrap()), "Google DNS IPv6 绝不能误判为 CN");
+        assert!(!is_cn_ip("2606:4700:4700::1111".parse().unwrap()), "Cloudflare DNS IPv6 绝不能误判为 CN");
     }
 
     #[test]

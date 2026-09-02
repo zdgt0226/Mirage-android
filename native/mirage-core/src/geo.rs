@@ -52,6 +52,35 @@ impl Ipv4Cidr {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct Ipv6Cidr {
+    pub net: u128,
+    pub mask: u128,
+    pub prefix: u8,
+}
+
+impl Ipv6Cidr {
+    pub fn new(ip: std::net::Ipv6Addr, prefix: u8) -> Self {
+        let net = u128::from(ip);
+        let mask = if prefix == 0 { 0 } else { !0u128 << (128 - prefix) };
+        Self {
+            net: net & mask,
+            mask,
+            prefix,
+        }
+    }
+
+    pub fn contains(&self, ip: std::net::Ipv6Addr) -> bool {
+        (u128::from(ip) & self.mask) == self.net
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum IpCidr {
+    V4(Ipv4Cidr),
+    V6(Ipv6Cidr),
+}
+
 /// GeoSite 快速哈希索引匹配器 (将 O(N) 线性搜索优化为 O(1) 哈希查询)
 #[derive(Debug, Clone, Default)]
 pub struct GeoSiteMatcher {
@@ -118,6 +147,8 @@ pub struct GeoStore {
     pub sites: HashMap<String, GeoSiteMatcher>,
     /// geoip: code (大写, 如 "CN", "TELEGRAM", "PRIVATE") -> IPv4 网段列表
     pub ip_v4: HashMap<String, Vec<Ipv4Cidr>>,
+    /// geoip: code (大写, 如 "CN", "TELEGRAM", "PRIVATE") -> IPv6 网段列表
+    pub ip_v6: HashMap<String, Vec<Ipv6Cidr>>,
     pub geosite_path: String,
     pub geoip_path: String,
 }
@@ -154,7 +185,15 @@ impl GeoStore {
                     }
                 }
             }
-            IpAddr::V6(_) => {}
+            IpAddr::V6(v6) => {
+                if let Some(list) = self.ip_v6.get(&code_upper) {
+                    for cidr in list {
+                        if cidr.contains(v6) {
+                            return true;
+                        }
+                    }
+                }
+            }
         }
         false
     }
@@ -345,7 +384,7 @@ pub fn parse_geosite_file(data: &[u8]) -> HashMap<String, Vec<SiteDomain>> {
 
 // ── geoip.dat 解析 ───────────────────────────────────────────────────────────
 
-fn parse_cidr_msg(buf: &[u8]) -> Option<Ipv4Cidr> {
+fn parse_cidr_msg(buf: &[u8]) -> Option<IpCidr> {
     let mut pos = 0;
     let mut ip_bytes = Vec::new();
     let mut prefix = 0u8;
@@ -364,7 +403,7 @@ fn parse_cidr_msg(buf: &[u8]) -> Option<Ipv4Cidr> {
             }
             (2, 0) => {
                 let (v, next_pos) = read_varint(buf, pos)?;
-                prefix = (v as u8).min(32);
+                prefix = (v as u8).min(128);
                 pos = next_pos;
             }
             (_, 0) => {
@@ -389,16 +428,22 @@ fn parse_cidr_msg(buf: &[u8]) -> Option<Ipv4Cidr> {
 
     if ip_bytes.len() == 4 {
         let ip = Ipv4Addr::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
-        Some(Ipv4Cidr::new(ip, prefix))
+        Some(IpCidr::V4(Ipv4Cidr::new(ip, prefix.min(32))))
+    } else if ip_bytes.len() == 16 {
+        let mut octets = [0u8; 16];
+        octets.copy_from_slice(&ip_bytes[..16]);
+        let ip = std::net::Ipv6Addr::from(octets);
+        Some(IpCidr::V6(Ipv6Cidr::new(ip, prefix.min(128))))
     } else {
         None
     }
 }
 
-fn parse_geoip_entry(buf: &[u8]) -> Option<(String, Vec<Ipv4Cidr>)> {
+fn parse_geoip_entry(buf: &[u8]) -> Option<(String, Vec<Ipv4Cidr>, Vec<Ipv6Cidr>)> {
     let mut pos = 0;
     let mut code = String::new();
-    let mut cidrs = Vec::new();
+    let mut v4_cidrs = Vec::new();
+    let mut v6_cidrs = Vec::new();
 
     while pos < buf.len() {
         let (tag, next_pos) = read_varint(buf, pos)?;
@@ -415,7 +460,10 @@ fn parse_geoip_entry(buf: &[u8]) -> Option<(String, Vec<Ipv4Cidr>)> {
             (2, 2) => {
                 let (data, next_pos) = read_len_delim(buf, pos)?;
                 if let Some(c) = parse_cidr_msg(data) {
-                    cidrs.push(c);
+                    match c {
+                        IpCidr::V4(v4) => v4_cidrs.push(v4),
+                        IpCidr::V6(v6) => v6_cidrs.push(v6),
+                    }
                 }
                 pos = next_pos;
             }
@@ -442,12 +490,13 @@ fn parse_geoip_entry(buf: &[u8]) -> Option<(String, Vec<Ipv4Cidr>)> {
     if code.is_empty() {
         None
     } else {
-        Some((code, cidrs))
+        Some((code, v4_cidrs, v6_cidrs))
     }
 }
 
-pub fn parse_geoip_file(data: &[u8]) -> HashMap<String, Vec<Ipv4Cidr>> {
-    let mut map = HashMap::new();
+pub fn parse_geoip_file(data: &[u8]) -> (HashMap<String, Vec<Ipv4Cidr>>, HashMap<String, Vec<Ipv6Cidr>>) {
+    let mut v4_map = HashMap::new();
+    let mut v6_map = HashMap::new();
     let mut pos = 0;
     while pos < data.len() {
         let Some((tag, next_pos)) = read_varint(data, pos) else { break };
@@ -457,8 +506,13 @@ pub fn parse_geoip_file(data: &[u8]) -> HashMap<String, Vec<Ipv4Cidr>> {
 
         if fn_num == 1 && wire_type == 2 {
             let Some((entry_data, next_pos)) = read_len_delim(data, pos) else { break };
-            if let Some((code, cidrs)) = parse_geoip_entry(entry_data) {
-                map.insert(code, cidrs);
+            if let Some((code, v4, v6)) = parse_geoip_entry(entry_data) {
+                if !v4.is_empty() {
+                    v4_map.insert(code.clone(), v4);
+                }
+                if !v6.is_empty() {
+                    v6_map.insert(code, v6);
+                }
             }
             pos = next_pos;
         } else if wire_type == 0 {
@@ -477,7 +531,7 @@ pub fn parse_geoip_file(data: &[u8]) -> HashMap<String, Vec<Ipv4Cidr>> {
             break;
         }
     }
-    map
+    (v4_map, v6_map)
 }
 
 // ── 公共加载与匹配接口 ───────────────────────────────────────────────────────
@@ -485,7 +539,8 @@ pub fn parse_geoip_file(data: &[u8]) -> HashMap<String, Vec<Ipv4Cidr>> {
 /// 加载外部 Geo 文件 (geosite.dat 与 geoip.dat)
 pub fn load_geo_files(geosite_path: &str, geoip_path: &str) -> (usize, usize) {
     let mut site_map = HashMap::new();
-    let mut ip_map = HashMap::new();
+    let mut ip_v4_map = HashMap::new();
+    let mut ip_v6_map = HashMap::new();
 
     if !geosite_path.is_empty() && Path::new(geosite_path).exists() {
         match std::fs::read(geosite_path) {
@@ -500,15 +555,20 @@ pub fn load_geo_files(geosite_path: &str, geoip_path: &str) -> (usize, usize) {
     if !geoip_path.is_empty() && Path::new(geoip_path).exists() {
         match std::fs::read(geoip_path) {
             Ok(bytes) => {
-                ip_map = parse_geoip_file(&bytes);
-                info!("[GEO] 成功加载 geoip.dat ({} codes, 路径: {})", ip_map.len(), geoip_path);
+                let res = parse_geoip_file(&bytes);
+                ip_v4_map = res.0;
+                ip_v6_map = res.1;
+                info!(
+                    "[GEO] 成功加载 geoip.dat ({} IPv4 codes, {} IPv6 codes, 路径: {})",
+                    ip_v4_map.len(), ip_v6_map.len(), geoip_path
+                );
             }
             Err(e) => warn!("[GEO] 读取 geoip.dat 失败 ({}): {}", geoip_path, e),
         }
     }
 
     let site_count = site_map.len();
-    let ip_count = ip_map.len();
+    let ip_count = ip_v4_map.len() + ip_v6_map.len();
 
     let indexed_sites: HashMap<String, GeoSiteMatcher> = site_map
         .into_iter()
@@ -517,7 +577,8 @@ pub fn load_geo_files(geosite_path: &str, geoip_path: &str) -> (usize, usize) {
 
     let mut g = global_geo().write().unwrap_or_else(|e| e.into_inner());
     g.sites = indexed_sites;
-    g.ip_v4 = ip_map;
+    g.ip_v4 = ip_v4_map;
+    g.ip_v6 = ip_v6_map;
     g.geosite_path = geosite_path.to_string();
     g.geoip_path = geoip_path.to_string();
 
