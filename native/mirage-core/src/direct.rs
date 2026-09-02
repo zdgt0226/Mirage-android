@@ -436,14 +436,25 @@ pub fn is_cn_ip(ip: IpAddr) -> bool {
     } else if let IpAddr::V6(v6) = ip {
         let segs = v6.segments();
         let top = segs[0];
-        // 中国大陆主要 IPv6 运营商/教育/科研/云厂商分配地址块 (APNIC / CNNIC):
-        // - 2400::/12 (0x2400 - 0x240F: 涵盖电信 240c/d/e, 移动 2409, 联通 2408, 铁通 240f, 教育网 240a, 科技网 240b, 阿里云/腾讯云/华为云/字节 2401-2407)
+        // 中国大陆高置信 IPv6 运营商/教育/科研/企业分配地址块 (APNIC / CNNIC 专属段):
+        // ⚠️ 严禁使用粗粒度 2400::/12！2400::/12 是 APNIC 分配给整个亚太地区的总保留块，
+        // 日本 NTT(2400:8500::/32)、IIJ(2400:1f00::/32)、韩国(2400:2e00::/32)、新加坡、台湾等大量亚太 IP 均在此块内。
+        //
+        // 静态高置信国内段:
+        // - 2408::/16 (中国联通)
+        // - 2409::/16 (中国移动)
+        // - 240a::/16 (CERNET 教育网)
+        // - 240b::/16 (CSTNET 科技网)
+        // - 240c::/16, 240d::/16, 240e::/16 (中国电信)
+        // - 240f::/16 (中国铁通)
+        // - 2400:3200::/32 (阿里公共 DNS / 阿里云)
+        // - 2400:da00::/32 (百度公共 DNS / 百度云)
         // - 2001:da8::/32 (CERNET2 中国教育网)
         // - 2001:250::/32 (CSTNET 中国科技网)
         // - 2001:cc0::/32 (CERNET)
-        // - 2001:df0::/29 (APNIC 亚太及中国政企专线)
-        if (top >= 0x2400 && top <= 0x240f)
-            || (top == 0x2001 && (segs[1] == 0xda8 || segs[1] == 0x250 || segs[1] == 0xcc0 || (segs[1] >= 0xdf0 && segs[1] <= 0xdf7)))
+        if (top >= 0x2408 && top <= 0x240f)
+            || (top == 0x2400 && (segs[1] == 0x3200 || segs[1] == 0xda00))
+            || (top == 0x2001 && (segs[1] == 0xda8 || segs[1] == 0x250 || segs[1] == 0xcc0))
         {
             return true;
         }
@@ -1146,9 +1157,17 @@ mod tests {
         assert!(is_cn_ip("2001:da8::1".parse().unwrap()), "教育网 CERNET2 必须命中 CN");
         assert!(is_cn_ip("2001:250::1".parse().unwrap()), "科技网 CSTNET 必须命中 CN");
 
-        // 6. IPv6 境外公共 IP 绝不命中
+        // 6. IPv6 境外公共 IP 与亚太非中国 IP 绝不命中 (防止 2400::/12 粗范围误伤)
         assert!(!is_cn_ip("2001:4860:4860::8888".parse().unwrap()), "Google DNS IPv6 绝不能误判为 CN");
         assert!(!is_cn_ip("2606:4700:4700::1111".parse().unwrap()), "Cloudflare DNS IPv6 绝不能误判为 CN");
+        assert!(!is_cn_ip("2400:8500::1".parse().unwrap()), "日本 NTT 2400:8500 绝不能误判为 CN");
+        assert!(!is_cn_ip("2400:2e00::1".parse().unwrap()), "韩国 2400:2e00 绝不能误判为 CN");
+        assert!(!is_cn_ip("2400:1f00::1".parse().unwrap()), "日本 IIJ 2400:1f00 绝不能误判为 CN");
+        assert!(!is_cn_ip("2400:cb00::1".parse().unwrap()), "台湾 2400:cb00 绝不能误判为 CN");
+        assert!(!is_cn_ip("2400:7800::1".parse().unwrap()), "印度 2400:7800 绝不能误判为 CN");
+        assert!(!is_cn_ip("2401:1800::1".parse().unwrap()), "印尼 2401:1800 绝不能误判为 CN");
+        assert!(!is_cn_ip("2402:4e00::1".parse().unwrap()), "新加坡 2402:4e00 绝不能误判为 CN");
+        assert!(!is_cn_ip("2407:4000::1".parse().unwrap()), "日本 2407:4000 绝不能误判为 CN");
     }
 
     #[test]
