@@ -274,12 +274,21 @@ async fn resolve_upstream_internal(domain: &str) -> Option<std::net::Ipv4Addr> {
                 if let Some(qlen) = qname_end {
                     if let Some(ip) = parse_a_answer(&buf[..v], qlen) {
                         let direct_v4 = std::net::Ipv4Addr::from(ip);
-                        insert_direct_cache(domain.to_string(), direct_v4);
-                        crate::direct::mark_direct_ip(std::net::IpAddr::V4(direct_v4));
-                        tracing::debug!(
-                            "[TUN-DNS] 上游直连解析成功: {} → {} (耗时: {}ms, 上游: {})",
-                            domain, direct_v4, start_time.elapsed().as_millis(), from
-                        );
+                        let ip_addr = std::net::IpAddr::V4(direct_v4);
+                        // 方案 D (双重置信校验): 仅当解析结果为中国大陆 IP 或私有 IP 时才标记为直连 IP
+                        if crate::direct::is_cn_ip(ip_addr) || crate::direct::is_private_ip(ip_addr) {
+                            insert_direct_cache(domain.to_string(), direct_v4);
+                            crate::direct::mark_direct_ip(ip_addr);
+                            tracing::debug!(
+                                "[TUN-DNS] 上游直连解析成功 (国内IP置信): {} → {} (耗时: {}ms, 上游: {})",
+                                domain, direct_v4, start_time.elapsed().as_millis(), from
+                            );
+                        } else {
+                            tracing::warn!(
+                                "[TUN-DNS] 方案D双校验拦截: 上游解析出非国内 IP ({})，不标记直连: {}",
+                                direct_v4, domain
+                            );
+                        }
                         return Some(direct_v4);
                     }
                 }
@@ -291,12 +300,20 @@ async fn resolve_upstream_internal(domain: &str) -> Option<std::net::Ipv4Addr> {
                     if let Some(qlen) = qname_end {
                         if let Some(ip) = parse_a_answer(&buf[..v2], qlen) {
                             let direct_v4 = std::net::Ipv4Addr::from(ip);
-                            insert_direct_cache(domain.to_string(), direct_v4);
-                            crate::direct::mark_direct_ip(std::net::IpAddr::V4(direct_v4));
-                            tracing::debug!(
-                                "[TUN-DNS] 上游直连解析成功 (备选包): {} → {} (耗时: {}ms, 上游: {})",
-                                domain, direct_v4, start_time.elapsed().as_millis(), from2
-                            );
+                            let ip_addr = std::net::IpAddr::V4(direct_v4);
+                            if crate::direct::is_cn_ip(ip_addr) || crate::direct::is_private_ip(ip_addr) {
+                                insert_direct_cache(domain.to_string(), direct_v4);
+                                crate::direct::mark_direct_ip(ip_addr);
+                                tracing::debug!(
+                                    "[TUN-DNS] 上游直连解析成功 (备选包, 国内IP置信): {} → {} (耗时: {}ms, 上游: {})",
+                                    domain, direct_v4, start_time.elapsed().as_millis(), from2
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "[TUN-DNS] 方案D双校验拦截: 上游解析出非国内 IP ({})，不标记直连: {}",
+                                    direct_v4, domain
+                                );
+                            }
                             return Some(direct_v4);
                         }
                     }
