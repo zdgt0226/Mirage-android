@@ -32,6 +32,8 @@ smoltcp = { version = "0.13", default-features = false, features = ["std", "medi
 # TUN 设备抽象: Android (mirage-jni) 与 iOS 共用; v1 直接用 fd (unix)
 
 [dev-dependencies]
+# tun_e2e example 的 ctrl_c 需 signal; 只在 example/test 编入, release .so (无 dev-deps) 仍精简
+tokio = { version = "1.52.3", features = ["signal"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 clap = { version = "4.6.1", features = ["derive"] }
 
