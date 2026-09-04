@@ -24,7 +24,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
 sha2 = "0.11.0"
 subtle = "2.6"
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "signal"] }
 tracing = "0.1.44"
 hex = "0.4.3"
 libc = "0.2.186"

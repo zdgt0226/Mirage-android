@@ -616,18 +616,31 @@ async fn relay_direct(
     };
     // protect: 直连 socket 也要绕过 TUN (否则 0.0.0.0/0→tun0 环路)
     crate::protect::protect(sock.as_raw_fd());
+    let is_strict_cn = direct_domain.as_ref().map(|d| crate::direct::is_cn_domain_strict(d)).unwrap_or(false);
+    let is_raw_cn_ip = direct_domain.is_none() && crate::direct::is_cn_ip(target_ip);
     let connect_start = std::time::Instant::now();
+
     let mut remote = match tokio::time::timeout(
-        std::time::Duration::from_secs(8),
+        std::time::Duration::from_millis(2500),
         sock.connect(addr),
     ).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
+            if is_raw_cn_ip || is_strict_cn {
+                crate::monitor::record_conn_close(cid, 0, 0, "Direct Connect Failed");
+                debug!("[TUN-TCP/direct] 直连国内目标 {addr} 失败: {e}");
+                return;
+            }
             crate::monitor::record_conn_close(cid, 0, 0, "Connect Failed (Fallback Proxy)");
             debug!("[TUN-TCP/direct] 直连 {addr} 失败: {e}，自动回退走隧道代理");
             return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule).await;
         }
         Err(_) => {
+            if is_raw_cn_ip || is_strict_cn {
+                crate::monitor::record_conn_close(cid, 0, 0, "Direct Connect Timeout");
+                debug!("[TUN-TCP/direct] 直连国内目标 {addr} 2.5s 超时");
+                return;
+            }
             crate::monitor::record_conn_close(cid, 0, 0, "Connect Timeout (Fallback Proxy)");
             debug!("[TUN-TCP/direct] 直连 {addr} 超时，自动回退走隧道代理");
             return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule).await;

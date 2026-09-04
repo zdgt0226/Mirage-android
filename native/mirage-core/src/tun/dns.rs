@@ -39,7 +39,7 @@ fn remote_dns_server() -> &'static StdMutex<std::net::IpAddr> {
 /// 遵循 Surge / Clash 标准: Fake-IP 响应采用 1s 极短 TTL
 /// 确保用户断开 VPN 后，系统及各 App 进程内 DNS 缓存在 1 秒内瞬间失效并回落到真实物理网络 DNS，彻底杜绝 Fake-IP 污染
 pub const DNS_RESPONSE_TTL: u32 = 1;
-const CACHE_TTL: Duration = Duration::from_secs(300);
+const CACHE_TTL: Duration = Duration::from_secs(1800);
 
 /// 设置国内直连 DNS
 pub fn set_direct_dns(ip: std::net::Ipv4Addr) {
@@ -71,7 +71,7 @@ pub fn clear_direct_cache() {
     tracing::info!("[TUN-DNS] 直连 DNS 缓存已清空");
 }
 
-const DIRECT_CACHE_MAX: usize = 1024;
+const DIRECT_CACHE_MAX: usize = 4096;
 
 /// 安全写入直连 DNS 缓存 (带容量上限与过期淘汰, 防 OOM)
 fn insert_direct_cache(domain: String, ip: std::net::Ipv4Addr) {
@@ -229,12 +229,12 @@ pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
 }
 
 async fn resolve_upstream_internal(domain: &str) -> Option<std::net::Ipv4Addr> {
-    // 限制同时进行的上游 DNS UDP Socket 并发总数不超过 128 个 (适度放宽以容纳冷启动并发潮)
-    static DNS_UPSTREAM_SEM: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(128);
+    // 限制同时进行的上游 DNS UDP Socket 并发总数不超过 256 个
+    static DNS_UPSTREAM_SEM: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(256);
     let _permit = match tokio::time::timeout(Duration::from_millis(1500), DNS_UPSTREAM_SEM.acquire()).await {
         Ok(Ok(p)) => p,
         _ => {
-            tracing::warn!("[TUN-DNS] 上游直连解析并发达到上限 (128 并发)，触发快速降级");
+            tracing::warn!("[TUN-DNS] 上游直连解析并发达到上限 (256 并发)，触发快速降级");
             return None;
         }
     };
@@ -251,85 +251,83 @@ async fn resolve_upstream_internal(domain: &str) -> Option<std::net::Ipv4Addr> {
     let id = fastrand::u16(..);
     let query = build_a_query(domain, id);
     let primary_dns = get_direct_dns();
-    let fallback_ip = if primary_dns != std::net::Ipv4Addr::new(223, 5, 5, 5) {
-        std::net::Ipv4Addr::new(223, 5, 5, 5)
-    } else {
-        std::net::Ipv4Addr::new(119, 29, 29, 29)
-    };
-
+    
+    // 4路极速竞速上游 (覆盖阿里、腾讯、火山引擎/字节、114，消除单节点抖动与网络丢包)
     let up1 = std::net::SocketAddr::from((primary_dns, 53));
-    let up2 = std::net::SocketAddr::from((fallback_ip, 53));
+    let up2 = std::net::SocketAddr::from((std::net::Ipv4Addr::new(119, 29, 29, 29), 53));
+    let up3 = std::net::SocketAddr::from((std::net::Ipv4Addr::new(180, 184, 1, 1), 53));
+    let up4 = std::net::SocketAddr::from((std::net::Ipv4Addr::new(114, 114, 114, 114), 53));
 
-    // 并发向主上游和备用上游发送请求 (竞速消除 DNS 解析抖动与卡顿)
-    let _ = sock.send_to(&query, up1).await;
-    let _ = sock.send_to(&query, up2).await;
+    let upstreams = [up1, up2, up3, up4];
+
+    // 第一轮极速并发广播
+    for up in &upstreams {
+        let _ = sock.send_to(&query, *up).await;
+    }
 
     let mut buf = [0u8; 1024];
     let start_time = std::time::Instant::now();
-    match tokio::time::timeout(Duration::from_millis(1200), sock.recv_from(&mut buf)).await {
-        Ok(Ok((v, from))) => {
-            // S2 安全加固: 严格校验回包来源与随机化 ID，杜绝局域网恶意注入欺骗
-            if (from == up1 || from == up2) && v >= 2 && u16::from_be_bytes([buf[0], buf[1]]) == id {
-                let qname_end = skip_dns_name(&buf[..v], 12).map(|end| end - 12);
-                if let Some(qlen) = qname_end {
-                    if let Some(ip) = parse_a_answer(&buf[..v], qlen) {
-                        let direct_v4 = std::net::Ipv4Addr::from(ip);
-                        let ip_addr = std::net::IpAddr::V4(direct_v4);
-                        // 方案 D (双重置信校验): 仅当解析结果为中国大陆 IP 或私有 IP 时才标记为直连 IP
-                        if crate::direct::is_cn_ip(ip_addr) || crate::direct::is_private_ip(ip_addr) {
-                            insert_direct_cache(domain.to_string(), direct_v4);
-                            crate::direct::mark_direct_ip(ip_addr);
-                            tracing::debug!(
-                                "[TUN-DNS] 上游直连解析成功 (国内IP置信): {} → {} (耗时: {}ms, 上游: {})",
-                                domain, direct_v4, start_time.elapsed().as_millis(), from
-                            );
-                        } else {
-                            tracing::warn!(
-                                "[TUN-DNS] 方案D双校验拦截: 上游解析出非国内 IP ({})，不标记直连: {}",
-                                direct_v4, domain
-                            );
-                        }
-                        return Some(direct_v4);
-                    }
-                }
+
+    // 采用带快速重传的抢答循环 (350ms 内未收到应答立即重传广播，总超时 1200ms)
+    for attempt in 0..2 {
+        let wait_dur = if attempt == 0 { Duration::from_millis(350) } else { Duration::from_millis(850) };
+        let deadline = tokio::time::Instant::now() + wait_dur;
+
+        while tokio::time::Instant::now() < deadline {
+            let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remain.is_zero() {
+                break;
             }
-            // 若第一个包 ID 不匹配或无 A 记录，尝试再读一个备选包
-            match tokio::time::timeout(Duration::from_millis(500), sock.recv_from(&mut buf)).await {
-                Ok(Ok((v2, from2))) if (from2 == up1 || from2 == up2) && v2 >= 2 && u16::from_be_bytes([buf[0], buf[1]]) == id => {
-                    let qname_end = skip_dns_name(&buf[..v2], 12).map(|end| end - 12);
-                    if let Some(qlen) = qname_end {
-                        if let Some(ip) = parse_a_answer(&buf[..v2], qlen) {
-                            let direct_v4 = std::net::Ipv4Addr::from(ip);
-                            let ip_addr = std::net::IpAddr::V4(direct_v4);
-                            if crate::direct::is_cn_ip(ip_addr) || crate::direct::is_private_ip(ip_addr) {
-                                insert_direct_cache(domain.to_string(), direct_v4);
-                                crate::direct::mark_direct_ip(ip_addr);
-                                tracing::debug!(
-                                    "[TUN-DNS] 上游直连解析成功 (备选包, 国内IP置信): {} → {} (耗时: {}ms, 上游: {})",
-                                    domain, direct_v4, start_time.elapsed().as_millis(), from2
-                                );
-                            } else {
-                                tracing::warn!(
-                                    "[TUN-DNS] 方案D双校验拦截: 上游解析出非国内 IP ({})，不标记直连: {}",
-                                    direct_v4, domain
-                                );
+            match tokio::time::timeout(remain, sock.recv_from(&mut buf)).await {
+                Ok(Ok((v, from))) => {
+                    if upstreams.contains(&from) && v >= 2 && u16::from_be_bytes([buf[0], buf[1]]) == id {
+                        let qname_end = skip_dns_name(&buf[..v], 12).map(|end| end - 12);
+                        if let Some(qlen) = qname_end {
+                            if let Some(ip) = parse_a_answer(&buf[..v], qlen) {
+                                let direct_v4 = std::net::Ipv4Addr::from(ip);
+                                let ip_addr = std::net::IpAddr::V4(direct_v4);
+                                let is_cn = crate::direct::is_cn_ip(ip_addr)
+                                    || crate::direct::is_private_ip(ip_addr)
+                                    || crate::direct::is_cn_domain_strict(domain)
+                                    || crate::direct::is_cn_domain(domain);
+
+                                if is_cn {
+                                    insert_direct_cache(domain.to_string(), direct_v4);
+                                    crate::direct::mark_direct_ip(ip_addr);
+                                    tracing::debug!(
+                                        "[TUN-DNS] 上游直连解析成功 (4路竞速抢答): {} → {} (耗时: {}ms, 胜出上游: {})",
+                                        domain, direct_v4, start_time.elapsed().as_millis(), from
+                                    );
+                                    return Some(direct_v4);
+                                } else {
+                                    tracing::warn!(
+                                        "[TUN-DNS] 方案D双校验拦截: 上游解析出非国内 IP ({})，不标记直连: {}",
+                                        direct_v4, domain
+                                    );
+                                    return Some(direct_v4);
+                                }
                             }
-                            return Some(direct_v4);
                         }
                     }
-                    None
                 }
-                _ => None,
+                Ok(Err(_)) => break,
+                Err(_) => break, // timeout for this slice
             }
         }
-        _ => {
-            tracing::warn!(
-                "[TUN-DNS] 上游直连解析超时 ({}ms): {} (主: {}, 备: {})",
-                start_time.elapsed().as_millis(), domain, primary_dns, fallback_ip
-            );
-            None
+
+        // 若首轮 350ms 未收到任何有效回包，触发快速重传
+        if attempt == 0 {
+            for up in &upstreams {
+                let _ = sock.send_to(&query, *up).await;
+            }
         }
     }
+
+    tracing::warn!(
+        "[TUN-DNS] 4路竞速直连解析超时 ({}ms): {}",
+        start_time.elapsed().as_millis(), domain
+    );
+    None
 }
 
 /// 构造应答: A → 给定 IP; AAAA/其他 → 空 answer (NOERROR); rcode=3 → SERVFAIL

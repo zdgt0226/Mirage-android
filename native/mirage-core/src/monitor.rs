@@ -467,7 +467,8 @@ pub fn get_connections_json() -> String {
 pub fn get_recent_requests_json() -> String {
     let q_lock = RECENT_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(q) = q_lock.as_ref() {
-        let list: Vec<&RecentRequestRecord> = q.iter().collect();
+        // 限制 Binder IPC 单次传输不超过 60 条最新记录，严格控制包体在 35KB 以内，杜绝 Android 16 大事务警告与 UI 阻塞
+        let list: Vec<&RecentRequestRecord> = q.iter().take(60).collect();
         serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
     } else {
         "[]".to_string()
