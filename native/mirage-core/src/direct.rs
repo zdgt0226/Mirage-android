@@ -949,8 +949,63 @@ pub fn resolve_direct_domain(domain: &str) -> Option<IpAddr> {
         .and_then(|mut iter| iter.next().map(|s| s.ip()))
 }
 
+/// 判定指定域名是否允许向国内上游公共 DNS 发起真实解析
+/// (彻底防御 DNS 泄露: 排除一切 Default 兜底、排除已知境外服务、仅放行显式直连/CN 列表/国别 TLD)
+pub fn should_resolve_upstream(domain: &str) -> bool {
+    let d_lower = domain.trim_end_matches('.').to_ascii_lowercase();
+    if is_known_non_cn_domain(&d_lower) {
+        return false;
+    }
+    if is_lan_or_router_domain(&d_lower) {
+        return false; // LAN 域名走默认网关 IP，禁止向公网查询
+    }
+    if get_outbound_mode() == 2 {
+        return true; // 全局直连模式
+    }
+    if d_lower.ends_with(".cn") || d_lower.ends_with(".xn--fiqs8s") {
+        return true; // 中国顶级国别域名
+    }
+    if is_cn_domain(&d_lower) {
+        return true; // 国内白名单服务 (GeoSite CN)
+    }
+    if let Some(true) = crate::tun::dns::is_dynamic_direct_domain(&d_lower) {
+        return true; // 已学习确认的国内域名
+    }
+    // 检查是否有自定义直连规则显式命中该域名 (仅限 Action == Direct 且能由域名匹配)
+    let r = router_store().read().unwrap_or_else(|e| e.into_inner());
+    for rule in &r.rules {
+        if rule.action == RuleAction::Direct && rule.matches(Some(&d_lower), None, None, None) {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) struct TestStateGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for TestStateGuard {
+    fn drop(&mut self) {
+        set_outbound_mode(0);
+        let _ = set_custom_rules(r#"{"rules":[],"default_action":"proxy"}"#);
+        crate::tun::dns::clear_direct_cache();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn acquire_test_guard() -> TestStateGuard {
+    let lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    set_outbound_mode(0);
+    let _ = set_custom_rules(r#"{"rules":[],"default_action":"proxy"}"#);
+    crate::tun::dns::clear_direct_cache();
+    TestStateGuard { _lock: lock }
+}
 
 #[cfg(test)]
 mod tests {
@@ -958,7 +1013,7 @@ mod tests {
 
     #[test]
     fn test_composite_rule_and_or() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = acquire_test_guard();
         let json = r#"{
             "rules": [
                 {
@@ -1006,7 +1061,7 @@ mod tests {
 
     #[test]
     fn test_cold_boot_domestic_fallback() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = acquire_test_guard();
         // 清空所有用户自定义规则，设默认动作为 proxy
         assert!(set_custom_rules(r#"{"rules":[], "default_action":"proxy"}"#));
 
@@ -1025,7 +1080,7 @@ mod tests {
 
     #[test]
     fn test_fake_ip_routing_safety() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = acquire_test_guard();
         let json = r#"{
             "rules": [
                 {
@@ -1165,7 +1220,7 @@ mod tests {
 
     #[test]
     fn test_private_ip_and_lan_router_domain() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = acquire_test_guard();
         // 清空所有规则，默认动作为 proxy
         set_custom_rules(r#"{"rules":[],"default_action":"proxy"}"#);
 
@@ -1237,7 +1292,7 @@ mod tests {
 
     #[test]
     fn test_outbound_modes_switching_matrix() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = acquire_test_guard();
         // 初始化干净路由表 (默认 proxy 动作)
         set_custom_rules(r#"{"rules":[],"default_action":"proxy"}"#);
 
@@ -1321,7 +1376,7 @@ mod tests {
 
     #[test]
     fn test_known_non_cn_domains_never_routed_to_direct_by_cn_rule() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = acquire_test_guard();
         set_custom_rules(r#"{"rules":[],"default_action":"proxy"}"#);
         set_outbound_mode(0);
 
@@ -1366,7 +1421,7 @@ mod tests {
 
     #[test]
     fn test_dual_verification_routing_scheme_d() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = acquire_test_guard();
         // 设置规则: geosite:cn -> direct, 默认 proxy
         set_custom_rules(r#"{
             "rules": [
@@ -1403,7 +1458,7 @@ mod tests {
 
     #[test]
     fn test_dynamic_domain_learning_and_zero_ip_poisoning() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = acquire_test_guard();
         crate::tun::dns::clear_direct_cache();
         set_custom_rules(r#"{"rules": [], "default_action": "proxy"}"#);
         set_outbound_mode(0);

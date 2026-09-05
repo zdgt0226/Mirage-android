@@ -562,13 +562,21 @@ async fn relay_direct(
             let dns_start = std::time::Instant::now();
             if let Some(real_ip) = crate::tun::dns::direct_dns_lookup(dom) {
                 (real_ip, dns_start.elapsed().as_millis() as u32)
-            } else if let Some(real_v4) = crate::tun::dns::resolve_upstream(dom).await {
-                (std::net::IpAddr::V4(real_v4), dns_start.elapsed().as_millis() as u32)
+            } else if crate::direct::should_resolve_upstream(dom) {
+                if let Some(real_v4) = crate::tun::dns::resolve_upstream(dom).await {
+                    (std::net::IpAddr::V4(real_v4), dns_start.elapsed().as_millis() as u32)
+                } else if let Some(router_ip) = crate::direct::default_router_ip_for_domain(dom) {
+                    debug!("[TUN-TCP/direct] 局域网管理域名 [{}] 使用默认网关 IP: {}", dom, router_ip);
+                    (router_ip, 0)
+                } else {
+                    debug!("[TUN-TCP/direct] 直连域名 [{}] 真实解析超时，自动平滑回退走隧道代理", dom);
+                    return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule).await;
+                }
             } else if let Some(router_ip) = crate::direct::default_router_ip_for_domain(dom) {
                 debug!("[TUN-TCP/direct] 局域网管理域名 [{}] 使用默认网关 IP: {}", dom, router_ip);
                 (router_ip, 0)
             } else {
-                debug!("[TUN-TCP/direct] 直连域名 [{}] 真实解析超时，自动平滑回退走隧道代理", dom);
+                debug!("[TUN-TCP/direct] 域名 [{}] 命中兜底直连但非可信国内域名，防泄露即时转走隧道代理", dom);
                 return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule).await;
             }
         } else {

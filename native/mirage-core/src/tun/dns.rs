@@ -482,15 +482,8 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, serv
         crate::monitor::record_conn_close(cid, query.len() as u64, 64, "Resolved (Fake-IP)");
 
         // 异步预解析门控 (严防 DNS 泄露与 GFW 投毒):
-        // 1. 明确命中自定义直连规则、静态国内域名列表、全局直连模式、或 .cn / .中国 等中国顶级国别域名才触发国内上游 DNS 预解析
-        // 2. 排除 Default 兜底动作 (如 default_action: direct)，严禁对未知境外长尾域名广播国内 UDP 53，杜绝明文 DNS 泄露与 GFW 投毒攻击！
-        let d_lower = domain.trim_end_matches('.').to_ascii_lowercase();
-        let is_cn_tld = d_lower.ends_with(".cn") || d_lower.ends_with(".xn--fiqs8s");
-        let is_explicit_direct = decision == direct::RuleAction::Direct && !matched_rule.starts_with("Default ");
-        let should_resolve = (is_explicit_direct || is_cn_tld)
-            && !direct::is_known_non_cn_domain(&d_lower);
-
-        if should_resolve {
+        // 统一使用 direct::should_resolve_upstream 判定，严禁对未明确直连的境外长尾域名广播国内 UDP 53
+        if crate::direct::should_resolve_upstream(&domain) {
             let d = domain.clone();
             tokio::spawn(async move {
                 let _ = resolve_upstream(&d).await;
@@ -606,8 +599,7 @@ mod tests {
 
     #[test]
     fn direct_cache_clear_works() {
-        let _guard = crate::direct::TEST_LOCK.lock().unwrap();
-        crate::direct::set_outbound_mode(0);
+        let _guard = crate::direct::acquire_test_guard();
         clear_direct_cache();
         {
             let mut map = direct_cache().lock().unwrap_or_else(|e| e.into_inner());
@@ -622,9 +614,7 @@ mod tests {
 
     #[test]
     fn test_direct_cache_positive_and_negative_and_normalization() {
-        let _guard = crate::direct::TEST_LOCK.lock().unwrap();
-        crate::direct::set_outbound_mode(0);
-        crate::direct::set_custom_rules(r#"{"rules": [], "default_action": "proxy"}"#);
+        let _guard = crate::direct::acquire_test_guard();
         clear_direct_cache();
 
         // 1. 正向直连缓存 (国内 IP)
@@ -667,9 +657,8 @@ mod tests {
 
     #[test]
     fn test_dns_learning_gate_excludes_default_direct() {
-        let _guard = crate::direct::TEST_LOCK.lock().unwrap();
-        crate::direct::set_outbound_mode(0);
-        crate::direct::set_custom_rules(r#"{"rules": [], "default_action": "direct"}"#);
+        let _guard = crate::direct::acquire_test_guard();
+        let _ = crate::direct::set_custom_rules(r#"{"rules": [], "default_action": "direct"}"#);
 
         // 1. 未命中规则的未知境外域名 (如 obscure.example.org)
         let domain = "obscure.example.org";
@@ -677,14 +666,16 @@ mod tests {
         assert_eq!(decision, crate::direct::RuleAction::Direct);
         assert_eq!(matched_rule, "Default Direct");
 
-        // 验证门控判断: 虽然 decision == Direct，但因 matched_rule 为 Default，不应触发预解析
-        let d_lower = domain.trim_end_matches('.').to_ascii_lowercase();
-        let is_cn_tld = d_lower.ends_with(".cn") || d_lower.ends_with(".xn--fiqs8s");
-        let is_explicit_direct = decision == crate::direct::RuleAction::Direct && !matched_rule.starts_with("Default ");
-        let should_resolve = (is_explicit_direct || is_cn_tld) && !crate::direct::is_known_non_cn_domain(&d_lower);
-        assert!(!should_resolve, "default_action 为 direct 时的兜底域名绝不能向国内 UDP 53 广播泄漏！");
+        // 验证生产门控函数: 即使 default_action 为 direct，未显式匹配直连的境外域名绝不向国内 UDP 53 解析！
+        assert!(!crate::direct::should_resolve_upstream(domain), "default_action 为 direct 时的兜底域名绝不能向国内 UDP 53 广播泄漏！");
 
-        // 恢复默认配置
-        crate::direct::set_custom_rules(r#"{"rules": [], "default_action": "proxy"}"#);
+        // 2. 验证显式国内域名与国别 TLD 能够正确放行预解析
+        assert!(crate::direct::should_resolve_upstream("bilibili.com"));
+        assert!(crate::direct::should_resolve_upstream("test.cn"));
+        assert!(crate::direct::should_resolve_upstream("TEST.CN."));
+
+        // 3. 验证已知境外主流域名绝不触发解析
+        assert!(!crate::direct::should_resolve_upstream("google.com"));
+        assert!(!crate::direct::should_resolve_upstream("twitter.com"));
     }
 }

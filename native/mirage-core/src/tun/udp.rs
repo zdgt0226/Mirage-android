@@ -809,10 +809,15 @@ async fn udp_flow_direct(
         if let Some(ref dom) = reverse_domain {
             if let Some(real_ip) = crate::tun::dns::direct_dns_lookup(dom) {
                 real_ip
-            } else if let Some(real_v4) = crate::tun::dns::resolve_upstream(dom).await {
-                std::net::IpAddr::V4(real_v4)
+            } else if crate::direct::should_resolve_upstream(dom) {
+                if let Some(real_v4) = crate::tun::dns::resolve_upstream(dom).await {
+                    std::net::IpAddr::V4(real_v4)
+                } else {
+                    debug!("[TUN-UDP/direct] 直连 UDP 域名 [{}] 解析失败，放弃", dom);
+                    return;
+                }
             } else {
-                debug!("[TUN-UDP/direct] 直连 UDP 域名 [{}] 解析失败，放弃", dom);
+                debug!("[TUN-UDP/direct] UDP 域名 [{}] 命中兜底直连但非可信国内域名，防泄露跳过国内解析", dom);
                 return;
             }
         } else {
