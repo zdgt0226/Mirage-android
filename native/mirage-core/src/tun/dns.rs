@@ -303,7 +303,7 @@ async fn resolve_upstream_internal(domain: &str) -> Option<std::net::Ipv4Addr> {
                                 // 防投毒与防重绑定守卫: 公网递归 DNS 应答若为私有/保留/Bogon 地址 (如 240.0.0.0/4, 0.0.0.0, 127.0.0.0/8)，
                                 // 必定为 GFW 注入或广告拦截，绝不可作为直连证据！仅合法的国内公网 IP (is_cn_ip) 才能判定为直连。
                                 let is_bogon_or_private = crate::direct::is_private_ip(ip_addr);
-                                let is_cn = !is_bogon_or_private && crate::direct::is_cn_ip(ip_addr);
+                                let is_cn = crate::direct::is_trustworthy_cn_answer(ip_addr);
 
                                 insert_direct_cache(domain.to_string(), direct_v4, is_cn);
                                 if is_cn {
@@ -482,13 +482,13 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, serv
         crate::monitor::record_conn_close(cid, query.len() as u64, 64, "Resolved (Fake-IP)");
 
         // 异步预解析门控 (严防 DNS 泄露与 GFW 投毒):
-        // 1. 明确命中直连规则、静态国内域名列表、或 .cn / .中国 等中国顶级国别域名才触发国内上游 DNS 预解析
-        // 2. 严禁对未知境外长尾域名 (如 .com/.org/.net) 广播国内 UDP 53，杜绝明文 DNS 泄露与 GFW 投毒攻击！
-        let is_cn_tld = domain.ends_with(".cn") || domain.ends_with(".xn--fiqs8s");
-        let should_resolve = (decision == direct::RuleAction::Direct
-            || direct::should_direct(Some(&domain), None)
-            || is_cn_tld)
-            && !direct::is_known_non_cn_domain(&domain);
+        // 1. 明确命中自定义直连规则、静态国内域名列表、全局直连模式、或 .cn / .中国 等中国顶级国别域名才触发国内上游 DNS 预解析
+        // 2. 排除 Default 兜底动作 (如 default_action: direct)，严禁对未知境外长尾域名广播国内 UDP 53，杜绝明文 DNS 泄露与 GFW 投毒攻击！
+        let d_lower = domain.trim_end_matches('.').to_ascii_lowercase();
+        let is_cn_tld = d_lower.ends_with(".cn") || d_lower.ends_with(".xn--fiqs8s");
+        let is_explicit_direct = decision == direct::RuleAction::Direct && !matched_rule.starts_with("Default ");
+        let should_resolve = (is_explicit_direct || is_cn_tld)
+            && !direct::is_known_non_cn_domain(&d_lower);
 
         if should_resolve {
             let d = domain.clone();
@@ -606,6 +606,9 @@ mod tests {
 
     #[test]
     fn direct_cache_clear_works() {
+        let _guard = crate::direct::TEST_LOCK.lock().unwrap();
+        crate::direct::set_outbound_mode(0);
+        clear_direct_cache();
         {
             let mut map = direct_cache().lock().unwrap_or_else(|e| e.into_inner());
             map.insert("baidu.com".to_string(), (std::net::Ipv4Addr::new(220, 181, 38, 148), true, Instant::now()));
@@ -619,7 +622,11 @@ mod tests {
 
     #[test]
     fn test_direct_cache_positive_and_negative_and_normalization() {
+        let _guard = crate::direct::TEST_LOCK.lock().unwrap();
+        crate::direct::set_outbound_mode(0);
+        crate::direct::set_custom_rules(r#"{"rules": [], "default_action": "proxy"}"#);
         clear_direct_cache();
+
         // 1. 正向直连缓存 (国内 IP)
         let cn_ip = std::net::Ipv4Addr::new(220, 181, 38, 148);
         insert_direct_cache("Api.Bilibili.Com.".to_string(), cn_ip, true);
@@ -637,18 +644,47 @@ mod tests {
         assert_eq!(direct_dns_lookup("foreign.example.org"), Some(std::net::IpAddr::V4(foreign_ip)));
         assert_eq!(is_dynamic_direct_domain("foreign.example.org"), Some(false));
 
-        // 3. 验证路由决策：正向命中 Direct，负向短路返回 Proxy
+        // 3. 验证路由决策：正向命中 Direct，负向不短路回退至 Default Proxy
         let (act_cn, _) = crate::direct::route_decision_detailed(Some("api.bilibili.com"), None, Some(443), Some("tcp"));
         assert_eq!(act_cn, crate::direct::RuleAction::Direct);
 
         let (act_neg, rule_neg) = crate::direct::route_decision_detailed(Some("foreign.example.org"), None, Some(443), Some("tcp"));
         assert_eq!(act_neg, crate::direct::RuleAction::Proxy);
-        assert_eq!(rule_neg, "Non-CN Domain (Learned Negative)");
+        assert_eq!(rule_neg, "Default Proxy");
 
-        // 4. 防投毒验证: GFW 注入 bogon IP (243.185.187.39) 绝不能被认定为 is_cn
+        // 验证强证据优先: 若域名负向缓存，但实际目标 IP 为国内合法 IP (is_cn_ip)，强证据推翻负缓存，放行直连
+        let real_cn_target = std::net::IpAddr::V4(std::net::Ipv4Addr::new(223, 5, 5, 5));
+        let (act_override, rule_override) = crate::direct::route_decision_detailed(Some("foreign.example.org"), Some(real_cn_target), Some(443), Some("tcp"));
+        assert_eq!(act_override, crate::direct::RuleAction::Direct);
+        assert_eq!(rule_override, "CN IP (Direct)");
+
+        // 4. 防投毒验证: GFW 注入 bogon IP (243.185.187.39) 必须被 is_trustworthy_cn_answer 严格拒绝
         let bogon_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(243, 185, 187, 39));
-        let is_bogon_or_private = crate::direct::is_private_ip(bogon_ip);
-        let is_cn = !is_bogon_or_private && crate::direct::is_cn_ip(bogon_ip);
-        assert!(!is_cn, "GFW 注入 Bogon IP 绝不可作为国内直连证据！");
+        assert!(!crate::direct::is_trustworthy_cn_answer(bogon_ip), "GFW 注入 Bogon IP 绝不可作为国内直连证据！");
+
+        clear_direct_cache();
+    }
+
+    #[test]
+    fn test_dns_learning_gate_excludes_default_direct() {
+        let _guard = crate::direct::TEST_LOCK.lock().unwrap();
+        crate::direct::set_outbound_mode(0);
+        crate::direct::set_custom_rules(r#"{"rules": [], "default_action": "direct"}"#);
+
+        // 1. 未命中规则的未知境外域名 (如 obscure.example.org)
+        let domain = "obscure.example.org";
+        let (decision, matched_rule) = crate::direct::route_decision_detailed(Some(domain), None, Some(53), Some("udp"));
+        assert_eq!(decision, crate::direct::RuleAction::Direct);
+        assert_eq!(matched_rule, "Default Direct");
+
+        // 验证门控判断: 虽然 decision == Direct，但因 matched_rule 为 Default，不应触发预解析
+        let d_lower = domain.trim_end_matches('.').to_ascii_lowercase();
+        let is_cn_tld = d_lower.ends_with(".cn") || d_lower.ends_with(".xn--fiqs8s");
+        let is_explicit_direct = decision == crate::direct::RuleAction::Direct && !matched_rule.starts_with("Default ");
+        let should_resolve = (is_explicit_direct || is_cn_tld) && !crate::direct::is_known_non_cn_domain(&d_lower);
+        assert!(!should_resolve, "default_action 为 direct 时的兜底域名绝不能向国内 UDP 53 广播泄漏！");
+
+        // 恢复默认配置
+        crate::direct::set_custom_rules(r#"{"rules": [], "default_action": "proxy"}"#);
     }
 }

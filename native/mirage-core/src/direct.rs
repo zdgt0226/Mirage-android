@@ -443,6 +443,12 @@ pub fn is_cn_ip(ip: IpAddr) -> bool {
     false
 }
 
+/// 校验上游 DNS 应答 IP 是否为可信的中国大陆公网 IP
+/// (严格拒绝私有 IP、保留地址与 240.0.0.0/4 Bogon 投毒 IP)
+pub fn is_trustworthy_cn_answer(ip: IpAddr) -> bool {
+    !is_private_ip(ip) && is_cn_ip(ip)
+}
+
 /// 已知典型境外主流服务根域名 (防止 GeoSite:CN 上游数据库污染误将 Google/YouTube/Telegram/X 等判定为国内直连)
 pub fn is_known_non_cn_domain(domain: &str) -> bool {
     let d = domain.trim_end_matches('.').to_ascii_lowercase();
@@ -647,14 +653,10 @@ pub fn route_decision_detailed(
         if is_cn_domain(dom) {
             return (RuleAction::Direct, "CN Domain (Direct)".to_string());
         }
-        match crate::tun::dns::is_dynamic_direct_domain(dom) {
-            Some(true) => return (RuleAction::Direct, "Dynamic CN Domain (Learned)".to_string()),
-            Some(false) => {
-                // 负向缓存生效: 该域名已明确被学习判定为非国内服务，短路跳过后续裸 IP / GeoIP 探测，直接回退 Default
-                return (r.default_action, "Non-CN Domain (Learned Negative)".to_string());
-            }
-            None => {}
+        if let Some(true) = crate::tun::dns::is_dynamic_direct_domain(dom) {
+            return (RuleAction::Direct, "Dynamic CN Domain (Learned)".to_string());
         }
+        // 注意: 若动态学习为 Some(false) 或 None，不在此短路阻断，平滑落入第 4 步 CN IP 强证据判定
     }
 
     // 4. 国内裸 IP 智能直连兜底 (GeoIP / CIDR 二分查找)
@@ -948,9 +950,11 @@ pub fn resolve_direct_domain(domain: &str) -> Option<IpAddr> {
 }
 
 #[cfg(test)]
+pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_composite_rule_and_or() {
@@ -1427,9 +1431,15 @@ mod tests {
 
         let (act_foreign, reason_foreign) = route_decision_detailed(Some(unlisted_foreign_dom), None, Some(443), Some("tcp"));
         assert_eq!(act_foreign, RuleAction::Proxy);
-        assert_eq!(reason_foreign, "Non-CN Domain (Learned Negative)");
+        assert_eq!(reason_foreign, "Default Proxy");
 
-        // 4. 裸境外 Anycast IP (如 104.16.1.1 Cloudflare): 绝不直连，走 Proxy (零 IP 毒化)
+        // 4. 验证强证据优先: 即使域名动态学习为负向 (Some(false))，若实际目标 IP 是中国大陆公网 IP (强证据)，依然放行直连
+        let real_cn_target = std::net::IpAddr::V4(std::net::Ipv4Addr::new(223, 5, 5, 5));
+        let (act_override, reason_override) = route_decision_detailed(Some(unlisted_foreign_dom), Some(real_cn_target), Some(443), Some("tcp"));
+        assert_eq!(act_override, RuleAction::Direct);
+        assert_eq!(reason_override, "CN IP (Direct)");
+
+        // 5. 裸境外 Anycast IP (如 104.16.1.1 Cloudflare): 绝不直连，走 Proxy (零 IP 毒化)
         let cf_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(104, 16, 1, 1));
         let (act_ip, _) = route_decision_detailed(None, Some(cf_ip), Some(443), Some("tcp"));
         assert_eq!(act_ip, RuleAction::Proxy, "境外 Anycast IP 绝不被误判为直连");
