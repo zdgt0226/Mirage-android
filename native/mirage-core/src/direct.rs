@@ -647,8 +647,13 @@ pub fn route_decision_detailed(
         if is_cn_domain(dom) {
             return (RuleAction::Direct, "CN Domain (Direct)".to_string());
         }
-        if let Some(true) = crate::tun::dns::is_dynamic_direct_domain(dom) {
-            return (RuleAction::Direct, "Dynamic CN Domain (Learned)".to_string());
+        match crate::tun::dns::is_dynamic_direct_domain(dom) {
+            Some(true) => return (RuleAction::Direct, "Dynamic CN Domain (Learned)".to_string()),
+            Some(false) => {
+                // 负向缓存生效: 该域名已明确被学习判定为非国内服务，短路跳过后续裸 IP / GeoIP 探测，直接回退 Default
+                return (r.default_action, "Non-CN Domain (Learned Negative)".to_string());
+            }
+            None => {}
         }
     }
 
@@ -1402,27 +1407,29 @@ mod tests {
         let unlisted_cn_dom = "dynamic-cdn-test-999.xyz";
         let unlisted_foreign_dom = "obscure-foreign-site-888.org";
 
-        // 初始状态: 未知域名默认走 Proxy
+        // 1. 初始状态: 未在缓存中的未知域名默认走 Proxy
         let (act_before, _) = route_decision_detailed(Some(unlisted_cn_dom), None, Some(443), Some("tcp"));
         assert_eq!(act_before, RuleAction::Proxy);
 
-        // 模拟 DNS 异步学习: 域名 1 解析出国内 IP (220.181.38.148)，标记为 is_direct = true
+        // 2. 模拟 DNS 异步自学习成功: 写入国内真实 IP 并标记为 is_direct = true
         let cn_ip = std::net::Ipv4Addr::new(220, 181, 38, 148);
         assert!(is_cn_ip(std::net::IpAddr::V4(cn_ip)));
-        let is_cn = is_cn_ip(std::net::IpAddr::V4(cn_ip)) || is_private_ip(std::net::IpAddr::V4(cn_ip));
-        assert!(is_cn);
+        crate::tun::dns::insert_direct_cache(unlisted_cn_dom.to_string(), cn_ip, true);
 
-        // 直接写入 direct_cache 模拟 DNS 异步写入
-        crate::tun::dns::clear_direct_cache();
-        // 验证 is_dynamic_direct_domain 查询
-        // 使用 resolve_upstream 逻辑相同的缓存状态
-        // 写入测试:
-        {
-            // 通过 direct_cache 测试
-            assert_eq!(crate::tun::dns::is_dynamic_direct_domain(unlisted_cn_dom), None);
-        }
+        // 学习生效: 再次裁决，立即升格为 Direct
+        let (act_after, reason) = route_decision_detailed(Some(unlisted_cn_dom), None, Some(443), Some("tcp"));
+        assert_eq!(act_after, RuleAction::Direct);
+        assert_eq!(reason, "Dynamic CN Domain (Learned)");
 
-        // 裸境外 Anycast IP (如 104.16.1.1 Cloudflare): 无论如何不直连，走 Proxy (无 IP 毒化)
+        // 3. 模拟负向自学习 (境外长尾域名或 GFW 投毒地址): 标记为 is_direct = false
+        let foreign_ip = std::net::Ipv4Addr::new(8, 8, 8, 8);
+        crate::tun::dns::insert_direct_cache(unlisted_foreign_dom.to_string(), foreign_ip, false);
+
+        let (act_foreign, reason_foreign) = route_decision_detailed(Some(unlisted_foreign_dom), None, Some(443), Some("tcp"));
+        assert_eq!(act_foreign, RuleAction::Proxy);
+        assert_eq!(reason_foreign, "Non-CN Domain (Learned Negative)");
+
+        // 4. 裸境外 Anycast IP (如 104.16.1.1 Cloudflare): 绝不直连，走 Proxy (零 IP 毒化)
         let cf_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(104, 16, 1, 1));
         let (act_ip, _) = route_decision_detailed(None, Some(cf_ip), Some(443), Some("tcp"));
         assert_eq!(act_ip, RuleAction::Proxy, "境外 Anycast IP 绝不被误判为直连");

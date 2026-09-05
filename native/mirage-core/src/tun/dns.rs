@@ -74,7 +74,8 @@ pub fn clear_direct_cache() {
 const DIRECT_CACHE_MAX: usize = 4096;
 
 /// 安全写入直连 DNS 缓存 (带容量上限与过期淘汰, 防 OOM)
-fn insert_direct_cache(domain: String, ip: std::net::Ipv4Addr, is_direct: bool) {
+pub(crate) fn insert_direct_cache(domain: String, ip: std::net::Ipv4Addr, is_direct: bool) {
+    let domain_clean = domain.trim_end_matches('.').to_ascii_lowercase();
     let mut map = direct_cache().lock().unwrap_or_else(|e| e.into_inner());
     if map.len() >= DIRECT_CACHE_MAX {
         let now = Instant::now();
@@ -85,13 +86,14 @@ fn insert_direct_cache(domain: String, ip: std::net::Ipv4Addr, is_direct: bool) 
             }
         }
     }
-    map.insert(domain, (ip, is_direct, Instant::now()));
+    map.insert(domain_clean, (ip, is_direct, Instant::now()));
 }
 
 /// 读直连 DNS 缓存 (同步, 兜底用)。
 pub fn direct_dns_lookup(domain: &str) -> Option<std::net::IpAddr> {
+    let domain_clean = domain.trim_end_matches('.').to_ascii_lowercase();
     let map = direct_cache().lock().unwrap_or_else(|e| e.into_inner());
-    let (ip, _, at) = map.get(domain)?;
+    let (ip, _, at) = map.get(&domain_clean)?;
     if at.elapsed() < CACHE_TTL {
         Some(std::net::IpAddr::V4(*ip))
     } else {
@@ -298,14 +300,21 @@ async fn resolve_upstream_internal(domain: &str) -> Option<std::net::Ipv4Addr> {
                             if let Some(ip) = parse_a_answer(&buf[..v], qlen) {
                                 let direct_v4 = std::net::Ipv4Addr::from(ip);
                                 let ip_addr = std::net::IpAddr::V4(direct_v4);
-                                let is_cn = crate::direct::is_cn_ip(ip_addr)
-                                    || crate::direct::is_private_ip(ip_addr);
+                                // 防投毒与防重绑定守卫: 公网递归 DNS 应答若为私有/保留/Bogon 地址 (如 240.0.0.0/4, 0.0.0.0, 127.0.0.0/8)，
+                                // 必定为 GFW 注入或广告拦截，绝不可作为直连证据！仅合法的国内公网 IP (is_cn_ip) 才能判定为直连。
+                                let is_bogon_or_private = crate::direct::is_private_ip(ip_addr);
+                                let is_cn = !is_bogon_or_private && crate::direct::is_cn_ip(ip_addr);
 
                                 insert_direct_cache(domain.to_string(), direct_v4, is_cn);
                                 if is_cn {
                                     tracing::debug!(
                                         "[TUN-DNS] 上游直连解析成功 (4路竞速抢答): {} → {} (耗时: {}ms, 胜出上游: {})",
                                         domain, direct_v4, start_time.elapsed().as_millis(), from
+                                    );
+                                } else if is_bogon_or_private {
+                                    tracing::warn!(
+                                        "[TUN-DNS] 上游解析出私有/保留/Bogon IP ({})，疑似污染拦截，标记为非直连: {}",
+                                        direct_v4, domain
                                     );
                                 } else {
                                     tracing::debug!(
@@ -472,11 +481,16 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, serv
         send_dns_reply(&stack, client, server, query, &domain, qtype, a, question_len);
         crate::monitor::record_conn_close(cid, query.len() as u64, 64, "Resolved (Fake-IP)");
 
-        // 异步预解析与自适应学习:
-        // 1. 直连域名立即预拉取 Real-IP 存入缓存，消除首包延迟与排队
-        // 2. 对非已知境外域名在后台异步拉取真实 IP，自适应探测是否属于国内服务
-        let is_known_foreign = direct::is_known_non_cn_domain(&domain);
-        if !is_known_foreign {
+        // 异步预解析门控 (严防 DNS 泄露与 GFW 投毒):
+        // 1. 明确命中直连规则、静态国内域名列表、或 .cn / .中国 等中国顶级国别域名才触发国内上游 DNS 预解析
+        // 2. 严禁对未知境外长尾域名 (如 .com/.org/.net) 广播国内 UDP 53，杜绝明文 DNS 泄露与 GFW 投毒攻击！
+        let is_cn_tld = domain.ends_with(".cn") || domain.ends_with(".xn--fiqs8s");
+        let should_resolve = (decision == direct::RuleAction::Direct
+            || direct::should_direct(Some(&domain), None)
+            || is_cn_tld)
+            && !direct::is_known_non_cn_domain(&domain);
+
+        if should_resolve {
             let d = domain.clone();
             tokio::spawn(async move {
                 let _ = resolve_upstream(&d).await;
@@ -601,5 +615,40 @@ mod tests {
         clear_direct_cache();
         assert!(direct_dns_lookup("baidu.com").is_none());
         assert_eq!(is_dynamic_direct_domain("baidu.com"), None);
+    }
+
+    #[test]
+    fn test_direct_cache_positive_and_negative_and_normalization() {
+        clear_direct_cache();
+        // 1. 正向直连缓存 (国内 IP)
+        let cn_ip = std::net::Ipv4Addr::new(220, 181, 38, 148);
+        insert_direct_cache("Api.Bilibili.Com.".to_string(), cn_ip, true);
+
+        // 验证大小写与尾点完全归一化
+        assert_eq!(direct_dns_lookup("api.bilibili.com"), Some(std::net::IpAddr::V4(cn_ip)));
+        assert_eq!(direct_dns_lookup("API.BILIBILI.COM."), Some(std::net::IpAddr::V4(cn_ip)));
+        assert_eq!(is_dynamic_direct_domain("api.bilibili.com"), Some(true));
+        assert_eq!(is_dynamic_direct_domain("API.BILIBILI.COM."), Some(true));
+
+        // 2. 负向缓存 (非国内 IP 或 GFW 投毒 IP)
+        let foreign_ip = std::net::Ipv4Addr::new(8, 8, 8, 8);
+        insert_direct_cache("Foreign.Example.Org".to_string(), foreign_ip, false);
+
+        assert_eq!(direct_dns_lookup("foreign.example.org"), Some(std::net::IpAddr::V4(foreign_ip)));
+        assert_eq!(is_dynamic_direct_domain("foreign.example.org"), Some(false));
+
+        // 3. 验证路由决策：正向命中 Direct，负向短路返回 Proxy
+        let (act_cn, _) = crate::direct::route_decision_detailed(Some("api.bilibili.com"), None, Some(443), Some("tcp"));
+        assert_eq!(act_cn, crate::direct::RuleAction::Direct);
+
+        let (act_neg, rule_neg) = crate::direct::route_decision_detailed(Some("foreign.example.org"), None, Some(443), Some("tcp"));
+        assert_eq!(act_neg, crate::direct::RuleAction::Proxy);
+        assert_eq!(rule_neg, "Non-CN Domain (Learned Negative)");
+
+        // 4. 防投毒验证: GFW 注入 bogon IP (243.185.187.39) 绝不能被认定为 is_cn
+        let bogon_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(243, 185, 187, 39));
+        let is_bogon_or_private = crate::direct::is_private_ip(bogon_ip);
+        let is_cn = !is_bogon_or_private && crate::direct::is_cn_ip(bogon_ip);
+        assert!(!is_cn, "GFW 注入 Bogon IP 绝不可作为国内直连证据！");
     }
 }
