@@ -280,9 +280,8 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
     let mut direct_domain = stack.engine().fake_ip_reverse(&dst.0);
     let mut initial_payload: Vec<u8> = Vec::new();
 
-    // 性能快速通道: 若该 IP 已经为直连 IP、国内 IP 或私有局域网 IP，无需消耗 CPU/网络嗅探，直接跳过快速直连
+    // 性能快速通道: 若该 IP 已经为国内 IP 或私有局域网 IP，无需消耗 CPU/网络嗅探，直接跳过快速直连
     let should_sniff = direct_domain.is_none()
-        && !crate::direct::is_direct_ip(dst.0)
         && !crate::direct::is_cn_ip(dst.0)
         && !crate::direct::is_private_ip(dst.0);
 
@@ -582,12 +581,10 @@ async fn relay_direct(
 
     // 方案 D (双重置信校验):
     // 1. 若目标 IP 为私有 IP / 局域网管理 IP，直接允许直连；
-    // 2. 若目标 IP 经校验属于中国大陆公网 IP (is_cn_ip)，放心直连并标记为 direct_ip；
+    // 2. 若目标 IP 经校验属于中国大陆公网 IP (is_cn_ip)，放心直连；
     // 3. 若目标 IP 为境外 IP (如未收录的生僻境外域名被规则误判、或 DNS 污染劫持 IP)，双重置信校验立即拦截并平滑回退走隧道代理！
-    if crate::direct::is_private_ip(target_ip) {
-        // 私有局域网 IP 直连
-    } else if crate::direct::is_cn_ip(target_ip) {
-        crate::direct::mark_direct_ip(target_ip);
+    if crate::direct::is_private_ip(target_ip) || crate::direct::is_cn_ip(target_ip) {
+        // 私有局域网 IP / 国内 IP 直连
     } else if is_fake {
         debug!("[TUN-TCP/direct] 方案D双重置信拦截: 域名 [{:?}] 本地解析 IP ({}) 属于非国内 IP，自动切换走隧道代理", direct_domain, target_ip);
         return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule).await;

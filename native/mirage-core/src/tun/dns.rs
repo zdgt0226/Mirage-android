@@ -18,9 +18,9 @@ use crate::engine::Engine;
 use crate::tun::TunStack;
 use crate::tun::tcp::TunTcpStream;
 
-/// 国内域名 → 真实 IP 共享缓存 (分流写入, direct::resolve_direct_domain 读)。
-fn direct_cache() -> &'static StdMutex<HashMap<String, (std::net::Ipv4Addr, Instant)>> {
-    static C: OnceLock<StdMutex<HashMap<String, (std::net::Ipv4Addr, Instant)>>> = OnceLock::new();
+/// 国内域名 → 真实 IP & 决策结果共享缓存 (分流写入, direct::route_decision 读)。
+fn direct_cache() -> &'static StdMutex<HashMap<String, (std::net::Ipv4Addr, bool, Instant)>> {
+    static C: OnceLock<StdMutex<HashMap<String, (std::net::Ipv4Addr, bool, Instant)>>> = OnceLock::new();
     C.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
@@ -74,26 +74,38 @@ pub fn clear_direct_cache() {
 const DIRECT_CACHE_MAX: usize = 4096;
 
 /// 安全写入直连 DNS 缓存 (带容量上限与过期淘汰, 防 OOM)
-fn insert_direct_cache(domain: String, ip: std::net::Ipv4Addr) {
+fn insert_direct_cache(domain: String, ip: std::net::Ipv4Addr, is_direct: bool) {
     let mut map = direct_cache().lock().unwrap_or_else(|e| e.into_inner());
     if map.len() >= DIRECT_CACHE_MAX {
         let now = Instant::now();
-        map.retain(|_, (_, at)| now.duration_since(*at) < CACHE_TTL);
+        map.retain(|_, (_, _, at)| now.duration_since(*at) < CACHE_TTL);
         if map.len() >= DIRECT_CACHE_MAX {
             if let Some(k) = map.keys().next().cloned() {
                 map.remove(&k);
             }
         }
     }
-    map.insert(domain, (ip, Instant::now()));
+    map.insert(domain, (ip, is_direct, Instant::now()));
 }
 
 /// 读直连 DNS 缓存 (同步, 兜底用)。
 pub fn direct_dns_lookup(domain: &str) -> Option<std::net::IpAddr> {
     let map = direct_cache().lock().unwrap_or_else(|e| e.into_inner());
-    let (ip, at) = map.get(domain)?;
+    let (ip, _, at) = map.get(domain)?;
     if at.elapsed() < CACHE_TTL {
         Some(std::net::IpAddr::V4(*ip))
+    } else {
+        None
+    }
+}
+
+/// 查询域名动态自学习判定 (若在 direct_cache 中且未过期，返回是否为 Direct 直连)
+pub fn is_dynamic_direct_domain(domain: &str) -> Option<bool> {
+    let domain_clean = domain.trim_end_matches('.').to_ascii_lowercase();
+    let map = direct_cache().lock().unwrap_or_else(|e| e.into_inner());
+    let (_, is_direct, at) = map.get(&domain_clean)?;
+    if at.elapsed() < CACHE_TTL {
+        Some(*is_direct)
     } else {
         None
     }
@@ -185,7 +197,7 @@ pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
     // 1. 优先查高速缓存
     {
         let map = direct_cache().lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((ip, at)) = map.get(&domain_clean) {
+        if let Some((ip, _, at)) = map.get(&domain_clean) {
             if at.elapsed() < CACHE_TTL {
                 tracing::debug!("[TUN-DNS] 命中直连 DNS 缓存: {} → {}", domain_clean, ip);
                 return Some(*ip);
@@ -287,25 +299,21 @@ async fn resolve_upstream_internal(domain: &str) -> Option<std::net::Ipv4Addr> {
                                 let direct_v4 = std::net::Ipv4Addr::from(ip);
                                 let ip_addr = std::net::IpAddr::V4(direct_v4);
                                 let is_cn = crate::direct::is_cn_ip(ip_addr)
-                                    || crate::direct::is_private_ip(ip_addr)
-                                    || crate::direct::is_cn_domain_strict(domain)
-                                    || crate::direct::is_cn_domain(domain);
+                                    || crate::direct::is_private_ip(ip_addr);
 
+                                insert_direct_cache(domain.to_string(), direct_v4, is_cn);
                                 if is_cn {
-                                    insert_direct_cache(domain.to_string(), direct_v4);
-                                    crate::direct::mark_direct_ip(ip_addr);
                                     tracing::debug!(
                                         "[TUN-DNS] 上游直连解析成功 (4路竞速抢答): {} → {} (耗时: {}ms, 胜出上游: {})",
                                         domain, direct_v4, start_time.elapsed().as_millis(), from
                                     );
-                                    return Some(direct_v4);
                                 } else {
-                                    tracing::warn!(
-                                        "[TUN-DNS] 方案D双校验拦截: 上游解析出非国内 IP ({})，不标记直连: {}",
+                                    tracing::debug!(
+                                        "[TUN-DNS] 上游解析出非国内 IP ({})，标记为非直连: {}",
                                         direct_v4, domain
                                     );
-                                    return Some(direct_v4);
                                 }
+                                return Some(direct_v4);
                             }
                         }
                     }
@@ -464,9 +472,11 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, serv
         send_dns_reply(&stack, client, server, query, &domain, qtype, a, question_len);
         crate::monitor::record_conn_close(cid, query.len() as u64, 64, "Resolved (Fake-IP)");
 
-        // 异步预解析: 若判定为国内直连域名，立即在后台异步拉取真实 IP 存入缓存
-        // 使得后续 2~5ms 到达的 TCP SYN 在 relay_direct 时 100% 命中内存缓存，消除首包延迟与排队
-        if decision == direct::RuleAction::Direct || direct::should_direct(Some(&domain), None) {
+        // 异步预解析与自适应学习:
+        // 1. 直连域名立即预拉取 Real-IP 存入缓存，消除首包延迟与排队
+        // 2. 对非已知境外域名在后台异步拉取真实 IP，自适应探测是否属于国内服务
+        let is_known_foreign = direct::is_known_non_cn_domain(&domain);
+        if !is_known_foreign {
             let d = domain.clone();
             tokio::spawn(async move {
                 let _ = resolve_upstream(&d).await;
@@ -584,10 +594,12 @@ mod tests {
     fn direct_cache_clear_works() {
         {
             let mut map = direct_cache().lock().unwrap_or_else(|e| e.into_inner());
-            map.insert("baidu.com".to_string(), (std::net::Ipv4Addr::new(220, 181, 38, 148), Instant::now()));
+            map.insert("baidu.com".to_string(), (std::net::Ipv4Addr::new(220, 181, 38, 148), true, Instant::now()));
         }
         assert!(direct_dns_lookup("baidu.com").is_some());
+        assert_eq!(is_dynamic_direct_domain("baidu.com"), Some(true));
         clear_direct_cache();
         assert!(direct_dns_lookup("baidu.com").is_none());
+        assert_eq!(is_dynamic_direct_domain("baidu.com"), None);
     }
 }

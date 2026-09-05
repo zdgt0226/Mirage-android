@@ -824,10 +824,8 @@ async fn udp_flow_direct(
     };
 
     // 方案 D (双重置信校验):
-    if crate::direct::is_private_ip(target_ip) {
-        // 私有局域网 IP 直连
-    } else if crate::direct::is_cn_ip(target_ip) {
-        crate::direct::mark_direct_ip(target_ip);
+    if crate::direct::is_private_ip(target_ip) || crate::direct::is_cn_ip(target_ip) {
+        // 私有局域网 IP / 国内 IP 直连
     } else if is_fake {
         debug!("[TUN-UDP/direct] 方案D双重置信拦截: UDP 域名 [{:?}] 本地解析 IP ({}) 属于非国内 IP，阻断假直连", reverse_domain, target_ip);
         return;
