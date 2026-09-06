@@ -608,7 +608,8 @@ pub async fn resolve_direct_target(dom: &str, source: crate::direct::DecisionSou
         return DirectTarget::FallbackProxy;
     }
 
-    // 4. 允许向上游国内 DNS 查询 (Rule 显式直连、CnDomain、DynamicLearned、全局直连模式)
+    // 4. 允许向上游国内 DNS 查询。走到这里的来源只可能是
+    //    Rule (用户显式直连) / CnDomain / DynamicLearned / GlobalMode (仅全局直连 mode 2)。
     if may_query_upstream(dom, source) {
         if let Some(real_v4) = crate::tun::dns::resolve_upstream(dom).await {
             return DirectTarget::Ip(std::net::IpAddr::V4(real_v4));

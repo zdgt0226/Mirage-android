@@ -599,6 +599,16 @@ pub fn get_outbound_mode() -> u8 {
 }
 
 /// 规则决策来源分类 (精确区分局域网、全局模式、用户规则、域名白名单与默认动作)
+///
+/// 数据面据此区分「用户显式授权的直连」与「Default 兜底的直连」，
+/// 前者兑现用户意图，后者必须走防泄露降级。变体的可达性并不均匀，
+/// 直连数据面 (`tun::tcp::resolve_direct_target`) 实际只会见到其中一部分:
+///
+/// - `Lan` / `Rule` / `CnDomain` / `DynamicLearned`: 正常可达
+/// - `GlobalMode`: 仅全局直连 (mode 2) 可达; 全局代理 (mode 1) 判定为 Proxy，不进直连路径
+/// - `CnIp`: 不可达。该变体只在无域名的裸 IP 请求上产生，
+///   而裸 IP 请求的目标不是 Fake-IP，走不到需要域名解析的分支
+/// - `Default`: 仅当用户把 `default_action` 配成 `direct` 时可达
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecisionSource {
     Lan,
@@ -684,25 +694,18 @@ pub fn route_decision_sourced(
     (action, DecisionSource::Default, format!("Default {:?}", action))
 }
 
-/// 综合决策请求的目标动作与匹配细节 (保持原签名向后兼容，供现有测试与 Recent Requests 展示)
-pub fn route_decision_detailed(
-    domain: Option<&str>,
-    ip: Option<IpAddr>,
-    port: Option<u16>,
-    protocol: Option<&str>,
-) -> (RuleAction, String) {
-    let (action, _source, matched_rule) = route_decision_sourced(domain, ip, port, protocol);
-    (action, matched_rule)
-}
-
 /// 综合决策请求的目标动作 (支持传入 域名、IP、端口、协议)
+///
+/// 仅在调用方确实不关心决策来源时使用 (如 `should_direct` / `should_block` 这类布尔判定)。
+/// 数据面执行路径必须用 [`route_decision_sourced`]: 丢掉 [`DecisionSource`] 会让
+/// 下游无法区分「用户显式规则」与「Default 兜底」，正是 N1 回归的成因。
 pub fn route_decision(
     domain: Option<&str>,
     ip: Option<IpAddr>,
     port: Option<u16>,
     protocol: Option<&str>,
 ) -> RuleAction {
-    route_decision_detailed(domain, ip, port, protocol).0
+    route_decision_sourced(domain, ip, port, protocol).0
 }
 
 /// 域名决策 (DNS 阶段使用)
@@ -1330,27 +1333,27 @@ mod tests {
         assert_eq!(get_outbound_mode(), 0);
 
         // 1.1 局域网 IP / 路由器域名 -> DIRECT
-        let (action, rule) = route_decision_detailed(Some("router.asus.com"), None, Some(80), Some("tcp"));
+        let (action, _, rule) = route_decision_sourced(Some("router.asus.com"), None, Some(80), Some("tcp"));
         assert_eq!(action, RuleAction::Direct);
         assert!(rule.contains("Router"));
 
-        let (action, rule) = route_decision_detailed(None, Some("192.168.1.1".parse().unwrap()), Some(80), Some("tcp"));
+        let (action, _, rule) = route_decision_sourced(None, Some("192.168.1.1".parse().unwrap()), Some(80), Some("tcp"));
         assert_eq!(action, RuleAction::Direct);
         assert!(rule.contains("Private IP"));
 
         // 1.2 境外域名 / 境外 IP -> PROXY (默认回退)
-        let (action, _) = route_decision_detailed(Some("www.google.com"), None, Some(443), Some("tcp"));
+        let (action, _, _) = route_decision_sourced(Some("www.google.com"), None, Some(443), Some("tcp"));
         assert_eq!(action, RuleAction::Proxy);
 
-        let (action, _) = route_decision_detailed(None, Some("8.8.8.8".parse().unwrap()), Some(53), Some("udp"));
+        let (action, _, _) = route_decision_sourced(None, Some("8.8.8.8".parse().unwrap()), Some(53), Some("udp"));
         assert_eq!(action, RuleAction::Proxy);
 
         // 1.3 国内域名 / 国内 IP -> DIRECT (内置兜底)
-        let (action, rule) = route_decision_detailed(Some("www.bilibili.com"), None, Some(443), Some("tcp"));
+        let (action, _, rule) = route_decision_sourced(Some("www.bilibili.com"), None, Some(443), Some("tcp"));
         assert_eq!(action, RuleAction::Direct);
         assert!(rule.contains("CN Domain"));
 
-        let (action, rule) = route_decision_detailed(None, Some("114.114.114.114".parse().unwrap()), Some(53), Some("udp"));
+        let (action, _, rule) = route_decision_sourced(None, Some("114.114.114.114".parse().unwrap()), Some(53), Some("udp"));
         assert_eq!(action, RuleAction::Direct);
         assert!(rule.contains("CN IP"));
 
@@ -1359,22 +1362,22 @@ mod tests {
         assert_eq!(get_outbound_mode(), 1);
 
         // 2.1 局域网保护依然有效 -> DIRECT
-        let (action, _) = route_decision_detailed(Some("tplogin.cn"), None, Some(80), Some("tcp"));
+        let (action, _, _) = route_decision_sourced(Some("tplogin.cn"), None, Some(80), Some("tcp"));
         assert_eq!(action, RuleAction::Direct, "全局代理下局域网路由器管理域名必须直连保护");
 
-        let (action, _) = route_decision_detailed(None, Some("10.0.0.1".parse().unwrap()), Some(80), Some("tcp"));
+        let (action, _, _) = route_decision_sourced(None, Some("10.0.0.1".parse().unwrap()), Some(80), Some("tcp"));
         assert_eq!(action, RuleAction::Direct, "全局代理下局域网私有 IP 必须直连保护");
 
         // 2.2 境外域名与国内域名全部无差别走代理 -> PROXY
-        let (action, rule) = route_decision_detailed(Some("www.google.com"), None, Some(443), Some("tcp"));
+        let (action, _, rule) = route_decision_sourced(Some("www.google.com"), None, Some(443), Some("tcp"));
         assert_eq!(action, RuleAction::Proxy);
         assert!(rule.contains("Global Proxy Override"));
 
-        let (action, rule) = route_decision_detailed(Some("www.bilibili.com"), None, Some(443), Some("tcp"));
+        let (action, _, rule) = route_decision_sourced(Some("www.bilibili.com"), None, Some(443), Some("tcp"));
         assert_eq!(action, RuleAction::Proxy);
         assert!(rule.contains("Global Proxy Override"));
 
-        let (action, rule) = route_decision_detailed(None, Some("114.114.114.114".parse().unwrap()), Some(53), Some("udp"));
+        let (action, _, rule) = route_decision_sourced(None, Some("114.114.114.114".parse().unwrap()), Some(53), Some("udp"));
         assert_eq!(action, RuleAction::Proxy);
         assert!(rule.contains("Global Proxy Override"));
 
@@ -1383,19 +1386,19 @@ mod tests {
         assert_eq!(get_outbound_mode(), 2);
 
         // 3.1 局域网 -> DIRECT
-        let (action, _) = route_decision_detailed(None, Some("192.168.1.1".parse().unwrap()), Some(80), Some("tcp"));
+        let (action, _, _) = route_decision_sourced(None, Some("192.168.1.1".parse().unwrap()), Some(80), Some("tcp"));
         assert_eq!(action, RuleAction::Direct);
 
         // 3.2 境外域名与国内域名全部走直连 -> DIRECT
-        let (action, rule) = route_decision_detailed(Some("www.google.com"), None, Some(443), Some("tcp"));
+        let (action, _, rule) = route_decision_sourced(Some("www.google.com"), None, Some(443), Some("tcp"));
         assert_eq!(action, RuleAction::Direct);
         assert!(rule.contains("Global Direct Override"));
 
-        let (action, rule) = route_decision_detailed(Some("www.bilibili.com"), None, Some(443), Some("tcp"));
+        let (action, _, rule) = route_decision_sourced(Some("www.bilibili.com"), None, Some(443), Some("tcp"));
         assert_eq!(action, RuleAction::Direct);
         assert!(rule.contains("Global Direct Override"));
 
-        let (action, rule) = route_decision_detailed(None, Some("8.8.8.8".parse().unwrap()), Some(53), Some("udp"));
+        let (action, _, rule) = route_decision_sourced(None, Some("8.8.8.8".parse().unwrap()), Some(53), Some("udp"));
         assert_eq!(action, RuleAction::Direct);
         assert!(rule.contains("Global Direct Override"));
 
@@ -1439,7 +1442,7 @@ mod tests {
                 !is_cn_domain_strict(dom),
                 "{dom} 绝不能被 is_cn_domain_strict 误判为国内域名"
             );
-            let (action, _) = route_decision_detailed(Some(dom), None, Some(443), Some("tcp"));
+            let (action, _, _) = route_decision_sourced(Some(dom), None, Some(443), Some("tcp"));
             assert_eq!(
                 action,
                 RuleAction::Proxy,
@@ -1471,17 +1474,17 @@ mod tests {
 
         // 1. 国内顶级 .com 域名: 经 is_cn_domain / geosite:cn 判定，必须走 DIRECT (不要求 .cn 后缀)
         assert!(is_cn_domain("bilibili.com") || is_cn_domain("qq.com") || is_cn_domain("baidu.com"));
-        let (action_bili, _) = route_decision_detailed(Some("api.bilibili.com"), None, Some(443), Some("tcp"));
+        let (action_bili, _, _) = route_decision_sourced(Some("api.bilibili.com"), None, Some(443), Some("tcp"));
         assert_eq!(action_bili, RuleAction::Direct);
 
         // 2. 境外 Google / YouTube / Telegram: 即使在 geosite:cn 规则存在的情况下，依然被 NON_CN_ROOTS 防污染守卫拦截，走 PROXY
-        let (action_google, _) = route_decision_detailed(Some("play.googleapis.com"), None, Some(443), Some("tcp"));
+        let (action_google, _, _) = route_decision_sourced(Some("play.googleapis.com"), None, Some(443), Some("tcp"));
         assert_eq!(action_google, RuleAction::Proxy);
 
-        let (action_yt, _) = route_decision_detailed(Some("rr1---sn-xxx.googlevideo.com"), None, Some(443), Some("tcp"));
+        let (action_yt, _, _) = route_decision_sourced(Some("rr1---sn-xxx.googlevideo.com"), None, Some(443), Some("tcp"));
         assert_eq!(action_yt, RuleAction::Proxy);
 
-        let (action_cf, _) = route_decision_detailed(Some("dash.cloudflare.com"), None, Some(443), Some("tcp"));
+        let (action_cf, _, _) = route_decision_sourced(Some("dash.cloudflare.com"), None, Some(443), Some("tcp"));
         assert_eq!(action_cf, RuleAction::Proxy);
     }
 
@@ -1496,7 +1499,7 @@ mod tests {
         let unlisted_foreign_dom = "obscure-foreign-site-888.org";
 
         // 1. 初始状态: 未在缓存中的未知域名默认走 Proxy
-        let (act_before, _) = route_decision_detailed(Some(unlisted_cn_dom), None, Some(443), Some("tcp"));
+        let (act_before, _, _) = route_decision_sourced(Some(unlisted_cn_dom), None, Some(443), Some("tcp"));
         assert_eq!(act_before, RuleAction::Proxy);
 
         // 2. 模拟 DNS 异步自学习成功: 写入国内真实 IP 并标记为 is_direct = true
@@ -1505,7 +1508,7 @@ mod tests {
         crate::tun::dns::insert_direct_cache(unlisted_cn_dom.to_string(), cn_ip, true);
 
         // 学习生效: 再次裁决，立即升格为 Direct
-        let (act_after, reason) = route_decision_detailed(Some(unlisted_cn_dom), None, Some(443), Some("tcp"));
+        let (act_after, _, reason) = route_decision_sourced(Some(unlisted_cn_dom), None, Some(443), Some("tcp"));
         assert_eq!(act_after, RuleAction::Direct);
         assert_eq!(reason, "Dynamic CN Domain (Learned)");
 
@@ -1513,19 +1516,19 @@ mod tests {
         let foreign_ip = std::net::Ipv4Addr::new(8, 8, 8, 8);
         crate::tun::dns::insert_direct_cache(unlisted_foreign_dom.to_string(), foreign_ip, false);
 
-        let (act_foreign, reason_foreign) = route_decision_detailed(Some(unlisted_foreign_dom), None, Some(443), Some("tcp"));
+        let (act_foreign, _, reason_foreign) = route_decision_sourced(Some(unlisted_foreign_dom), None, Some(443), Some("tcp"));
         assert_eq!(act_foreign, RuleAction::Proxy);
         assert_eq!(reason_foreign, "Default Proxy");
 
         // 4. 验证强证据优先: 即使域名动态学习为负向 (Some(false))，若实际目标 IP 是中国大陆公网 IP (强证据)，依然放行直连
         let real_cn_target = std::net::IpAddr::V4(std::net::Ipv4Addr::new(223, 5, 5, 5));
-        let (act_override, reason_override) = route_decision_detailed(Some(unlisted_foreign_dom), Some(real_cn_target), Some(443), Some("tcp"));
+        let (act_override, _, reason_override) = route_decision_sourced(Some(unlisted_foreign_dom), Some(real_cn_target), Some(443), Some("tcp"));
         assert_eq!(act_override, RuleAction::Direct);
         assert_eq!(reason_override, "CN IP (Direct)");
 
         // 5. 裸境外 Anycast IP (如 104.16.1.1 Cloudflare): 绝不直连，走 Proxy (零 IP 毒化)
         let cf_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(104, 16, 1, 1));
-        let (act_ip, _) = route_decision_detailed(None, Some(cf_ip), Some(443), Some("tcp"));
+        let (act_ip, _, _) = route_decision_sourced(None, Some(cf_ip), Some(443), Some("tcp"));
         assert_eq!(act_ip, RuleAction::Proxy, "境外 Anycast IP 绝不被误判为直连");
     }
 

@@ -445,7 +445,7 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, serv
     let Some((domain, qtype, question_len)) = parse_query(query) else { return };
     DNS_QUERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    let (decision, matched_rule) = direct::route_decision_detailed(Some(&domain), None, Some(53), Some("udp"));
+    let (decision, _, matched_rule) = direct::route_decision_sourced(Some(&domain), None, Some(53), Some("udp"));
 
     if decision == direct::RuleAction::Block {
         let (cid, _conn_up, _conn_down, _) = crate::monitor::record_conn_start(
@@ -635,16 +635,16 @@ mod tests {
         assert_eq!(is_dynamic_direct_domain("foreign.example.org"), Some(false));
 
         // 3. 验证路由决策：正向命中 Direct，负向不短路回退至 Default Proxy
-        let (act_cn, _) = crate::direct::route_decision_detailed(Some("api.bilibili.com"), None, Some(443), Some("tcp"));
+        let (act_cn, _, _) = crate::direct::route_decision_sourced(Some("api.bilibili.com"), None, Some(443), Some("tcp"));
         assert_eq!(act_cn, crate::direct::RuleAction::Direct);
 
-        let (act_neg, rule_neg) = crate::direct::route_decision_detailed(Some("foreign.example.org"), None, Some(443), Some("tcp"));
+        let (act_neg, _, rule_neg) = crate::direct::route_decision_sourced(Some("foreign.example.org"), None, Some(443), Some("tcp"));
         assert_eq!(act_neg, crate::direct::RuleAction::Proxy);
         assert_eq!(rule_neg, "Default Proxy");
 
         // 验证强证据优先: 若域名负向缓存，但实际目标 IP 为国内合法 IP (is_cn_ip)，强证据推翻负缓存，放行直连
         let real_cn_target = std::net::IpAddr::V4(std::net::Ipv4Addr::new(223, 5, 5, 5));
-        let (act_override, rule_override) = crate::direct::route_decision_detailed(Some("foreign.example.org"), Some(real_cn_target), Some(443), Some("tcp"));
+        let (act_override, _, rule_override) = crate::direct::route_decision_sourced(Some("foreign.example.org"), Some(real_cn_target), Some(443), Some("tcp"));
         assert_eq!(act_override, crate::direct::RuleAction::Direct);
         assert_eq!(rule_override, "CN IP (Direct)");
 
@@ -662,7 +662,7 @@ mod tests {
 
         // 1. 未命中规则的未知境外域名 (如 obscure.example.org)
         let domain = "obscure.example.org";
-        let (decision, matched_rule) = crate::direct::route_decision_detailed(Some(domain), None, Some(53), Some("udp"));
+        let (decision, _, matched_rule) = crate::direct::route_decision_sourced(Some(domain), None, Some(53), Some("udp"));
         assert_eq!(decision, crate::direct::RuleAction::Direct);
         assert_eq!(matched_rule, "Default Direct");
 
