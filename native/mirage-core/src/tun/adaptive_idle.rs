@@ -276,20 +276,20 @@ pub fn classify_connection(dst_port: u16, domain: Option<&str>) -> (TrafficCateg
         // 2. 静态规则快速命中 (确定性超时, 标记为 is_static=true)
         if is_image_or_media_cdn(&dom_lower) {
             let cat = TrafficCategory::MediaCdn;
-            let timeout = cat.idle_timeout(false);
+            let timeout = Duration::from_secs(cat.default_idle_secs());
             record_initial_profile(dom_lower, cat, true);
             return (cat, timeout);
         }
 
         if is_push_or_im_service(&dom_lower) {
             let cat = TrafficCategory::PushIm;
-            let timeout = cat.idle_timeout(false);
+            let timeout = Duration::from_secs(cat.default_idle_secs());
             record_initial_profile(dom_lower, cat, true);
             return (cat, timeout);
         }
     }
 
-    (TrafficCategory::GeneralApi, TrafficCategory::GeneralApi.idle_timeout(false))
+    (TrafficCategory::GeneralApi, Duration::from_secs(TrafficCategory::GeneralApi.default_idle_secs()))
 }
 
 fn record_initial_profile(domain: String, category: TrafficCategory, is_static: bool) {

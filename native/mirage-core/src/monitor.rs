@@ -127,9 +127,23 @@ impl MemoryWriter {
         q.push_back(line.to_string());
     }
 
+    pub fn len(&self) -> usize {
+        let q = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        q.len()
+    }
+
     pub fn get_logs(&self) -> Vec<String> {
         let q = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
         q.iter().cloned().collect()
+    }
+
+    pub fn get_logs_capped(&self, limit: usize) -> Vec<String> {
+        let q = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        if q.len() > limit {
+            q.iter().skip(q.len() - limit).cloned().collect()
+        } else {
+            q.iter().cloned().collect()
+        }
     }
 
     pub fn drain_logs(&self) -> Vec<String> {
@@ -169,8 +183,13 @@ pub fn global_logger() -> &'static MemoryWriter {
     LOGGER.get_or_init(MemoryWriter::new)
 }
 
-/// 最近 N 条日志 (App 日志面板用)。
+/// 最近 N 条日志 (App 日志面板用，限制 150 条以避免 Android 16 Binder 525KB 大事务溢出)。
 pub fn recent_logs() -> Vec<String> {
+    global_logger().get_logs_capped(150)
+}
+
+/// 获取全量历史日志 (仅文件导出或离线诊断用)。
+pub fn all_logs() -> Vec<String> {
     global_logger().get_logs()
 }
 
@@ -202,7 +221,7 @@ pub fn get_diagnostic_snapshot_json() -> String {
     let stall_secs = tunnel_stall_secs();
     let active_tunnels = tunnel_conn_count();
     let dropped_logs = DROPPED_LOGS.load(Ordering::Relaxed);
-    let logs_count = recent_logs().len();
+    let logs_count = global_logger().len();
 
     let snapshot = serde_json::json!({
         "timestamp": unix_now_secs(),

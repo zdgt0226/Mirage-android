@@ -595,7 +595,7 @@ class CoreService : VpnService() {
     fun getStatsInternal(): DoubleArray = MirageNative.getStats()
     fun getConnectionsJsonInternal(): String = MirageNative.getConnectionsJson()
     fun recentLogsInternal(): Array<String> =
-        (LogStore.all() + MirageNative.recentLogs().toList()).toTypedArray()
+        (LogStore.all() + MirageNative.recentLogs().toList()).takeLast(150).toTypedArray()
     fun getBuiltinDomainsInternal(): Array<String> = MirageNative.getBuiltinDomains()
     fun getBuiltinIpCountInternal(): Long = MirageNative.getBuiltinIpCount()
     fun testNodeInternal(uri: String, timeoutMs: Int): Long = MirageNative.testNode(uri, timeoutMs)
@@ -860,9 +860,9 @@ class CoreService : VpnService() {
                         field.setInt(fdesc, fd)
                         realNet.bindSocket(fdesc)
                     } else {
-                        val pfd = android.os.ParcelFileDescriptor.fromFd(fd)
-                        realNet.bindSocket(pfd.fileDescriptor)
-                        pfd.detachFd() // 显式 detach，防止关闭底层原生 fd
+                        android.os.ParcelFileDescriptor.fromFd(fd).use { pfd ->
+                            realNet.bindSocket(pfd.fileDescriptor)
+                        }
                     }
                 }
             }

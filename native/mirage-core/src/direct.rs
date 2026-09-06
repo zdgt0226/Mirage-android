@@ -280,7 +280,7 @@ pub fn is_private_ip(ip: IpAddr) -> bool {
     }
 }
 
-/// 静态局域网与路由器管理域名列表 (含系统 Captive Portal 连网认证与连通性探测)
+/// 静态局域网与路由器管理域名列表 (严格限定为路由器本地后台管理域名)
 const LAN_ROUTER_EXACT_DOMAINS: &[&str] = &[
     "router.asus.com",
     "asusrouter.com",
@@ -305,14 +305,6 @@ const LAN_ROUTER_EXACT_DOMAINS: &[&str] = &[
     "repeater.setup",
     "router.ctc",
     "gateway.zte",
-    // 系统 Captive Portal 与 WiFi 连通性探测 (直连放行，确保公共 WiFi 登录页秒弹)
-    "captive.apple.com",
-    "connectivitycheck.gstatic.com",
-    "connectivitycheck.android.com",
-    "wifi.connectivitycheck.android.com",
-    "detectportal.firefox.com",
-    "msftconnecttest.com",
-    "www.msftconnecttest.com",
 ];
 
 const LAN_DOMAIN_SUFFIXES: &[&str] = &[

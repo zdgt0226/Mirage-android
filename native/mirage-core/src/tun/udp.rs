@@ -221,7 +221,7 @@ async fn udp_flow_relay(
     } else {
         key.dst.to_string()
     };
-    let (cid, conn_up, conn_down, _conn_abort) = crate::monitor::record_conn_start("UDP", &target_display, &resolved_str, &matched_rule, "PROXY");
+    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("UDP", &target_display, &resolved_str, &matched_rule, "PROXY");
 
     // ── UDP Mux 路径: 多流复用 K 条长命共享隧道 (脱钩 pool_size 限制) ──
     if crate::proxy::udp_mux::udp_mux_enabled() {
@@ -254,6 +254,7 @@ async fn udp_flow_relay(
         let up_atomic = conn_up.clone();
         let started = std::time::Instant::now();
         let mut sent: u64 = 0;
+        let mut close_reason = "Closed";
 
         loop {
             let to = if got_downlink.load(Ordering::Relaxed) {
@@ -262,38 +263,50 @@ async fn udp_flow_relay(
                 crate::proxy::udp_mux::MUX_FIRST_DOWNLINK.saturating_sub(started.elapsed())
             };
             if to.is_zero() {
+                close_reason = "First Downlink Timeout";
                 break; // 首下行窗口内无下行 → 快拆释放 sid
             }
 
-            let (_src, _dst, payload) = match tokio::time::timeout(to, rx.recv()).await {
-                Ok(Some(v)) => v,
-                _ => break,
-            };
-
-            let frame = match &target_domain {
-                Some(d) => crate::proxy::udp_mux::frame_mux_domain(sid, d, key.dst_port, &payload),
-                None => match key.dst {
-                    IpAddr::V4(v4) => crate::proxy::udp_mux::frame_mux_ipv4(sid, &v4, key.dst_port, &payload),
-                    IpAddr::V6(v6) => crate::proxy::udp_mux::frame_mux_ipv6(sid, &v6, key.dst_port, &payload),
-                },
-            };
-            if let Some(f) = frame {
-                let plen = payload.len() as u64;
-                if shared_tx.send(f).await.is_err() {
+            tokio::select! {
+                _ = conn_abort.notified() => {
+                    tracing::info!("[TUN-UDP] Mux 会话 #{} 被主动切断", cid);
+                    close_reason = "Aborted";
                     break;
                 }
-                sent += plen;
-                up_atomic.fetch_add(plen, Ordering::Relaxed);
+                res = tokio::time::timeout(to, rx.recv()) => {
+                    let (_src, _dst, payload) = match res {
+                        Ok(Some(v)) => v,
+                        _ => break,
+                    };
+
+                    let frame = match &target_domain {
+                        Some(d) => crate::proxy::udp_mux::frame_mux_domain(sid, d, key.dst_port, &payload),
+                        None => match key.dst {
+                            IpAddr::V4(v4) => crate::proxy::udp_mux::frame_mux_ipv4(sid, &v4, key.dst_port, &payload),
+                            IpAddr::V6(v6) => crate::proxy::udp_mux::frame_mux_ipv6(sid, &v6, key.dst_port, &payload),
+                        },
+                    };
+                    if let Some(f) = frame {
+                        let plen = payload.len() as u64;
+                        if shared_tx.send(f).await.is_err() {
+                            close_reason = "Uplink Error";
+                            break;
+                        }
+                        sent += plen;
+                        up_atomic.fetch_add(plen, Ordering::Relaxed);
+                    }
+                }
             }
         }
 
         let recv_bytes = conn_down.load(Ordering::Relaxed);
-        crate::monitor::record_conn_close(cid, sent, recv_bytes, "Closed");
+        crate::monitor::record_conn_close(cid, sent, recv_bytes, close_reason);
         debug!(
-            "[TUN-UDP] #{} Mux 会话关闭 (↑{} ↓{})",
+            "[TUN-UDP] #{} Mux 会话关闭 (↑{} ↓{}, 原因: {})",
             flow_id,
             human_bytes(sent),
-            human_bytes(recv_bytes)
+            human_bytes(recv_bytes),
+            close_reason
         );
         return;
     }
@@ -384,13 +397,22 @@ async fn udp_flow_relay(
         recv
     };
 
-    let (sent, recv) = tokio::join!(dn, up);
-    crate::monitor::record_conn_close(cid, sent, recv, "Closed");
+    let (sent, recv, close_reason) = tokio::select! {
+        _ = conn_abort.notified() => {
+            tracing::info!("[TUN-UDP] 传统单流会话 #{} 被主动切断", cid);
+            (conn_up.load(Ordering::Relaxed), conn_down.load(Ordering::Relaxed), "Aborted")
+        }
+        (s, r) = async { tokio::join!(dn, up) } => {
+            (s, r, "Closed")
+        }
+    };
+    crate::monitor::record_conn_close(cid, sent, recv, close_reason);
     debug!(
-        "[TUN-UDP] {} 关闭 (↑{} ↓{})",
+        "[TUN-UDP] {} 关闭 (↑{} ↓{}, 原因: {})",
         fmt_flow(&key),
         human_bytes(sent),
-        human_bytes(recv)
+        human_bytes(recv),
+        close_reason
     );
     // 流退出后从表移除 (幂等: 泵侧可能已重建同 key 流)
     // (表条目由 feed 在 try_send 失败/超时后仍存在 → 由这里清理)
@@ -796,18 +818,43 @@ mod tests {
         let udp = smoltcp::wire::UdpPacket::new_checked(ip.unwrap().payload());
         assert!(udp.is_ok(), "回程 UDP 校验和应合法: {udp:?}");
     }
-}
 
-#[test]
-fn reply_ip_header_direction() {
-    // 回归: IP 头 12-15 = 源, 16-19 = 目的 (早前写反导致回程包地址颠倒)
-    let src: std::net::SocketAddrV4 = "198.19.0.53:53".parse().unwrap();
-    let dst: std::net::SocketAddrV4 = "198.18.0.1:39261".parse().unwrap();
-    let pkt = build_ipv4_udp(src, dst, b"x");
-    assert_eq!(&pkt[12..16], &[198, 19, 0, 53], "12-15 应是源地址");
-    assert_eq!(&pkt[16..20], &[198, 18, 0, 1], "16-19 应是目的地址");
-    assert_eq!(&pkt[20..22], &[0, 53], "UDP 源端口");
-    assert_eq!(&pkt[22..24], &[153, 93], "UDP 目的端口 (39261)");
+    #[test]
+    fn reply_ip_header_direction() {
+        // 回归: IP 头 12-15 = 源, 16-19 = 目的 (早前写反导致回程包地址颠倒)
+        let src: std::net::SocketAddrV4 = "198.19.0.53:53".parse().unwrap();
+        let dst: std::net::SocketAddrV4 = "198.18.0.1:39261".parse().unwrap();
+        let pkt = build_ipv4_udp(src, dst, b"x");
+        assert_eq!(&pkt[12..16], &[198, 19, 0, 53], "12-15 应是源地址");
+        assert_eq!(&pkt[16..20], &[198, 18, 0, 1], "16-19 应是目的地址");
+        assert_eq!(&pkt[20..22], &[0, 53], "UDP 源端口");
+        assert_eq!(&pkt[22..24], &[153, 93], "UDP 目的端口 (39261)");
+    }
+
+    #[tokio::test]
+    async fn test_udp_abort_cancels_relay() {
+        let (cid, _up, _down, abort) = crate::monitor::record_conn_start("UDP", "1.1.1.1:53", "1.1.1.1", "Rule", "PROXY");
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let notified = abort.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let _ = ready_tx.send(());
+            tokio::select! {
+                _ = &mut notified => true,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => false,
+            }
+        });
+
+        // 确保后台任务的 notified 已完成注册并等待中
+        ready_rx.await.unwrap();
+
+        // 模拟 UI "断开连接" 操作
+        assert!(crate::monitor::close_connection(cid));
+        let aborted = handle.await.unwrap();
+        assert!(aborted, "UDP 连接 abort 必须可被 close_connection 立即唤醒并终止");
+    }
 }
 
 /// 直连 UDP 流: protect UDP socket 直接收发 (回程构 IP 包写 TUN)。
@@ -879,7 +926,7 @@ async fn udp_flow_direct(
     let client = SocketAddr::new(key.src, key.src_port);
     debug!("[TUN-UDP/direct] 新流 {} → {}", fmt_flow(&key), dst);
 
-    let (cid, conn_up, conn_down, _conn_abort) = crate::monitor::record_conn_start("UDP", &target_display, &target_ip.to_string(), &matched_rule, "DIRECT");
+    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("UDP", &target_display, &target_ip.to_string(), &matched_rule, "DIRECT");
     let sock_rc = std::sync::Arc::new(sock);
 
     // 下行: 客户端 → 目标
@@ -929,9 +976,17 @@ async fn udp_flow_direct(
         n_recv
     };
 
-    let (sent, recv) = tokio::join!(dn, up);
-    crate::monitor::record_conn_close(cid, sent, recv, "Closed");
-    debug!("[TUN-UDP/direct] {} 关闭 (↑{} ↓{})", fmt_flow(&key),
-        human_bytes(sent), human_bytes(recv));
+    let (sent, recv, close_reason) = tokio::select! {
+        _ = conn_abort.notified() => {
+            tracing::info!("[TUN-UDP/direct] 直连流 #{} 被主动切断", cid);
+            (conn_up.load(Ordering::Relaxed), conn_down.load(Ordering::Relaxed), "Aborted")
+        }
+        (s, r) = async { tokio::join!(dn, up) } => {
+            (s, r, "Closed")
+        }
+    };
+    crate::monitor::record_conn_close(cid, sent, recv, close_reason);
+    debug!("[TUN-UDP/direct] {} 关闭 (↑{} ↓{}, 原因: {})", fmt_flow(&key),
+        human_bytes(sent), human_bytes(recv), close_reason);
     None
 }
