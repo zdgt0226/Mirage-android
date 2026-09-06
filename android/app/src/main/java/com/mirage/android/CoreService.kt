@@ -192,6 +192,11 @@ class CoreService : VpnService() {
         builder.setMtu(mtu)
 
         // 分应用代理 (Per-App Proxy / Split Tunneling)
+        //
+        // addAllowedApplication 与 addDisallowedApplication 在同一个 Builder 上互斥,
+        // 后调用的一方会抛 UnsupportedOperationException。usedAllowList 记录白名单是否已生效,
+        // 供下方的自我排除判断该不该调用 addDisallowedApplication。
+        var usedAllowList = false
         runCatching {
             val filterConfig = com.mirage.android.core.AppFilterStore.getConfig(this)
             val installedPackages = packageManager.getInstalledApplications(0).map { it.packageName }
@@ -200,6 +205,9 @@ class CoreService : VpnService() {
                     val allowed = com.mirage.android.data.repository.AppFilterManager.computeEffectiveAllowed(filterConfig, installedPackages)
                     if (allowed.isNotEmpty()) {
                         log("[filter] 启用白名单分应用代理: 仅代理 ${allowed.size} 款应用")
+                        // computeEffectiveAllowed 已剔除自身包名, 白名单模式下本应用天然在 VPN 之外,
+                        // 无需 (也不能) 再调 addDisallowedApplication。
+                        usedAllowList = true
                         allowed.forEach { pkg ->
                             runCatching { builder.addAllowedApplication(pkg) }
                         }
@@ -215,8 +223,19 @@ class CoreService : VpnService() {
                     }
                 }
             }
-            // 自身应用强制排除在 VPN 之外 (防止自环)
+        }.onFailure {
+            // getInstalledApplications 跨 Binder 传输在应用极多的设备上可能抛
+            // TransactionTooLargeException / DeadObjectException。此前这里静默吞掉,
+            // 分应用配置失效且无任何痕迹。
+            log("[filter] 分应用代理配置失败, 本次回退为全局代理: ${it.message}")
+        }
+
+        // 自身应用强制排除在 VPN 之外 (防止自环)。
+        // 必须放在上面的 runCatching 之外: 分应用配置抛异常时, 自我排除仍要生效,
+        // 否则本应用自己的非 protect socket (订阅更新 / Geo OTA 等) 会绕回 TUN。
+        if (!usedAllowList) {
             runCatching { builder.addDisallowedApplication(packageName) }
+                .onFailure { log("[core] 自身应用排除 VPN 失败: ${it.message}") }
         }
 
         val fd = try { builder.establish() } catch (e: Exception) {
