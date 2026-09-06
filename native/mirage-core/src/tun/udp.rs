@@ -177,7 +177,22 @@ async fn udp_flow_relay(
     }
 
     if action == crate::direct::RuleAction::Direct {
-        return udp_flow_direct(stack, engine, key, reverse_domain, rx, matched_rule, source).await;
+        match udp_flow_direct(
+            stack.clone(),
+            engine.clone(),
+            key,
+            reverse_domain.clone(),
+            rx,
+            matched_rule.clone(),
+            source,
+        )
+        .await
+        {
+            // 直连路径已处理完毕 (或已明确丢弃)
+            None => return,
+            // 直连不可用 (防泄露门控拦截 / 方案D 判定为非国内 IP): 接回代理路径继续
+            Some(returned_rx) => rx = returned_rx,
+        }
     }
 
     // 取出站节点
@@ -796,6 +811,9 @@ fn reply_ip_header_direction() {
 }
 
 /// 直连 UDP 流: protect UDP socket 直接收发 (回程构 IP 包写 TUN)。
+///
+/// 返回 `Some(rx)` 表示本流不适合直连，接收端原样交还给调用方改走隧道代理;
+/// 返回 `None` 表示本流已被直连路径处理完毕 (或已明确丢弃)。
 async fn udp_flow_direct(
     stack: Arc<TunStack>,
     engine: Arc<Engine>,
@@ -804,7 +822,7 @@ async fn udp_flow_direct(
     mut rx: tokio::sync::mpsc::Receiver<(SocketAddr, SocketAddr, Vec<u8>)>,
     matched_rule: String,
     source: crate::direct::DecisionSource,
-) {
+) -> Option<tokio::sync::mpsc::Receiver<(SocketAddr, SocketAddr, Vec<u8>)>> {
     let is_fake = engine.is_fake_ip(&key.dst);
     let target_ip = if is_fake {
         if let Some(ref dom) = reverse_domain {
@@ -814,18 +832,23 @@ async fn udp_flow_direct(
                 crate::tun::tcp::DirectTarget::FallbackProxy => {
                     if source == crate::direct::DecisionSource::Default {
                         warn!(
-                            "[TUN-UDP/direct] UDP 域名 [{}] 命中 Default Direct 规则，因属于未收录/非明确国内域名，防泄露放弃国内解析",
+                            "[TUN-UDP/direct] UDP 域名 [{}] 命中 Default Direct 规则，因属于未收录/非明确国内域名，触发防泄露降级策略转走隧道代理",
                             dom
                         );
                     } else {
-                        debug!("[TUN-UDP/direct] 直连 UDP 域名 [{}] 解析失败或超时，放弃", dom);
+                        debug!("[TUN-UDP/direct] 直连 UDP 域名 [{}] 解析失败或超时，自动平滑回退走隧道代理", dom);
                     }
-                    return;
+                    // 与 TCP 路径对齐: 交还接收端改走代理，不再静默丢流
+                    return Some(rx);
+                }
+                crate::tun::tcp::DirectTarget::Drop => {
+                    warn!("[TUN-UDP/direct] 局域网 UDP 域名 [{}] 无法解析出私有地址，丢弃 (禁止外发内网主机名)", dom);
+                    return None;
                 }
             }
         } else {
             debug!("[TUN-UDP/direct] 目标为 Fake-IP ({}) 但无对应域名，无法直连 UDP", key.dst);
-            return;
+            return None;
         }
     } else {
         key.dst
@@ -835,8 +858,8 @@ async fn udp_flow_direct(
     if crate::direct::is_private_ip(target_ip) || crate::direct::is_cn_ip(target_ip) {
         // 私有局域网 IP / 国内 IP 直连
     } else if is_fake {
-        debug!("[TUN-UDP/direct] 方案D双重置信拦截: UDP 域名 [{:?}] 本地解析 IP ({}) 属于非国内 IP，阻断假直连", reverse_domain, target_ip);
-        return;
+        debug!("[TUN-UDP/direct] 方案D双重置信拦截: UDP 域名 [{:?}] 本地解析 IP ({}) 属于非国内 IP，转走隧道代理", reverse_domain, target_ip);
+        return Some(rx);
     }
 
     let target_display = if let Some(ref dom) = reverse_domain {
@@ -847,7 +870,7 @@ async fn udp_flow_direct(
 
     let sock = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => s,
-        Err(_) => return,
+        Err(_) => return None,
     };
     // protect: 绕过 TUN (否则 UDP 又被卷回)
     crate::protect::protect(std::os::unix::io::AsRawFd::as_raw_fd(&sock));
@@ -910,4 +933,5 @@ async fn udp_flow_direct(
     crate::monitor::record_conn_close(cid, sent, recv, "Closed");
     debug!("[TUN-UDP/direct] {} 关闭 (↑{} ↓{})", fmt_flow(&key),
         human_bytes(sent), human_bytes(recv));
+    None
 }

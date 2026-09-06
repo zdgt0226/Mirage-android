@@ -549,36 +549,72 @@ fn _sock_buf_const() -> usize {
 pub enum DirectTarget {
     Ip(std::net::IpAddr),
     RouterIp(std::net::IpAddr),
+    /// 允许降级走隧道代理 (公网域名，外发无泄密风险)
     FallbackProxy,
+    /// 绝不可外发: 局域网域名解析失败，若转代理会把内网主机名泄露给远端并且必定连不通
+    Drop,
 }
 
-/// 统一裁决 Fake-IP 直连域名应访问的真实目标 IP 或降级转代理策略
+/// 局域网域名解析等待上限 (系统 getaddrinfo 为阻塞调用，避免拖死连接建立)
+const LAN_RESOLVE_TIMEOUT_MS: u64 = 800;
+
+/// 判定是否允许为该域名向国内上游公共 DNS 发起真实解析。
+///
+/// 纯函数，无 I/O: `resolve_direct_target` 与单元测试共用同一份判定，
+/// 确保「显式 Rule 直连不得因缺少端口/协议参数被误降级」(N1) 这类回归可被测试捕获。
+pub(crate) fn may_query_upstream(dom: &str, source: crate::direct::DecisionSource) -> bool {
+    // 已知境外域名与局域网域名: 任何来源都严禁向国内 DNS 查询 (防 GFW 投毒 + 防内网名外泄)
+    if crate::direct::is_known_non_cn_domain(dom) || crate::direct::is_lan_or_router_domain(dom) {
+        return false;
+    }
+    // 用户显式书写的 Direct 规则可能带端口/协议等复合条件，此处只有域名，
+    // 无法复现原始裁决，因此直接信任上游传下来的 DecisionSource::Rule。
+    source == crate::direct::DecisionSource::Rule || crate::direct::should_resolve_upstream(dom)
+}
+
+/// 统一裁决 Fake-IP 直连域名应访问的真实目标 IP 或降级策略
 pub async fn resolve_direct_target(dom: &str, source: crate::direct::DecisionSource) -> DirectTarget {
     // 1. 本地已学习的直连缓存 (高优先级快速通道)
     if let Some(real_ip) = crate::tun::dns::direct_dns_lookup(dom) {
         return DirectTarget::Ip(real_ip);
     }
-    // 2. 局域网/路由器管理域名 (防污染与防虚假解析，前置绝对守卫)
+
+    // 2. 局域网 / 路由器管理域名: 绝对守卫，此分支只能落到本地地址，永不外发
     if crate::direct::is_lan_or_router_domain(dom) {
         if let Some(router_ip) = crate::direct::default_router_ip_for_domain(dom) {
             return DirectTarget::RouterIp(router_ip);
         }
+        // .local / .lan / .home.arpa / .corp 等无固定网关映射的内网主机名:
+        // 交给系统解析器 (DHCP 下发的本地 DNS / mDNS)，绝不查国内公共 DNS。
+        let d = dom.to_string();
+        let resolved = tokio::time::timeout(
+            std::time::Duration::from_millis(LAN_RESOLVE_TIMEOUT_MS),
+            tokio::task::spawn_blocking(move || crate::direct::resolve_direct_domain(&d)),
+        )
+        .await;
+        if let Ok(Ok(Some(ip))) = resolved {
+            // 只接受私有地址。系统解析器在 VPN 生效时可能把查询绕回本模块的
+            // Fake-IP 应答，is_private_ip 对 Fake-IP 返回 false，可直接拦掉这种自环。
+            if crate::direct::is_private_ip(ip) {
+                return DirectTarget::Ip(ip);
+            }
+            debug!("[TUN-TCP/direct] 局域网域名 [{}] 解析出非私有地址 {}，判定为自环或污染，丢弃", dom, ip);
+        }
+        return DirectTarget::Drop;
     }
-    // 3. 兜底 Default 来源：未命中显式规则且未被本地可信白名单收录，防泄露降级代理
+
+    // 3. 兜底 Default 来源: 未命中显式规则且未被本地可信白名单收录，防泄露降级代理
     if source == crate::direct::DecisionSource::Default {
         return DirectTarget::FallbackProxy;
     }
-    // 4. 允许向上游国内 DNS 查询 (Rule 显式直连、CnDomain、DynamicLearned、GlobalMode 等)
-    // 必须通过双重安全守卫：已知境外域名与局域网域名严禁向国内 DNS 查询
-    let allow_resolve = !crate::direct::is_known_non_cn_domain(dom)
-        && !crate::direct::is_lan_or_router_domain(dom)
-        && (crate::direct::should_resolve_upstream(dom) || source == crate::direct::DecisionSource::Rule);
 
-    if allow_resolve {
+    // 4. 允许向上游国内 DNS 查询 (Rule 显式直连、CnDomain、DynamicLearned、全局直连模式)
+    if may_query_upstream(dom, source) {
         if let Some(real_v4) = crate::tun::dns::resolve_upstream(dom).await {
             return DirectTarget::Ip(std::net::IpAddr::V4(real_v4));
         }
     }
+
     // 5. 真实解析超时、无有效结果或被安全门控拦截，平滑回退代理
     DirectTarget::FallbackProxy
 }
@@ -616,6 +652,16 @@ async fn relay_direct(
                         debug!("[TUN-TCP/direct] 直连域名 [{}] 真实解析失败或超时，自动平滑回退走隧道代理", dom);
                     }
                     return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule).await;
+                }
+                DirectTarget::Drop => {
+                    // 局域网域名解析不出私有地址: 转代理会把内网主机名发给远端且必然连不通，
+                    // 直接关闭连接让上层应用快速失败。
+                    let (cid, _, _, _) = crate::monitor::record_conn_start(
+                        "TCP", &format!("{}:{}", dom, dst.1), &dst.0.to_string(), &matched_rule, "DIRECT");
+                    crate::monitor::record_conn_close(cid, 0, 0, "LAN Domain Unresolved");
+                    stream.close();
+                    warn!("[TUN-TCP/direct] 局域网域名 [{}] 无法解析出私有地址，关闭连接 (禁止外发内网主机名)", dom);
+                    return;
                 }
             }
         } else {
@@ -901,12 +947,93 @@ mod tests {
         let res_google = resolve_direct_target("google.com", crate::direct::DecisionSource::Rule).await;
         assert_eq!(res_google, DirectTarget::FallbackProxy);
 
-        // 6. N1 场景验证: 针对显式 Rule 直连域名 (如 api.mycorp.example)，
-        // 当直连缓存已就绪或命中规则时，resolve_direct_target 优先返回真实 IP，绝不因缺少端口等参数被误降级为 FallbackProxy
+        // 6. 直连缓存对显式 Rule 来源同样是最高优先快速通道
         let corp_domain = "api.mycorp.example";
         let corp_ip = Ipv4Addr::new(192, 168, 10, 50);
         crate::tun::dns::insert_direct_cache(corp_domain.to_string(), corp_ip, true);
         let res_corp = resolve_direct_target(corp_domain, crate::direct::DecisionSource::Rule).await;
         assert_eq!(res_corp, DirectTarget::Ip(IpAddr::V4(corp_ip)));
+    }
+
+    /// N1 回归防线: 显式 Rule 直连的域名，即使 `should_resolve_upstream` 因
+    /// 缺少端口/协议参数无法复现原始复合规则匹配，也必须允许查询上游真实 IP，
+    /// 绝不能被静默降级为走代理。
+    ///
+    /// 测的是纯判定函数而非缓存命中路径，因此改坏门控时这里会变红。
+    #[test]
+    fn test_may_query_upstream_gate() {
+        use crate::direct::DecisionSource;
+        let _guard = crate::direct::acquire_test_guard();
+        assert!(crate::direct::set_custom_rules(r#"{
+            "rules": [
+                {
+                    "id": "corp_rule",
+                    "name": "Corp App",
+                    "enabled": true,
+                    "logic": "AND",
+                    "conditions": [
+                        {"type": "domain_suffix", "pattern": "mycorp.example"},
+                        {"type": "port", "pattern": "8080"}
+                    ],
+                    "action": "direct"
+                }
+            ],
+            "default_action": "proxy"
+        }"#));
+
+        // 该复合 AND 规则在只有域名时无法复现匹配，是 N1 的根因
+        assert!(
+            !crate::direct::should_resolve_upstream("api.mycorp.example"),
+            "前提校验: 仅凭域名无法复现带端口条件的 AND 规则"
+        );
+        // 但携带 DecisionSource::Rule 时必须放行，否则 N1 复发
+        assert!(
+            may_query_upstream("api.mycorp.example", DecisionSource::Rule),
+            "显式 Rule 直连绝不能因缺少端口参数被拒绝解析 (N1 回归)"
+        );
+
+        // Default 兜底来源: 不放行，防明文 DNS 泄露
+        assert!(!may_query_upstream("api.mycorp.example", DecisionSource::Default));
+        assert!(!may_query_upstream("obscure.foreign-site.org", DecisionSource::Default));
+
+        // 已知境外域名: 任何来源都不放行 (防 GFW 投毒)
+        assert!(!may_query_upstream("google.com", DecisionSource::Rule));
+        assert!(!may_query_upstream("telegram.org", DecisionSource::Rule));
+
+        // 局域网域名: 任何来源都不放行 (防内网主机名外泄至公共 DNS)
+        assert!(!may_query_upstream("nas.local", DecisionSource::Rule));
+        assert!(!may_query_upstream("tplogin.cn", DecisionSource::Rule));
+
+        // 静态国内白名单与国别 TLD: 无需 Rule 也放行
+        assert!(may_query_upstream("bilibili.com", DecisionSource::CnDomain));
+        assert!(may_query_upstream("example.cn", DecisionSource::CnDomain));
+    }
+
+    /// F1 回归防线: 无固定网关映射的内网域名 (.local/.lan/.corp/.home.arpa)
+    /// 必须判定为 Drop，绝不能被送去隧道代理 (会泄露内网主机名且必然连不通)。
+    #[tokio::test]
+    async fn test_lan_domain_never_falls_back_to_proxy() {
+        let _guard = crate::direct::acquire_test_guard();
+
+        for dom in ["nas.local", "printer.lan", "gitlab.corp", "host.home.arpa"] {
+            let (action, source, _) = crate::direct::route_decision_sourced(Some(dom), None, Some(80), Some("tcp"));
+            assert_eq!(action, crate::direct::RuleAction::Direct, "{dom} 必须判定为直连");
+            assert_eq!(source, crate::direct::DecisionSource::Lan, "{dom} 来源必须是 Lan");
+
+            let target = resolve_direct_target(dom, source).await;
+            assert_ne!(
+                target,
+                DirectTarget::FallbackProxy,
+                "{dom} 是内网域名，绝不可回退隧道代理"
+            );
+            // CI/测试环境无内网 DNS，解析不出私有地址即为 Drop
+            assert_eq!(target, DirectTarget::Drop, "{dom} 解析失败时必须丢弃而非外发");
+        }
+
+        // 有固定网关映射的路由器域名仍然直接返回网关 IP
+        assert_eq!(
+            resolve_direct_target("tplogin.cn", crate::direct::DecisionSource::Lan).await,
+            DirectTarget::RouterIp(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)))
+        );
     }
 }
