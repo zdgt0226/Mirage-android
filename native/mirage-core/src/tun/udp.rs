@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use smoltcp::wire::{Ipv4Packet, Ipv6Packet, IpProtocol, UdpPacket};
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::engine::Engine;
 use crate::proxy::outbound::OutboundNode;
@@ -167,7 +167,7 @@ async fn udp_flow_relay(
 
     // 复合分流规则决策
     let reverse_domain = engine.fake_ip_reverse(&key.dst);
-    let (action, matched_rule) = crate::direct::route_decision_detailed(reverse_domain.as_deref(), Some(key.dst), Some(key.dst_port), Some("udp"));
+    let (action, source, matched_rule) = crate::direct::route_decision_sourced(reverse_domain.as_deref(), Some(key.dst), Some(key.dst_port), Some("udp"));
 
     if action == crate::direct::RuleAction::Block {
         let target_str = reverse_domain.as_deref().map(|d| d.to_string()).unwrap_or_else(|| format!("{}:{}", key.dst, key.dst_port));
@@ -177,7 +177,7 @@ async fn udp_flow_relay(
     }
 
     if action == crate::direct::RuleAction::Direct {
-        return udp_flow_direct(stack, engine, key, reverse_domain, rx, matched_rule).await;
+        return udp_flow_direct(stack, engine, key, reverse_domain, rx, matched_rule, source).await;
     }
 
     // 取出站节点
@@ -803,22 +803,25 @@ async fn udp_flow_direct(
     reverse_domain: Option<String>,
     mut rx: tokio::sync::mpsc::Receiver<(SocketAddr, SocketAddr, Vec<u8>)>,
     matched_rule: String,
+    source: crate::direct::DecisionSource,
 ) {
     let is_fake = engine.is_fake_ip(&key.dst);
     let target_ip = if is_fake {
         if let Some(ref dom) = reverse_domain {
-            if let Some(real_ip) = crate::tun::dns::direct_dns_lookup(dom) {
-                real_ip
-            } else if crate::direct::should_resolve_upstream(dom) {
-                if let Some(real_v4) = crate::tun::dns::resolve_upstream(dom).await {
-                    std::net::IpAddr::V4(real_v4)
-                } else {
-                    debug!("[TUN-UDP/direct] 直连 UDP 域名 [{}] 解析失败，放弃", dom);
+            match crate::tun::tcp::resolve_direct_target(dom, source).await {
+                crate::tun::tcp::DirectTarget::Ip(real_ip) => real_ip,
+                crate::tun::tcp::DirectTarget::RouterIp(router_ip) => router_ip,
+                crate::tun::tcp::DirectTarget::FallbackProxy => {
+                    if source == crate::direct::DecisionSource::Default {
+                        warn!(
+                            "[TUN-UDP/direct] UDP 域名 [{}] 命中 Default Direct 规则，因属于未收录/非明确国内域名，防泄露放弃国内解析",
+                            dom
+                        );
+                    } else {
+                        debug!("[TUN-UDP/direct] 直连 UDP 域名 [{}] 解析失败或超时，放弃", dom);
+                    }
                     return;
                 }
-            } else {
-                debug!("[TUN-UDP/direct] UDP 域名 [{}] 命中兜底直连但非可信国内域名，防泄露跳过国内解析", dom);
-                return;
             }
         } else {
             debug!("[TUN-UDP/direct] 目标为 Fake-IP ({}) 但无对应域名，无法直连 UDP", key.dst);

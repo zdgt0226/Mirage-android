@@ -300,7 +300,7 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
         }
     }
 
-    let (action, matched_rule) = crate::direct::route_decision_detailed(direct_domain.as_deref(), Some(dst.0), Some(dst.1), Some("tcp"));
+    let (action, source, matched_rule) = crate::direct::route_decision_sourced(direct_domain.as_deref(), Some(dst.0), Some(dst.1), Some("tcp"));
 
     if action == crate::direct::RuleAction::Block {
         let target_name = direct_domain.as_deref().map(|d| d.to_string()).unwrap_or_else(|| dst.0.to_string());
@@ -312,7 +312,7 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
     }
 
     if action == crate::direct::RuleAction::Direct {
-        relay_direct(stack.clone(), stream, dst, direct_domain.clone(), initial_payload, matched_rule).await;
+        relay_direct(stack.clone(), stream, dst, direct_domain.clone(), initial_payload, matched_rule, source).await;
         return;
     }
 
@@ -544,6 +544,45 @@ fn _sock_buf_const() -> usize {
     SOCK_BUF
 }
 
+/// Fake-IP 直连目标 IP 解析裁决结果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectTarget {
+    Ip(std::net::IpAddr),
+    RouterIp(std::net::IpAddr),
+    FallbackProxy,
+}
+
+/// 统一裁决 Fake-IP 直连域名应访问的真实目标 IP 或降级转代理策略
+pub async fn resolve_direct_target(dom: &str, source: crate::direct::DecisionSource) -> DirectTarget {
+    // 1. 本地已学习的直连缓存 (高优先级快速通道)
+    if let Some(real_ip) = crate::tun::dns::direct_dns_lookup(dom) {
+        return DirectTarget::Ip(real_ip);
+    }
+    // 2. 局域网/路由器管理域名 (防污染与防虚假解析，前置绝对守卫)
+    if crate::direct::is_lan_or_router_domain(dom) {
+        if let Some(router_ip) = crate::direct::default_router_ip_for_domain(dom) {
+            return DirectTarget::RouterIp(router_ip);
+        }
+    }
+    // 3. 兜底 Default 来源：未命中显式规则且未被本地可信白名单收录，防泄露降级代理
+    if source == crate::direct::DecisionSource::Default {
+        return DirectTarget::FallbackProxy;
+    }
+    // 4. 允许向上游国内 DNS 查询 (Rule 显式直连、CnDomain、DynamicLearned、GlobalMode 等)
+    // 必须通过双重安全守卫：已知境外域名与局域网域名严禁向国内 DNS 查询
+    let allow_resolve = !crate::direct::is_known_non_cn_domain(dom)
+        && !crate::direct::is_lan_or_router_domain(dom)
+        && (crate::direct::should_resolve_upstream(dom) || source == crate::direct::DecisionSource::Rule);
+
+    if allow_resolve {
+        if let Some(real_v4) = crate::tun::dns::resolve_upstream(dom).await {
+            return DirectTarget::Ip(std::net::IpAddr::V4(real_v4));
+        }
+    }
+    // 5. 真实解析超时、无有效结果或被安全门控拦截，平滑回退代理
+    DirectTarget::FallbackProxy
+}
+
 /// 直连路径: smoltcp socket ⇄ 真实 TCP socket (protect 绕过 TUN，带自动回退代理)。
 async fn relay_direct(
     stack: Arc<TunStack>,
@@ -552,6 +591,7 @@ async fn relay_direct(
     direct_domain: Option<String>,
     initial_payload: Vec<u8>,
     matched_rule: String,
+    source: crate::direct::DecisionSource,
 ) {
     let engine = stack.engine();
     let is_fake = engine.is_fake_ip(&dst.0);
@@ -560,24 +600,23 @@ async fn relay_direct(
     let (target_ip, dns_ms) = if is_fake {
         if let Some(ref dom) = direct_domain {
             let dns_start = std::time::Instant::now();
-            if let Some(real_ip) = crate::tun::dns::direct_dns_lookup(dom) {
-                (real_ip, dns_start.elapsed().as_millis() as u32)
-            } else if crate::direct::should_resolve_upstream(dom) {
-                if let Some(real_v4) = crate::tun::dns::resolve_upstream(dom).await {
-                    (std::net::IpAddr::V4(real_v4), dns_start.elapsed().as_millis() as u32)
-                } else if let Some(router_ip) = crate::direct::default_router_ip_for_domain(dom) {
+            match resolve_direct_target(dom, source).await {
+                DirectTarget::Ip(real_ip) => (real_ip, dns_start.elapsed().as_millis() as u32),
+                DirectTarget::RouterIp(router_ip) => {
                     debug!("[TUN-TCP/direct] 局域网管理域名 [{}] 使用默认网关 IP: {}", dom, router_ip);
                     (router_ip, 0)
-                } else {
-                    debug!("[TUN-TCP/direct] 直连域名 [{}] 真实解析超时，自动平滑回退走隧道代理", dom);
+                }
+                DirectTarget::FallbackProxy => {
+                    if source == crate::direct::DecisionSource::Default {
+                        warn!(
+                            "[TUN-TCP/direct] 域名 [{}] 命中 Default Direct 规则，因属于未收录/非明确国内域名，触发防泄露降级策略转走隧道代理",
+                            dom
+                        );
+                    } else {
+                        debug!("[TUN-TCP/direct] 直连域名 [{}] 真实解析失败或超时，自动平滑回退走隧道代理", dom);
+                    }
                     return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule).await;
                 }
-            } else if let Some(router_ip) = crate::direct::default_router_ip_for_domain(dom) {
-                debug!("[TUN-TCP/direct] 局域网管理域名 [{}] 使用默认网关 IP: {}", dom, router_ip);
-                (router_ip, 0)
-            } else {
-                debug!("[TUN-TCP/direct] 域名 [{}] 命中兜底直连但非可信国内域名，防泄露即时转走隧道代理", dom);
-                return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule).await;
             }
         } else {
             debug!("[TUN-TCP/direct] 目标为 Fake-IP ({}) 但无对应域名映射，无法直连", dst.0);
@@ -822,4 +861,52 @@ async fn relay_direct(
         dst.0, dst.1,
         crate::tun::udp::human_bytes(up), crate::tun::udp::human_bytes(down),
         duration_ms, close_reason, req_total, is_reused);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[tokio::test]
+    async fn test_resolve_direct_target_matrix() {
+        let _guard = crate::direct::acquire_test_guard();
+        crate::direct::set_outbound_mode(0);
+        let _ = crate::direct::set_custom_rules(r#"{"rules": [], "default_action": "direct"}"#);
+        crate::tun::dns::clear_direct_cache();
+
+        // 1. 直连缓存命中 (最高优先级快速通道)
+        let cached_domain = "cached.cn-service.org";
+        let cached_ip = Ipv4Addr::new(114, 114, 114, 114);
+        crate::tun::dns::insert_direct_cache(cached_domain.to_string(), cached_ip, true);
+        let res = resolve_direct_target(cached_domain, crate::direct::DecisionSource::Default).await;
+        assert_eq!(res, DirectTarget::Ip(IpAddr::V4(cached_ip)));
+
+        // 2. 局域网主流路由器管理域名 (前置绝对守卫，直接返回网关 IP)
+        let res_tp = resolve_direct_target("tplogin.cn", crate::direct::DecisionSource::Lan).await;
+        assert_eq!(res_tp, DirectTarget::RouterIp(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+
+        let res_mi = resolve_direct_target("miwifi.com", crate::direct::DecisionSource::Lan).await;
+        assert_eq!(res_mi, DirectTarget::RouterIp(IpAddr::V4(Ipv4Addr::new(192, 168, 31, 1))));
+
+        // 3. 攻击者伪造的子串域名 (如 tplogin.cn.attacker.com): 绝不命中 RouterIp，Default 下安全降级为 FallbackProxy
+        let res_spoof = resolve_direct_target("tplogin.cn.attacker.com", crate::direct::DecisionSource::Default).await;
+        assert_eq!(res_spoof, DirectTarget::FallbackProxy);
+
+        // 4. Default 兜底来源下的未知长尾境外域名: 防泄露安全门控立即降级为 FallbackProxy (绝不发公网 DNS 查询)
+        let res_default = resolve_direct_target("obscure.foreign-site.org", crate::direct::DecisionSource::Default).await;
+        assert_eq!(res_default, DirectTarget::FallbackProxy);
+
+        // 5. 已知境外域名 (如 google.com): 即使传入 DecisionSource::Rule，为防 GFW 投毒与泄漏也绝不查询国内上游，返回 FallbackProxy
+        let res_google = resolve_direct_target("google.com", crate::direct::DecisionSource::Rule).await;
+        assert_eq!(res_google, DirectTarget::FallbackProxy);
+
+        // 6. N1 场景验证: 针对显式 Rule 直连域名 (如 api.mycorp.example)，
+        // 当直连缓存已就绪或命中规则时，resolve_direct_target 优先返回真实 IP，绝不因缺少端口等参数被误降级为 FallbackProxy
+        let corp_domain = "api.mycorp.example";
+        let corp_ip = Ipv4Addr::new(192, 168, 10, 50);
+        crate::tun::dns::insert_direct_cache(corp_domain.to_string(), corp_ip, true);
+        let res_corp = resolve_direct_target(corp_domain, crate::direct::DecisionSource::Rule).await;
+        assert_eq!(res_corp, DirectTarget::Ip(IpAddr::V4(corp_ip)));
+    }
 }

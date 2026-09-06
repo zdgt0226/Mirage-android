@@ -340,20 +340,21 @@ pub fn is_lan_or_router_domain(domain: &str) -> bool {
     false
 }
 
-/// 局域网主流路由器管理域名默认默认回退 IP
+/// 局域网主流路由器管理域名默认回退 IP (严格匹配域名全等或合法子域后缀，杜绝 substring 伪造劫持)
 pub fn default_router_ip_for_domain(domain: &str) -> Option<IpAddr> {
     let d = domain.trim_end_matches('.').to_ascii_lowercase();
-    if d.contains("miwifi.com") {
+    let matches = |target: &str| d == target || d.ends_with(&format!(".{target}"));
+    if matches("miwifi.com") {
         Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 31, 1)))
-    } else if d.contains("tendawifi.com") {
+    } else if matches("tendawifi.com") {
         Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 0, 1)))
-    } else if d.contains("phicomm.me") || d.contains("speedport.ip") {
+    } else if matches("phicomm.me") || matches("speedport.ip") {
         Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 2, 1)))
-    } else if d.contains("fritz.box") {
+    } else if matches("fritz.box") {
         Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 178, 1)))
-    } else if d.contains("router.asus.com") || d.contains("asusrouter.com") || d.contains("tplogin.cn")
-        || d.contains("tplinkwifi.net") || d.contains("melogin.cn") || d.contains("falogin.cn")
-        || d.contains("hiwifi.com") || d.contains("netcore.cc") || d.contains("leike.cc")
+    } else if matches("router.asus.com") || matches("asusrouter.com") || matches("tplogin.cn")
+        || matches("tplinkwifi.net") || matches("melogin.cn") || matches("falogin.cn")
+        || matches("hiwifi.com") || matches("netcore.cc") || matches("leike.cc")
     {
         Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1)))
     } else {
@@ -597,36 +598,48 @@ pub fn get_outbound_mode() -> u8 {
     OUTBOUND_MODE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// 综合决策请求的目标动作与匹配细节 (用于 Surge 级 Recent Requests 请求流展示)
-pub fn route_decision_detailed(
+/// 规则决策来源分类 (精确区分局域网、全局模式、用户规则、域名白名单与默认动作)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionSource {
+    Lan,
+    GlobalMode,
+    Rule,
+    CnDomain,
+    DynamicLearned,
+    CnIp,
+    Default,
+}
+
+/// 综合决策请求的目标动作、决策来源与匹配细节 (用于准确路由执行与防泄露安全降级)
+pub fn route_decision_sourced(
     domain: Option<&str>,
     ip: Option<IpAddr>,
     port: Option<u16>,
     protocol: Option<&str>,
-) -> (RuleAction, String) {
+) -> (RuleAction, DecisionSource, String) {
     // 0. 私有 IP / 局域网主机与路由器后台域名内置本地直连 (最高保护，任何模式均不破坏 LAN)
     if let Some(ip_addr) = ip {
         // 拦截发往 Mirage 本地 DNS 虚拟地址 (198.19.0.53) 的 TCP 请求 (如 Android 14/15/16 DoT 853 端口探测)
         // 立即 Block 触发 RST，使 Android 系统 DnsResolver 0ms 快速回退到标准 UDP 53，杜绝 15 秒挂起
         if ip_addr == IpAddr::V4(std::net::Ipv4Addr::new(198, 19, 0, 53)) {
-            return (RuleAction::Block, "Block: Local DNS Virtual IP TCP".to_string());
+            return (RuleAction::Block, DecisionSource::Lan, "Block: Local DNS Virtual IP TCP".to_string());
         }
         if is_private_ip(ip_addr) {
-            return (RuleAction::Direct, "Private IP (LAN)".to_string());
+            return (RuleAction::Direct, DecisionSource::Lan, "Private IP (LAN)".to_string());
         }
     }
     if let Some(dom) = domain {
         if is_lan_or_router_domain(dom) {
-            return (RuleAction::Direct, "Router / LAN Domain".to_string());
+            return (RuleAction::Direct, DecisionSource::Lan, "Router / LAN Domain".to_string());
         }
     }
 
     // 1. 全局模式判断 (Global Proxy / Direct Override)
     let mode = get_outbound_mode();
     if mode == 1 {
-        return (RuleAction::Proxy, "Global Proxy Override".to_string());
+        return (RuleAction::Proxy, DecisionSource::GlobalMode, "Global Proxy Override".to_string());
     } else if mode == 2 {
-        return (RuleAction::Direct, "Global Direct Override".to_string());
+        return (RuleAction::Direct, DecisionSource::GlobalMode, "Global Direct Override".to_string());
     }
 
     let r = router_store().read().unwrap_or_else(|e| e.into_inner());
@@ -644,17 +657,17 @@ pub fn route_decision_detailed(
                 }
             }
             record_rule_hit(&rule.id, &rule.name, rule.action.as_str());
-            return (rule.action, format!("Rule: {}", rule.name));
+            return (rule.action, DecisionSource::Rule, format!("Rule: {}", rule.name));
         }
     }
 
     // 3. 国内域名智能直连判定 (静态白名单 + DNS 动态学习缓存)
     if let Some(dom) = domain {
         if is_cn_domain(dom) {
-            return (RuleAction::Direct, "CN Domain (Direct)".to_string());
+            return (RuleAction::Direct, DecisionSource::CnDomain, "CN Domain (Direct)".to_string());
         }
         if let Some(true) = crate::tun::dns::is_dynamic_direct_domain(dom) {
-            return (RuleAction::Direct, "Dynamic CN Domain (Learned)".to_string());
+            return (RuleAction::Direct, DecisionSource::DynamicLearned, "Dynamic CN Domain (Learned)".to_string());
         }
         // 注意: 若动态学习为 Some(false) 或 None，不在此短路阻断，平滑落入第 4 步 CN IP 强证据判定
     }
@@ -662,13 +675,24 @@ pub fn route_decision_detailed(
     // 4. 国内裸 IP 智能直连兜底 (GeoIP / CIDR 二分查找)
     if let Some(ip_addr) = ip {
         if is_cn_ip(ip_addr) {
-            return (RuleAction::Direct, "CN IP (Direct)".to_string());
+            return (RuleAction::Direct, DecisionSource::CnIp, "CN IP (Direct)".to_string());
         }
     }
 
     // 5. 回退至默认动作 (境外未命中规则默认走 proxy)
     let action = r.default_action;
-    (action, format!("Default {:?}", action))
+    (action, DecisionSource::Default, format!("Default {:?}", action))
+}
+
+/// 综合决策请求的目标动作与匹配细节 (保持原签名向后兼容，供现有测试与 Recent Requests 展示)
+pub fn route_decision_detailed(
+    domain: Option<&str>,
+    ip: Option<IpAddr>,
+    port: Option<u16>,
+    protocol: Option<&str>,
+) -> (RuleAction, String) {
+    let (action, _source, matched_rule) = route_decision_sourced(domain, ip, port, protocol);
+    (action, matched_rule)
 }
 
 /// 综合决策请求的目标动作 (支持传入 域名、IP、端口、协议)
@@ -959,6 +983,9 @@ pub fn should_resolve_upstream(domain: &str) -> bool {
     if is_lan_or_router_domain(&d_lower) {
         return false; // LAN 域名走默认网关 IP，禁止向公网查询
     }
+    if get_outbound_mode() == 1 {
+        return false; // 全局代理模式下静默，禁止向国内 DNS 查询 (N2)
+    }
     if get_outbound_mode() == 2 {
         return true; // 全局直连模式
     }
@@ -968,15 +995,17 @@ pub fn should_resolve_upstream(domain: &str) -> bool {
     if is_cn_domain(&d_lower) {
         return true; // 国内白名单服务 (GeoSite CN)
     }
+    // 检查是否有自定义直连规则显式命中该域名 (短作用域读锁，避免与 direct_cache 锁序倒置)
+    {
+        let r = router_store().read().unwrap_or_else(|e| e.into_inner());
+        for rule in &r.rules {
+            if rule.action == RuleAction::Direct && rule.matches(Some(&d_lower), None, None, None) {
+                return true;
+            }
+        }
+    }
     if let Some(true) = crate::tun::dns::is_dynamic_direct_domain(&d_lower) {
         return true; // 已学习确认的国内域名
-    }
-    // 检查是否有自定义直连规则显式命中该域名 (仅限 Action == Direct 且能由域名匹配)
-    let r = router_store().read().unwrap_or_else(|e| e.into_inner());
-    for rule in &r.rules {
-        if rule.action == RuleAction::Direct && rule.matches(Some(&d_lower), None, None, None) {
-            return true;
-        }
     }
     false
 }
@@ -1499,4 +1528,83 @@ mod tests {
         let (act_ip, _) = route_decision_detailed(None, Some(cf_ip), Some(443), Some("tcp"));
         assert_eq!(act_ip, RuleAction::Proxy, "境外 Anycast IP 绝不被误判为直连");
     }
+
+    #[test]
+    fn test_default_router_ip_substring_immunity() {
+        // 1. 精确匹配与子域名匹配应正常返回对应路由器 IP
+        assert_eq!(
+            default_router_ip_for_domain("tplogin.cn"),
+            Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1)))
+        );
+        assert_eq!(
+            default_router_ip_for_domain("admin.tplogin.cn"),
+            Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1)))
+        );
+        assert_eq!(
+            default_router_ip_for_domain("miwifi.com"),
+            Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 31, 1)))
+        );
+        assert_eq!(
+            default_router_ip_for_domain("wifi.miwifi.com"),
+            Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 31, 1)))
+        );
+
+        // 2. 恶意攻击者构造的前缀子串域名，绝不可被误判劫持 (杜绝 contains 漏洞)
+        assert_eq!(default_router_ip_for_domain("tplogin.cn.attacker.com"), None);
+        assert_eq!(default_router_ip_for_domain("miwifi.com.attacker.com"), None);
+        assert_eq!(default_router_ip_for_domain("shanleike.cc"), None);
+        assert_eq!(default_router_ip_for_domain("www.releike.cc.example.com"), None);
+        assert_eq!(default_router_ip_for_domain("notmiwifi.com"), None);
+
+        // 3. 同时验证 is_lan_or_router_domain 前置守卫同样免疫
+        assert!(!is_lan_or_router_domain("tplogin.cn.attacker.com"));
+        assert!(!is_lan_or_router_domain("shanleike.cc"));
+        assert!(is_lan_or_router_domain("tplogin.cn"));
+        assert!(is_lan_or_router_domain("admin.tplogin.cn"));
+    }
+
+    #[test]
+    fn test_route_decision_sourced_variants() {
+        let _guard = acquire_test_guard();
+        set_outbound_mode(0);
+        assert!(set_custom_rules(r#"{
+            "rules": [
+                {
+                    "id": "corp_rule",
+                    "name": "Corp App",
+                    "enabled": true,
+                    "logic": "AND",
+                    "conditions": [
+                        {"type": "domain_suffix", "pattern": "mycorp.example"},
+                        {"type": "port", "pattern": "8080"}
+                    ],
+                    "action": "direct"
+                }
+            ],
+            "default_action": "proxy"
+        }"#));
+
+        // 1. 命中复合规则 (Rule)
+        let (action, source, rule_name) = route_decision_sourced(Some("api.mycorp.example"), None, Some(8080), Some("tcp"));
+        assert_eq!(action, RuleAction::Direct);
+        assert_eq!(source, DecisionSource::Rule);
+        assert_eq!(rule_name, "Rule: Corp App");
+
+        // 端口不匹配未命中规则，回退 Default
+        let (action_def, source_def, _) = route_decision_sourced(Some("api.mycorp.example"), None, Some(80), Some("tcp"));
+        assert_eq!(action_def, RuleAction::Proxy);
+        assert_eq!(source_def, DecisionSource::Default);
+
+        // 2. 局域网主机 / 路由器域名 (Lan)
+        let (action_lan, source_lan, _) = route_decision_sourced(Some("tplogin.cn"), None, Some(80), Some("tcp"));
+        assert_eq!(action_lan, RuleAction::Direct);
+        assert_eq!(source_lan, DecisionSource::Lan);
+
+        // 3. 全局模式覆盖 (GlobalMode)
+        set_outbound_mode(1);
+        let (action_mode, source_mode, _) = route_decision_sourced(Some("bilibili.com"), None, Some(443), Some("tcp"));
+        assert_eq!(action_mode, RuleAction::Proxy);
+        assert_eq!(source_mode, DecisionSource::GlobalMode);
+    }
 }
+
