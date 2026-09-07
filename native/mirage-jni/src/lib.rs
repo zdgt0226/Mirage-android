@@ -912,5 +912,16 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_getRecentReques
         .into_raw()
 }
 
+/// `void setActiveNetwork(long networkHandle)` — 同步活动物理网络系统句柄至原生层 (用于 NDK android_setsocknetwork 原生绑定)
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_setActiveNetwork(
+    _env: JNIEnv,
+    _class: JClass,
+    network_handle: jlong,
+) {
+    mirage_core::protect::set_active_network_handle(network_handle as u64);
+}
+
+
 
 

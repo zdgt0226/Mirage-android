@@ -137,6 +137,9 @@ object MirageNative {
     /** 获取最近请求流列表 (Surge 级 Recent Requests)。 */
     external fun getRecentRequestsJson(): String
 
+    /** 同步底层活动物理网络的系统句柄至原生层 (用于 NDK android_setsocknetwork 原生绑定)。 */
+    external fun setActiveNetwork(networkHandle: Long)
+
     /**
      * Rust 侧同步调用 (隧道 socket connect 前): 把 fd 交给当前活跃的 VpnService protect。
      * 必须同步返回 (protect 设置 SO_MARK 影响路由, 晚了会导致隧道流量进 TUN 环路)。

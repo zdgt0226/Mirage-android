@@ -272,7 +272,8 @@ class CoreService : VpnService() {
                 if (physical != null) {
                     setUnderlyingNetworks(arrayOf(physical))
                     currentPhysicalNetwork = physical
-                    log("[core] 启动即时绑定底层物理网络: $physical")
+                    runCatching { MirageNative.setActiveNetwork(physical.networkHandle) }
+                    log("[core] 启动即时绑定底层物理网络: $physical (handle=${physical.networkHandle})")
                 }
             }
         }
@@ -360,6 +361,7 @@ class CoreService : VpnService() {
                         runCatching { MirageNative.flushPool() }
                     }
                     currentPhysicalNetwork = network
+                    runCatching { MirageNative.setActiveNetwork(network.networkHandle) }
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                         runCatching { setUnderlyingNetworks(arrayOf(network)) }
                     }
@@ -375,6 +377,7 @@ class CoreService : VpnService() {
                 override fun onLost(network: Network) {
                     if (currentPhysicalNetwork == network) {
                         currentPhysicalNetwork = null
+                        runCatching { MirageNative.setActiveNetwork(0L) }
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                             runCatching { setUnderlyingNetworks(null) }
                         }
@@ -833,14 +836,6 @@ class CoreService : VpnService() {
         @Volatile
         private var active: CoreService? = null
 
-        private val fdField by lazy {
-            runCatching {
-                java.io.FileDescriptor::class.java.getDeclaredField("descriptor").apply {
-                    isAccessible = true
-                }
-            }.getOrNull()
-        }
-
         @JvmStatic
         fun protectFd(fd: Int) {
             val inst = active
@@ -848,24 +843,8 @@ class CoreService : VpnService() {
                 LogStore.append("[core] protect 失败: active 未设置!")
                 return
             }
-            // ① 传统 protect (SO_MARK 策略路由)
+            // 传统 protect (SO_MARK 策略路由，物理网卡绑定已下沉至 Rust NDK android_setsocknetwork)
             val ok = runCatching { inst.protect(fd) }.getOrDefault(false)
-            // ② 物理网络显式绑定 (双重防护): 确保双网卡(Wi-Fi+5G)共存时流量必定走活动物理网卡
-            runCatching {
-                val realNet = inst.currentPhysicalNetwork
-                if (realNet != null) {
-                    val field = fdField
-                    if (field != null) {
-                        val fdesc = java.io.FileDescriptor()
-                        field.setInt(fdesc, fd)
-                        realNet.bindSocket(fdesc)
-                    } else {
-                        android.os.ParcelFileDescriptor.fromFd(fd).use { pfd ->
-                            realNet.bindSocket(pfd.fileDescriptor)
-                        }
-                    }
-                }
-            }
             if (!ok) {
                 LogStore.append("[core] protect(fd=$fd) 失败")
             }

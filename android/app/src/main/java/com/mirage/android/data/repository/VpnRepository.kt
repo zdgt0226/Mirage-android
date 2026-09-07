@@ -1,13 +1,19 @@
 package com.mirage.android.data.repository
 
+import android.app.Activity
+import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.os.Bundle
 import com.mirage.android.CoreService
 import com.mirage.android.core.CoreController
 import com.mirage.android.core.ICoreCallback
 import com.mirage.android.data.model.TrafficStats
 import com.mirage.android.data.model.VpnState
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -59,6 +65,43 @@ class VpnRepository(private val context: Context) {
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var telemetryJob: Job? = null
+    private val telemetryWakeChannel = Channel<Unit>(Channel.CONFLATED)
+    private val isAppForeground = AtomicBoolean(true)
+    private val isMonitorActive = AtomicBoolean(false)
+    private val startedActivities = AtomicInteger(0)
+
+    init {
+        (context.applicationContext as? Application)?.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityStarted(activity: Activity) {
+                if (startedActivities.incrementAndGet() > 0) {
+                    isAppForeground.set(true)
+                    telemetryWakeChannel.trySend(Unit)
+                }
+            }
+            override fun onActivityStopped(activity: Activity) {
+                if (startedActivities.decrementAndGet() <= 0) {
+                    startedActivities.set(0)
+                    isAppForeground.set(false)
+                }
+            }
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+            override fun onActivityResumed(activity: Activity) {}
+            override fun onActivityPaused(activity: Activity) {}
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+            override fun onActivityDestroyed(activity: Activity) {}
+        })
+    }
+
+    /**
+     * 标记当前用户是否正在观察【监控/日志】页面。
+     * 当用户离开监控 Tab 或 App 退到后台时挂起重型 JSON 轮询；切入时即时唤醒更新。
+     */
+    fun setMonitorActive(active: Boolean) {
+        val prev = isMonitorActive.getAndSet(active)
+        if (!prev && active) {
+            telemetryWakeChannel.trySend(Unit)
+        }
+    }
 
     private val callback = object : ICoreCallback.Stub() {
         override fun onStateChanged(running: Boolean) {
@@ -242,53 +285,65 @@ class VpnRepository(private val context: Context) {
                             _vpnState.value = VpnState.Connected(nodeRepo.getSelectedNode())
                         }
                     }
-                    // 1. 每 1s: 极轻量基础流量与延迟 (7个浮点 + 1个长整型，0 CPU/GC 开销)
-                    val statsArr = CoreController.getStats()
-                    if (statsArr != null && statsArr.size >= 7) {
-                        _trafficStats.value = TrafficStats.fromArray(statsArr)
-                    }
-                    val lat = CoreController.latencyMs()
-                    _latencyMs.value = lat
 
-                    // 2. 每 2s: 日志与活跃连接拉取 (避免高频 IPC 与解析)
-                    if (tick % 2 == 0L) {
-                        val remoteLogs = CoreController.recentLogs().toList()
-                        if (remoteLogs.isNotEmpty()) {
-                            _logs.value = remoteLogs.takeLast(150)
+                    val foreground = isAppForeground.get()
+                    val monitorActive = isMonitorActive.get()
+
+                    // 1. 基础流量与延迟统计:
+                    // 前台每 1s 采样 (Home 首页图表); 后台降频为 5s 采样 (超低功耗待机)
+                    if (foreground || tick % 5 == 0L) {
+                        val statsArr = CoreController.getStats()
+                        if (statsArr != null && statsArr.size >= 7) {
+                            _trafficStats.value = TrafficStats.fromArray(statsArr)
                         }
+                        val lat = CoreController.latencyMs()
+                        _latencyMs.value = lat
+                    }
 
-                        val connJson = CoreController.getConnectionsJson()
-                        if (connJson != lastConnJson) {
-                            lastConnJson = connJson
-                            if (connJson.isNotBlank() && connJson != "[]") {
-                                val parsedList = mutableListOf<com.mirage.android.data.model.ConnectionInfo>()
-                                runCatching {
-                                    val arr = org.json.JSONArray(connJson)
-                                    for (i in 0 until arr.length()) {
-                                        parsedList.add(com.mirage.android.data.model.ConnectionInfo.fromJson(arr.getJSONObject(i)))
+                    // 2. 日志与活跃连接/近期请求拉取:
+                    // 仅当处于前台且用户正停留在【监控】Tab (isMonitorActive = true) 时才拉取与解析 JSON
+                    if (foreground && monitorActive) {
+                        if (tick % 2 == 0L) {
+                            val remoteLogs = CoreController.recentLogs().toList()
+                            if (remoteLogs.isNotEmpty()) {
+                                _logs.value = remoteLogs.takeLast(150)
+                            }
+
+                            val connJson = CoreController.getConnectionsJson()
+                            if (connJson != lastConnJson) {
+                                lastConnJson = connJson
+                                if (connJson.isNotBlank() && connJson != "[]") {
+                                    val parsedList = mutableListOf<com.mirage.android.data.model.ConnectionInfo>()
+                                    runCatching {
+                                        val arr = org.json.JSONArray(connJson)
+                                        for (i in 0 until arr.length()) {
+                                            parsedList.add(com.mirage.android.data.model.ConnectionInfo.fromJson(arr.getJSONObject(i)))
+                                        }
                                     }
+                                    _connections.value = parsedList
+                                } else {
+                                    _connections.value = emptyList()
                                 }
-                                _connections.value = parsedList
-                            } else {
-                                _connections.value = emptyList()
                             }
                         }
-                    }
 
-                    // 3. 每 3s: 最近请求历史 (300 条 JSON)，仅在内容变化时才反序列化
-                    if (tick % 3 == 0L) {
-                        val reqsJson = CoreController.getRecentRequestsJson()
-                        if (reqsJson != lastReqsJson) {
-                            lastReqsJson = reqsJson
-                            if (reqsJson.isNotBlank() && reqsJson != "[]") {
-                                val parsedReqs = mutableListOf<com.mirage.android.data.model.RecentRequestInfo>()
-                                runCatching {
-                                    val arr = org.json.JSONArray(reqsJson)
-                                    for (i in 0 until arr.length()) {
-                                        parsedReqs.add(com.mirage.android.data.model.RecentRequestInfo.fromJson(arr.getJSONObject(i)))
+                        // 最近请求流: 每 2s 轮询一次 (或首次进入监控页时立即拉取)
+                        if (tick % 2 == 0L || lastReqsJson.isEmpty()) {
+                            val reqsJson = CoreController.getRecentRequestsJson()
+                            if (reqsJson != lastReqsJson) {
+                                lastReqsJson = reqsJson
+                                if (reqsJson.isNotBlank() && reqsJson != "[]") {
+                                    val parsedReqs = mutableListOf<com.mirage.android.data.model.RecentRequestInfo>()
+                                    runCatching {
+                                        val arr = org.json.JSONArray(reqsJson)
+                                        for (i in 0 until arr.length()) {
+                                            parsedReqs.add(com.mirage.android.data.model.RecentRequestInfo.fromJson(arr.getJSONObject(i)))
+                                        }
                                     }
+                                    _recentRequests.value = parsedReqs
+                                } else {
+                                    _recentRequests.value = emptyList()
                                 }
-                                _recentRequests.value = parsedReqs
                             }
                         }
                     }
@@ -299,7 +354,12 @@ class VpnRepository(private val context: Context) {
                         }
                     }
                 }
-                delay(1000)
+
+                // 自适应等待: 前台 1000ms, 后台 5000ms; 用户切入监控页或回到前台时通过 channel 即时唤醒
+                val intervalMs = if (isAppForeground.get()) 1000L else 5000L
+                withTimeoutOrNull(intervalMs) {
+                    telemetryWakeChannel.receive()
+                }
             }
         }
     }

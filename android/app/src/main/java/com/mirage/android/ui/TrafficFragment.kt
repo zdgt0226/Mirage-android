@@ -260,6 +260,16 @@ class TrafficFragment : Fragment() {
         binding.trafficLogView.text = builder
     }
 
+    override fun onResume() {
+        super.onResume()
+        com.mirage.android.data.repository.VpnRepository.getInstance(requireContext()).setMonitorActive(true)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        com.mirage.android.data.repository.VpnRepository.getInstance(requireContext()).setMonitorActive(false)
+    }
+
     override fun onDestroyView() {
         super.onDestroyView()
         _binding = null
