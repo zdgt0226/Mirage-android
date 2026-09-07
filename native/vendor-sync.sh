@@ -42,6 +42,7 @@ FILES=(
     "monitor.rs"
     "dns/mod.rs"
     "dns/fake_ip.rs"
+    "dns/domain_match.rs"
     "node_uri.rs"
     "net_util.rs"
     "config.rs"
