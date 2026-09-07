@@ -250,94 +250,158 @@ class CoreManager private constructor(private val context: Context) {
         return setActiveCore(CoreInfo.BUILTIN_ID)
     }
 
-    /**
-     * 查询 GitHub Releases 获取最新的 Mirage-rs 内核发布列表
-     */
-    suspend fun fetchOnlineReleases(): Result<List<OnlineReleaseInfo>> = withContext(Dispatchers.IO) {
+    // ── 多更新源与镜像加速管理 (对齐 GeoManager 机制) ─────────────────────────
+
+    fun getSources(): List<CoreSource> {
+        val list = BUILTIN_SOURCES.toMutableList()
+        val customRaw = prefs.getString(KEY_CUSTOM_SOURCES, "[]") ?: "[]"
         runCatching {
-            val url = java.net.URL("https://api.github.com/repos/zdgt0226/Mirage-rs/releases")
-            val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 10000
-                readTimeout = 10000
-                setRequestProperty("User-Agent", "Mirage-Android-Client")
-                setRequestProperty("Accept", "application/vnd.github.v3+json")
-            }
-
-            if (conn.responseCode !in 200..299) {
-                throw java.io.IOException("GitHub API 响应错误: ${conn.responseCode} ${conn.responseMessage}")
-            }
-
-            val bodyText = conn.inputStream.bufferedReader().use { it.readText() }
-            val releasesJson = JSONArray(bodyText)
-            val list = mutableListOf<OnlineReleaseInfo>()
-
-            val supportedAbis = Build.SUPPORTED_ABIS.toList()
-
-            for (i in 0 until releasesJson.length()) {
-                val rel = releasesJson.getJSONObject(i)
-                val tagName = rel.optString("tag_name", "")
-                val releaseName = rel.optString("name", tagName)
-                val body = rel.optString("body", "")
-                val publishedAt = rel.optString("published_at", "")
-                val assets = rel.optJSONArray("assets") ?: continue
-
-                // 查找匹配当前设备 ABI 的 .so 文件资产
-                var matchedAsset: JSONObject? = null
-                var matchedAbi = "arm64-v8a"
-
-                for (j in 0 until assets.length()) {
-                    val asset = assets.getJSONObject(j)
-                    val aName = asset.optString("name", "")
-                    if (!aName.endsWith(".so")) continue
-
-                    // 优先匹配当前主架构 (如 arm64-v8a / aarch64)
-                    for (abi in supportedAbis) {
-                        val keyword = when (abi) {
-                            "arm64-v8a" -> listOf("arm64", "aarch64")
-                            "armeabi-v7a" -> listOf("armv7", "arm32", "armeabi")
-                            "x86_64" -> listOf("x86_64", "amd64")
-                            "x86" -> listOf("i386", "i686", "x86")
-                            else -> listOf(abi)
-                        }
-                        if (keyword.any { aName.contains(it, ignoreCase = true) } || aName == "libmirage_jni.so") {
-                            matchedAsset = asset
-                            matchedAbi = abi
-                            break
-                        }
-                    }
-                    if (matchedAsset != null) break
-                }
-
-                if (matchedAsset != null) {
-                    val rawDigest = matchedAsset.optString("digest", "")
-                    val sha256 = when {
-                        rawDigest.startsWith("sha256:", ignoreCase = true) -> rawDigest.substringAfter(":").trim()
-                        rawDigest.isNotBlank() -> rawDigest.trim()
-                        else -> null
-                    }
-
-                    list.add(
-                        OnlineReleaseInfo(
-                            tagName = tagName,
-                            name = releaseName,
-                            body = body,
-                            publishedAt = publishedAt.take(10),
-                            assetName = matchedAsset.getString("name"),
-                            downloadUrl = matchedAsset.getString("browser_download_url"),
-                            sizeBytes = matchedAsset.optLong("size", 0L),
-                            targetAbi = matchedAbi,
-                            expectedSha256 = sha256
-                        )
+            val arr = JSONArray(customRaw)
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                list.add(
+                    CoreSource(
+                        id = o.getString("id"),
+                        name = o.getString("name"),
+                        releasesApiUrl = o.getString("releasesApiUrl"),
+                        downloadPrefix = o.optString("downloadPrefix").takeIf { it.isNotBlank() },
+                        isBuiltin = false
                     )
-                }
+                )
             }
-            list
         }
+        return list
+    }
+
+    fun getActiveSource(): CoreSource {
+        val activeId = prefs.getString(KEY_ACTIVE_SOURCE_ID, "ghfast")
+        val sources = getSources()
+        return sources.firstOrNull { it.id == activeId } ?: sources.first()
+    }
+
+    fun setActiveSource(sourceId: String) {
+        prefs.edit().putString(KEY_ACTIVE_SOURCE_ID, sourceId).apply()
+    }
+
+    fun saveCustomSources(customList: List<CoreSource>) {
+        val arr = JSONArray()
+        for (s in customList.filter { !it.isBuiltin }) {
+            arr.put(
+                JSONObject()
+                    .put("id", s.id)
+                    .put("name", s.name)
+                    .put("releasesApiUrl", s.releasesApiUrl)
+                    .put("downloadPrefix", s.downloadPrefix ?: "")
+            )
+        }
+        prefs.edit().putString(KEY_CUSTOM_SOURCES, arr.toString()).apply()
     }
 
     /**
-     * 下载指定的 Release 资产并导入为活跃内核
+     * 查询 GitHub Releases 获取最新的 Mirage-rs 内核发布列表 (支持多源容灾降级)
+     */
+    suspend fun fetchOnlineReleases(): Result<List<OnlineReleaseInfo>> = withContext(Dispatchers.IO) {
+        val activeSource = getActiveSource()
+        val sourcesToTry = mutableListOf<String>()
+        sourcesToTry.add(activeSource.releasesApiUrl)
+        for (s in getSources()) {
+            if (!sourcesToTry.contains(s.releasesApiUrl)) {
+                sourcesToTry.add(s.releasesApiUrl)
+            }
+        }
+
+        var lastException: Throwable? = null
+        for (targetUrl in sourcesToTry) {
+            val res = runCatching {
+                val url = java.net.URL(targetUrl)
+                val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 8000
+                    readTimeout = 8000
+                    setRequestProperty("User-Agent", "Mirage-Android-Client")
+                    setRequestProperty("Accept", "application/vnd.github.v3+json")
+                }
+
+                if (conn.responseCode !in 200..299) {
+                    throw java.io.IOException("HTTP 响应错误: ${conn.responseCode} ${conn.responseMessage}")
+                }
+
+                val bodyText = conn.inputStream.bufferedReader().use { it.readText() }
+                val releasesJson = JSONArray(bodyText)
+                val list = mutableListOf<OnlineReleaseInfo>()
+                val supportedAbis = Build.SUPPORTED_ABIS.toList()
+
+                for (i in 0 until releasesJson.length()) {
+                    val rel = releasesJson.getJSONObject(i)
+                    val tagName = rel.optString("tag_name", "")
+                    val releaseName = rel.optString("name", tagName)
+                    val body = rel.optString("body", "")
+                    val publishedAt = rel.optString("published_at", "")
+                    val assets = rel.optJSONArray("assets") ?: continue
+
+                    var matchedAsset: JSONObject? = null
+                    var matchedAbi = "arm64-v8a"
+
+                    for (j in 0 until assets.length()) {
+                        val asset = assets.getJSONObject(j)
+                        val aName = asset.optString("name", "")
+                        if (!aName.endsWith(".so")) continue
+
+                        for (abi in supportedAbis) {
+                            val keyword = when (abi) {
+                                "arm64-v8a" -> listOf("arm64", "aarch64")
+                                "armeabi-v7a" -> listOf("armv7", "arm32", "armeabi")
+                                "x86_64" -> listOf("x86_64", "amd64")
+                                "x86" -> listOf("i386", "i686", "x86")
+                                else -> listOf(abi)
+                            }
+                            if (keyword.any { aName.contains(it, ignoreCase = true) } || aName == "libmirage_jni.so") {
+                                matchedAsset = asset
+                                matchedAbi = abi
+                                break
+                            }
+                        }
+                        if (matchedAsset != null) break
+                    }
+
+                    if (matchedAsset != null) {
+                        val rawDigest = matchedAsset.optString("digest", "")
+                        val sha256 = when {
+                            rawDigest.startsWith("sha256:", ignoreCase = true) -> rawDigest.substringAfter(":").trim()
+                            rawDigest.isNotBlank() -> rawDigest.trim()
+                            else -> null
+                        }
+
+                        list.add(
+                            OnlineReleaseInfo(
+                                tagName = tagName,
+                                name = releaseName,
+                                body = body,
+                                publishedAt = publishedAt.take(10),
+                                assetName = matchedAsset.getString("name"),
+                                downloadUrl = matchedAsset.getString("browser_download_url"),
+                                sizeBytes = matchedAsset.optLong("size", 0L),
+                                targetAbi = matchedAbi,
+                                expectedSha256 = sha256
+                            )
+                        )
+                    }
+                }
+                list
+            }
+
+            if (res.isSuccess) {
+                return@withContext res
+            } else {
+                lastException = res.exceptionOrNull()
+                Log.w("Mirage", "[loader] 源 $targetUrl 请求失败: ${lastException?.message}, 自动尝试下一个更新源")
+            }
+        }
+        Result.failure(lastException ?: java.io.IOException("所有内核更新源均无法连接"))
+    }
+
+    /**
+     * 下载指定的 Release 资产并导入为活跃内核 (多镜像源自动容灾 + SHA-256 密码学强校验)
      */
     suspend fun downloadAndImportRelease(
         release: OnlineReleaseInfo,
@@ -355,76 +419,139 @@ class CoreManager private constructor(private val context: Context) {
             return@withContext Result.success(existing)
         }
 
-        val tempFile = File(coresDir, "download_${System.currentTimeMillis()}.so")
-        try {
-            var currentUrl = release.downloadUrl
-            var conn: java.net.HttpURLConnection? = null
-            var redirectCount = 0
-            while (redirectCount < 6) {
-                val url = java.net.URL(currentUrl)
-                val c = (url.openConnection() as java.net.HttpURLConnection).apply {
-                    instanceFollowRedirects = true
-                    connectTimeout = 15000
-                    readTimeout = 30000
-                    setRequestProperty("User-Agent", "Mirage-Android-Client")
-                }
-                val code = c.responseCode
-                if (code in listOf(301, 302, 303, 307, 308)) {
-                    val location = c.getHeaderField("Location")
-                    if (!location.isNullOrBlank()) {
-                        currentUrl = location
-                        redirectCount++
-                        c.disconnect()
-                        continue
+        // 2. 构造多镜像源下载候选列表 (对齐 GeoManager 机制)
+        val activeSource = getActiveSource()
+        val candidateUrls = mutableListOf<String>()
+        if (!activeSource.downloadPrefix.isNullOrBlank()) {
+            candidateUrls.add(activeSource.downloadPrefix + release.downloadUrl)
+        }
+        // 自动加入备用高速镜像候选
+        candidateUrls.add("https://ghfast.top/" + release.downloadUrl)
+        candidateUrls.add("https://gh.ddlc.top/" + release.downloadUrl)
+        // 官方直链兜底
+        candidateUrls.add(release.downloadUrl)
+
+        val uniqueCandidates = candidateUrls.distinct()
+        var lastError: Throwable? = null
+
+        for (candidateUrl in uniqueCandidates) {
+            val tempFile = File(coresDir, "download_${System.currentTimeMillis()}.so")
+            try {
+                Log.i("Mirage", "[loader] 正在尝试内核下载源: $candidateUrl")
+                var currentUrl = candidateUrl
+                var finalConn: java.net.HttpURLConnection? = null
+                var redirectCount = 0
+
+                while (redirectCount < 6) {
+                    val url = java.net.URL(currentUrl)
+                    val c = (url.openConnection() as java.net.HttpURLConnection).apply {
+                        instanceFollowRedirects = true
+                        connectTimeout = 12000
+                        readTimeout = 30000
+                        setRequestProperty("User-Agent", "Mirage-Android-Client")
                     }
+                    val code = c.responseCode
+                    if (code in listOf(301, 302, 303, 307, 308)) {
+                        val location = c.getHeaderField("Location")
+                        if (!location.isNullOrBlank()) {
+                            currentUrl = location
+                            redirectCount++
+                            c.disconnect()
+                            continue
+                        }
+                    }
+                    finalConn = c
+                    break
                 }
-                conn = c
-                break
-            }
 
-            val finalConn = conn ?: throw java.io.IOException("重定向次数过多")
-            if (finalConn.responseCode !in 200..299) {
-                throw java.io.IOException("HTTP 下载失败: ${finalConn.responseCode}")
-            }
+                val conn = finalConn ?: throw java.io.IOException("重定向次数过多")
+                if (conn.responseCode !in 200..299) {
+                    throw java.io.IOException("HTTP 状态码异常: ${conn.responseCode}")
+                }
 
-            val totalBytes = finalConn.contentLengthLong.takeIf { it > 0 } ?: release.sizeBytes
-            var downloadedBytes = 0L
+                val totalBytes = conn.contentLengthLong.takeIf { it > 0 } ?: release.sizeBytes
+                var downloadedBytes = 0L
 
-            finalConn.inputStream.use { input ->
-                tempFile.outputStream().use { output ->
-                    val buffer = ByteArray(8192)
-                    var bytesRead: Int
-                    while (input.read(buffer).also { bytesRead = it } != -1) {
-                        output.write(buffer, 0, bytesRead)
-                        downloadedBytes += bytesRead
-                        if (totalBytes > 0) {
-                            val percent = ((downloadedBytes * 100) / totalBytes).toInt().coerceIn(0, 100)
-                            onProgress(percent)
+                conn.inputStream.use { input ->
+                    tempFile.outputStream().use { output ->
+                        val buffer = ByteArray(16384)
+                        var bytesRead: Int
+                        while (input.read(buffer).also { bytesRead = it } != -1) {
+                            output.write(buffer, 0, bytesRead)
+                            downloadedBytes += bytesRead
+                            if (totalBytes > 0) {
+                                val percent = ((downloadedBytes * 100) / totalBytes).toInt().coerceIn(0, 100)
+                                onProgress(percent)
+                            }
                         }
                     }
                 }
-            }
 
-            // 导入并校验下载好的 SO
-            val importRes = tempFile.inputStream().use { input ->
-                importCore(
-                    inputStream = input,
-                    displayName = "Mirage-rs ${release.tagName}",
-                    expectedSha256 = release.expectedSha256
-                )
+                if (tempFile.exists() && tempFile.length() > 50 * 1024) {
+                    // 3. 导入并严格校验 SHA-256 密码学哈希 (防止镜像源遭劫持篡改)
+                    val importRes = tempFile.inputStream().use { input ->
+                        importCore(
+                            inputStream = input,
+                            displayName = "Mirage-rs ${release.tagName}",
+                            expectedSha256 = release.expectedSha256
+                        )
+                    }
+                    tempFile.delete()
+
+                    if (importRes.isSuccess) {
+                        Log.i("Mirage", "[loader] 成功通过镜像源完成内核更新与校验导入: $candidateUrl")
+                        return@withContext importRes
+                    } else {
+                        val err = importRes.exceptionOrNull()
+                        Log.w("Mirage", "[loader] 内核哈希/导入校验失败: ${err?.message}")
+                        lastError = err
+                    }
+                } else {
+                    throw java.io.IOException("下载文件不完整 (大小过小)")
+                }
+            } catch (e: Exception) {
+                Log.w("Mirage", "[loader] 镜像源 $candidateUrl 下载失败: ${e.message}, 自动尝试下一个镜像")
+                lastError = e
+            } finally {
+                if (tempFile.exists()) tempFile.delete()
             }
-            tempFile.delete()
-            importRes
-        } catch (e: Exception) {
-            tempFile.delete()
-            Result.failure(e)
         }
+
+        Result.failure(lastError ?: java.io.IOException("所有镜像下载源均失败"))
     }
 
     companion object {
         private const val PREFS_NAME = "mirage_cores"
         private const val KEY_CORES_JSON = "cores_json"
         private const val KEY_ACTIVE_CORE = "active_core_id"
+        private const val KEY_ACTIVE_SOURCE_ID = "active_source_id"
+        private const val KEY_CUSTOM_SOURCES = "custom_sources_json"
+
+        const val DEFAULT_API_URL = "https://api.github.com/repos/zdgt0226/Mirage-rs/releases"
+
+        val BUILTIN_SOURCES = listOf(
+            CoreSource(
+                id = "ghfast",
+                name = "国内极速镜像 (ghfast.top)",
+                releasesApiUrl = DEFAULT_API_URL,
+                downloadPrefix = "https://ghfast.top/",
+                isBuiltin = true
+            ),
+            CoreSource(
+                id = "ghddlc",
+                name = "备用镜像源 (gh.ddlc.top)",
+                releasesApiUrl = DEFAULT_API_URL,
+                downloadPrefix = "https://gh.ddlc.top/",
+                isBuiltin = true
+            ),
+            CoreSource(
+                id = "official",
+                name = "GitHub 官方源 (海外/直连)",
+                releasesApiUrl = DEFAULT_API_URL,
+                downloadPrefix = null,
+                isBuiltin = true
+            )
+        )
 
         @Volatile
         private var instance: CoreManager? = null
@@ -436,3 +563,14 @@ class CoreManager private constructor(private val context: Context) {
         }
     }
 }
+
+/**
+ * 内核更新源定义 (对标 GeoSource 架构设计)
+ */
+data class CoreSource(
+    val id: String,
+    val name: String,
+    val releasesApiUrl: String,
+    val downloadPrefix: String? = null,
+    val isBuiltin: Boolean = false,
+)

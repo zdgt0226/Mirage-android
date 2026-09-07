@@ -138,13 +138,43 @@
             app:trackCornerRadius="4dp" />
     </LinearLayout>
 
+    <!-- 更新源选择条 (对齐 GeoManager 设计) -->
+    <LinearLayout
+        android:id="@+id/layoutSelectSource"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:background="?attr/selectableItemBackground"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="4dp"
+        android:paddingVertical="4dp">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="内核更新源"
+            android:textColor="#64748B"
+            android:textSize="12sp" />
+
+        <TextView
+            android:id="@+id/tvCurrentSource"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="国内极速镜像 (ghfast.top) ▾"
+            android:textColor="@color/meow_blue"
+            android:textSize="12sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
     <!-- 底部按钮区 -->
     <com.google.android.material.button.MaterialButton
         android:id="@+id/btnCheckOnlineCore"
         style="@style/MirageButton"
         android:layout_width="match_parent"
         android:layout_height="44dp"
-        android:layout_marginTop="10dp"
+        android:layout_marginTop="6dp"
         android:text="检查 GitHub 在线内核 (Releases)"
         android:textSize="13sp"
         app:cornerRadius="8dp"

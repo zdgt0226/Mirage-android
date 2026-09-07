@@ -14,6 +14,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.mirage.android.R
 import com.mirage.android.core.CoreManager
+import com.mirage.android.core.CoreSource
 import com.mirage.android.core.NativeLoader
 import com.mirage.android.data.model.CoreInfo
 import com.mirage.android.databinding.DialogCoreManagerBinding
@@ -68,6 +69,11 @@ class CoreManagerDialog(
         b.recyclerCores.adapter = adapter
         refreshList()
 
+        updateSourceView()
+        b.layoutSelectSource.setOnClickListener {
+            showSourceSelectionDialog()
+        }
+
         b.btnCheckOnlineCore.setOnClickListener {
             checkOnlineReleases()
         }
@@ -90,6 +96,76 @@ class CoreManagerDialog(
             .create()
 
         alertDialog?.show()
+    }
+
+    private fun updateSourceView() {
+        val b = binding ?: return
+        val currentSource = coreManager.getActiveSource()
+        b.tvCurrentSource.text = "${currentSource.name} ▾"
+    }
+
+    private fun showSourceSelectionDialog() {
+        val sources = coreManager.getSources()
+        val names = sources.map { it.name }.toTypedArray()
+        val active = coreManager.getActiveSource()
+        var selectedIdx = sources.indexOfFirst { it.id == active.id }.coerceAtLeast(0)
+
+        AlertDialog.Builder(context)
+            .setTitle("选择内核更新源")
+            .setSingleChoiceItems(names, selectedIdx) { _, which ->
+                selectedIdx = which
+            }
+            .setPositiveButton("确定") { _, _ ->
+                val chosen = sources[selectedIdx]
+                coreManager.setActiveSource(chosen.id)
+                updateSourceView()
+                Toast.makeText(context, "已切换更新源为: ${chosen.name}", Toast.LENGTH_SHORT).show()
+            }
+            .setNeutralButton("添加自定义源") { _, _ ->
+                showAddCustomSourceDialog()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun showAddCustomSourceDialog() {
+        val etName = android.widget.EditText(context).apply { hint = "更新源名称 (如: 我的私有源)" }
+        val etApiUrl = android.widget.EditText(context).apply {
+            hint = "GitHub Releases API URL"
+            setText("https://api.github.com/repos/zdgt0226/Mirage-rs/releases")
+        }
+        val etDownloadPrefix = android.widget.EditText(context).apply {
+            hint = "下载加速前缀 (可选，如: https://ghfast.top/)"
+        }
+
+        val layout = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(50, 20, 50, 20)
+            addView(etName)
+            addView(etApiUrl)
+            addView(etDownloadPrefix)
+        }
+
+        AlertDialog.Builder(context)
+            .setTitle("添加自定义内核更新源")
+            .setView(layout)
+            .setPositiveButton("保存并使用") { _, _ ->
+                val name = etName.text.toString().trim()
+                val apiUrl = etApiUrl.text.toString().trim()
+                val prefix = etDownloadPrefix.text.toString().trim().takeIf { it.isNotBlank() }
+                if (name.isNotEmpty() && apiUrl.isNotEmpty()) {
+                    val id = "custom_" + System.currentTimeMillis()
+                    val newSource = CoreSource(id, name, apiUrl, prefix, false)
+                    val list = coreManager.getSources().toMutableList()
+                    list.add(newSource)
+                    coreManager.saveCustomSources(list)
+                    coreManager.setActiveSource(id)
+                    updateSourceView()
+                    Toast.makeText(context, "已添加并激活自定义源: $name", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private fun checkOnlineReleases() {
@@ -145,7 +221,7 @@ class CoreManagerDialog(
             }.onFailure { e ->
                 b.btnCheckOnlineCore.isEnabled = true
                 b.btnCheckOnlineCore.text = "检查 GitHub 在线内核 (Releases)"
-                Toast.makeText(context, "查询失败: ${e.message} (请开启代理重试)", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "查询失败: ${e.message} (可尝试切换更新源或稍后重试)", Toast.LENGTH_LONG).show()
             }
         }
     }
