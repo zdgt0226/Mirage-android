@@ -32,6 +32,7 @@
 //! `mirage-jni` (Android) 与规划中的 `mirage-ios`。
 
 pub mod adaptive_idle;
+pub mod buffer_pool;
 pub mod dns;
 pub mod device;
 pub mod sniffer;
@@ -52,6 +53,7 @@ use tokio::sync::Notify;
 use tracing::{debug, info};
 
 use crate::engine::{Engine, TUN_ADDR_V4, TUN_DNS_V4, TUN_PEER_V4};
+use crate::tun::buffer_pool::PooledBuf;
 use crate::tun::device::TunDevice;
 
 pub const TUN_MTU: usize = 1400;
@@ -176,9 +178,9 @@ impl TunStack {
             fd: std::sync::atomic::AtomicI32::new(fd),
         });
 
-        // 读线程: TUN fd → 内核 poll 阻塞唤醒(0 CPU自旋/0排队延迟) → 突发批读 → 泵
+        // 读线程: TUN fd → 内核 poll 阻塞唤醒(0 CPU自旋/0排队延迟) → 突发批读 → 缓冲池零拷贝入队 → 泵
         let reader_stack = stack.clone();
-        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
+        let (tx, rx) = tokio::sync::mpsc::channel::<PooledBuf>(1024);
         std::thread::spawn(move || {
             let cur_fd = reader_stack.fd.load(Ordering::SeqCst);
             if cur_fd < 0 {
@@ -188,7 +190,7 @@ impl TunStack {
             if rfd < 0 {
                 return;
             }
-            let mut buf = vec![0u8; 65536];
+            let mut scratch = vec![0u8; 65536];
             let mut pfd = libc::pollfd {
                 fd: rfd,
                 events: libc::POLLIN,
@@ -218,10 +220,11 @@ impl TunStack {
                     let mut batch = 0;
                     while batch < 32 {
                         let n = unsafe {
-                            libc::read(rfd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+                            libc::read(rfd, scratch.as_mut_ptr() as *mut libc::c_void, scratch.len())
                         };
                         if n > 0 {
-                            if tx.blocking_send(buf[..n as usize].to_vec()).is_err() {
+                            let pbuf = PooledBuf::from_slice(&scratch[..n as usize]);
+                            if tx.blocking_send(pbuf).is_err() {
                                 break; // 泵已退出
                             }
                             batch += 1;
@@ -290,7 +293,7 @@ impl TunStack {
 }
 
 /// 泵: rx 包 / 定时 tick / 外部唤醒 → 批处理合并 + pre-scan + poll → drain tx 写回 TUN。
-async fn pump(stack: Arc<TunStack>, mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>) {
+async fn pump(stack: Arc<TunStack>, mut rx: tokio::sync::mpsc::Receiver<PooledBuf>) {
     let mut tick = tokio::time::interval(PUMP_TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -334,7 +337,7 @@ async fn pump(stack: Arc<TunStack>, mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>
 impl TunStack {
     /// 处理一个入站 IP 包: UDP 走直接数据报路径 (绕开 smoltcp, 见 udp.rs);
     /// 其余 (TCP/ICMP…) 预扫描建 socket → 入设备队列 → poll。
-    fn handle_rx_packet(self: &Arc<Self>, pkt: Vec<u8>) {
+    fn handle_rx_packet(self: &Arc<Self>, pkt: PooledBuf) {
         // UDP: 直接数据报路径 (按 (client,dst) 建流, 回程伪源构包)
         if let Some((src, dst, payload)) = crate::tun::udp::parse_udp_datagram(&pkt) {
             if dst.port() == 53 {
@@ -396,7 +399,7 @@ impl TunStack {
         if fd < 0 || self.stopped.load(Ordering::SeqCst) {
             return;
         }
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(32);
         {
             let mut g = lock_inner(&self.inner);
             while let Some(p) = g.device.pop_tx() {
@@ -569,7 +572,7 @@ fn smol_now(start: Instant) -> SmolInstant {
 /// Fake-IP ICMP Echo 本地反射 (ping 代理域名可通)。
 /// 仅针对发往 Fake-IP 网段 (如 198.18.0.0/15) 的 ICMP Echo Request (type 8, code 0)
 /// 原地翻转为 Echo Reply (type 0, code 0)，计算校验和后直接写回 TUN。
-fn handle_fake_ip_icmp_echo(stack: &TunStack, pkt: &[u8]) -> Option<Vec<u8>> {
+fn handle_fake_ip_icmp_echo(stack: &TunStack, pkt: &[u8]) -> Option<PooledBuf> {
     if pkt.len() < 28 {
         return None;
     }
@@ -601,7 +604,7 @@ fn handle_fake_ip_icmp_echo(stack: &TunStack, pkt: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    let mut reply = pkt.to_vec();
+    let mut reply = PooledBuf::from_slice(pkt);
     // 调换源地址与目的地址
     let src_bytes = [pkt[12], pkt[13], pkt[14], pkt[15]];
     let dst_bytes = [pkt[16], pkt[17], pkt[18], pkt[19]];

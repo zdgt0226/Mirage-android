@@ -14,6 +14,7 @@
 //! 队列有上限: 应用侧背压时无限堆积会 OOM。满了丢最老的包 —— IP 层本就尽力而为,
 //! 丢包由上层 TCP 重传兜住 (UDP 则本就允许丢)。
 
+use crate::tun::buffer_pool::{acquire_buf, PooledBuf};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::time::Instant;
 use std::collections::VecDeque;
@@ -22,18 +23,22 @@ use std::collections::VecDeque;
 const QUEUE_CAP: usize = 512;
 
 pub struct TunDevice {
-    rx: VecDeque<Vec<u8>>,
-    tx: VecDeque<Vec<u8>>,
+    rx: VecDeque<PooledBuf>,
+    tx: VecDeque<PooledBuf>,
     mtu: usize,
 }
 
 impl TunDevice {
     pub fn new(mtu: usize) -> Self {
-        Self { rx: VecDeque::new(), tx: VecDeque::new(), mtu }
+        Self {
+            rx: VecDeque::with_capacity(QUEUE_CAP),
+            tx: VecDeque::with_capacity(QUEUE_CAP),
+            mtu,
+        }
     }
 
     /// poll 循环: 塞一个从 TUN fd 读到的入站 IP 包给 smoltcp。满则丢最老的。
-    pub fn push_rx(&mut self, pkt: Vec<u8>) {
+    pub fn push_rx(&mut self, pkt: PooledBuf) {
         if self.rx.len() >= QUEUE_CAP {
             self.rx.pop_front();
         }
@@ -41,7 +46,7 @@ impl TunDevice {
     }
 
     /// poll 循环: 取一个 smoltcp 产出的出站 IP 包去写 TUN fd。
-    pub fn pop_tx(&mut self) -> Option<Vec<u8>> {
+    pub fn pop_tx(&mut self) -> Option<PooledBuf> {
         self.tx.pop_front()
     }
 
@@ -51,8 +56,8 @@ impl TunDevice {
     }
 }
 
-pub struct TunRxToken(Vec<u8>);
-pub struct TunTxToken<'a>(&'a mut VecDeque<Vec<u8>>);
+pub struct TunRxToken(pub PooledBuf);
+pub struct TunTxToken<'a>(&'a mut VecDeque<PooledBuf>);
 
 impl phy::RxToken for TunRxToken {
     fn consume<R, F>(self, f: F) -> R
@@ -68,7 +73,8 @@ impl phy::TxToken for TunTxToken<'_> {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        let mut buf = vec![0u8; len];
+        let mut buf = acquire_buf(len);
+        buf.resize(len, 0);
         let r = f(&mut buf);
         if self.0.len() >= QUEUE_CAP {
             self.0.pop_front();

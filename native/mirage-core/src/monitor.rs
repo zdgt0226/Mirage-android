@@ -449,7 +449,20 @@ pub fn record_conn_close(id: u64, up: u64, down: u64, status: &str) {
     record_conn_close_with_duration(id, up, down, status, duration_ms);
 }
 
-/// 获取当前所有活跃连接的实时 JSON 快照
+#[derive(serde::Serialize)]
+struct ConnectionRecordRef<'a> {
+    pub id: u64,
+    pub protocol: &'a str,
+    pub target: &'a str,
+    pub outbound: &'a str,
+    pub status: &'static str,
+    pub up_bytes: u64,
+    pub down_bytes: u64,
+    pub start_time: u64,
+    pub duration_secs: u64,
+}
+
+/// 获取当前所有活跃连接的实时 JSON 快照 (零拷贝借用序列化)
 pub fn get_connections_json() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -457,25 +470,24 @@ pub fn get_connections_json() -> String {
         .as_secs();
     let lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(map) = lock.as_ref() {
-        let mut list: Vec<ConnectionRecord> = map
-            .values()
-            .map(|c| ConnectionRecord {
+        let mut refs: Vec<&LiveConnection> = map.values().collect();
+        // 按照最新的连接排在前面
+        refs.sort_by(|a, b| b.id.cmp(&a.id));
+        let count = refs.len().min(100);
+        let list: Vec<ConnectionRecordRef<'_>> = refs[..count]
+            .iter()
+            .map(|c| ConnectionRecordRef {
                 id: c.id,
-                protocol: c.protocol.clone(),
-                target: c.target.clone(),
-                outbound: c.outbound.clone(),
-                status: "已连接".to_string(),
+                protocol: &c.protocol,
+                target: &c.target,
+                outbound: &c.outbound,
+                status: "已连接",
                 up_bytes: c.up_bytes.load(Ordering::Relaxed),
                 down_bytes: c.down_bytes.load(Ordering::Relaxed),
                 start_time: c.start_time,
                 duration_secs: now.saturating_sub(c.start_time),
             })
             .collect();
-        // 按照最新的连接排在前面
-        list.sort_by(|a, b| b.id.cmp(&a.id));
-        if list.len() > 100 {
-            list.truncate(100);
-        }
         serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
     } else {
         "[]".to_string()
