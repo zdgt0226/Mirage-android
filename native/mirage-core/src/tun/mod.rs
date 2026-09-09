@@ -101,12 +101,14 @@ pub struct TunStack {
     /// 已停止标志 (stop 幂等)。
     stopped: Arc<AtomicBool>,
     /// 泵的退出信号 (stop 时 notify)。
-    stop_notify: Arc<Notify>,
+    pub(crate) stop_notify: Arc<Notify>,
     cfg: TunConfig,
     /// 原始 TUN fd (stop 时原子关闭; 读线程持 dup 副本)。
     fd: std::sync::atomic::AtomicI32,
     /// UDP 直接数据报引擎 (按 (client,dst) 建流)。
     udp: Arc<crate::tun::udp::UdpEngine>,
+    /// 用于即时唤醒 reader 读线程退出的管道写端。
+    wake_pipe_write: std::sync::atomic::AtomicI32,
 }
 
 fn lock_inner(s: &Arc<StdMutex<TunInner>>) -> std::sync::MutexGuard<'_, TunInner> {
@@ -167,6 +169,14 @@ impl TunStack {
         }));
 
         let mtu = cfg.mtu;
+        let mut pipe_fds = [-1i32; 2];
+        let has_pipe = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == 0;
+        let (reader_pipe_read, wake_pipe_write) = if has_pipe {
+            (pipe_fds[0], pipe_fds[1])
+        } else {
+            (-1, -1)
+        };
+
         let stack = Arc::new(Self {
             inner,
             udp: Arc::new(crate::tun::udp::UdpEngine::new(Arc::clone(&engine))),
@@ -176,6 +186,7 @@ impl TunStack {
             engine: Arc::new(arc_swap::ArcSwap::from(Arc::clone(&engine))),
             cfg,
             fd: std::sync::atomic::AtomicI32::new(fd),
+            wake_pipe_write: std::sync::atomic::AtomicI32::new(wake_pipe_write),
         });
 
         // 读线程: TUN fd → 内核 poll 阻塞唤醒(0 CPU自旋/0排队延迟) → 突发批读 → 缓冲池零拷贝入队 → 泵
@@ -184,24 +195,38 @@ impl TunStack {
         std::thread::spawn(move || {
             let cur_fd = reader_stack.fd.load(Ordering::SeqCst);
             if cur_fd < 0 {
+                if reader_pipe_read >= 0 {
+                    unsafe { libc::close(reader_pipe_read) };
+                }
                 return;
             }
             let rfd = unsafe { libc::dup(cur_fd) };
             if rfd < 0 {
+                if reader_pipe_read >= 0 {
+                    unsafe { libc::close(reader_pipe_read) };
+                }
                 return;
             }
             let mut scratch = vec![0u8; 65536];
-            let mut pfd = libc::pollfd {
-                fd: rfd,
-                events: libc::POLLIN,
-                revents: 0,
-            };
+            let mut pfds = [
+                libc::pollfd {
+                    fd: rfd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: reader_pipe_read,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            let poll_count = if reader_pipe_read >= 0 { 2 } else { 1 };
             loop {
                 if reader_stack.stopped.load(Ordering::SeqCst) {
                     break;
                 }
-                // 内核事件驱动等待: 500ms 超时用于定期感知 stopped 状态; 有包时微秒级立即返回; 无包时 0 CPU 消耗 (支持 SoC Deep Sleep)
-                let pr = unsafe { libc::poll(&mut pfd as *mut libc::pollfd, 1, 500) };
+                // 内核事件驱动等待: 有包时微秒级立即返回; stop 时唤醒管道写入微秒级触发退出并释放 fd
+                let pr = unsafe { libc::poll(pfds.as_mut_ptr(), poll_count as libc::nfds_t, 5000) };
                 if pr < 0 {
                     let err = std::io::Error::last_os_error();
                     if err.kind() == std::io::ErrorKind::Interrupted {
@@ -209,13 +234,16 @@ impl TunStack {
                     }
                     break;
                 }
-                if pr == 0 {
-                    continue; // 500ms 超时无数据，继续检查 stopped
-                }
-                if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                if reader_stack.stopped.load(Ordering::SeqCst) {
                     break;
                 }
-                if pfd.revents & libc::POLLIN != 0 {
+                if poll_count > 1 && pfds[1].revents != 0 {
+                    break; // 收到即时终止唤醒信号
+                }
+                if pfds[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                    break;
+                }
+                if pfds[0].revents & libc::POLLIN != 0 {
                     // 突发批读 (Burst Read): 快速排空内核队列已到达的数据包 (最多连续读 32 个包)
                     let mut batch = 0;
                     while batch < 32 {
@@ -241,6 +269,9 @@ impl TunStack {
                 }
             }
             unsafe { libc::close(rfd) };
+            if reader_pipe_read >= 0 {
+                unsafe { libc::close(reader_pipe_read) };
+            }
             let _ = reader_stack.engine.clone(); // keep alive until thread exit
         });
 
@@ -264,6 +295,14 @@ impl TunStack {
         let raw_fd = self.fd.swap(-1, Ordering::SeqCst);
         if raw_fd >= 0 {
             unsafe { libc::close(raw_fd) };
+        }
+        let wfd = self.wake_pipe_write.swap(-1, Ordering::SeqCst);
+        if wfd >= 0 {
+            let dummy = [1u8];
+            unsafe {
+                libc::write(wfd, dummy.as_ptr() as *const libc::c_void, 1);
+                libc::close(wfd);
+            };
         }
         self.wake.notify_waiters();
         self.stop_notify.notify_waiters();

@@ -18,7 +18,7 @@ use crate::tun::TunStack;
 /// 启动内嵌轻量级调试 HTTP 服务
 pub fn start_debug_server(port: u16, engine: Arc<Engine>, stack: Arc<TunStack>) {
     tokio::spawn(async move {
-        let addr = format!("0.0.0.0:{port}");
+        let addr = format!("127.0.0.1:{port}");
         let listener = match TcpListener::bind(&addr).await {
             Ok(l) => {
                 info!("[DEBUG-SERVER] 远程调试 API 已就绪: http://{}", addr);
@@ -31,56 +31,64 @@ pub fn start_debug_server(port: u16, engine: Arc<Engine>, stack: Arc<TunStack>) 
         };
 
         loop {
-            let (mut socket, client_addr) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(_) => break,
-            };
+            tokio::select! {
+                _ = stack.stop_notify.notified() => {
+                    info!("[DEBUG-SERVER] 收到停止信号，退出远程调试服务 (释放端口 {port})");
+                    break;
+                }
+                res = listener.accept() => {
+                    let (mut socket, client_addr) = match res {
+                        Ok(conn) => conn,
+                        Err(_) => break,
+                    };
 
-            let eng = Arc::clone(&engine);
-            let stk = Arc::clone(&stack);
+                    let eng = Arc::clone(&engine);
+                    let stk = Arc::clone(&stack);
 
-            tokio::spawn(async move {
-                let mut buf = [0u8; 4096];
-                let n = match tokio::time::timeout(std::time::Duration::from_secs(5), socket.read(&mut buf)).await {
-                    Ok(Ok(n)) if n > 0 => n,
-                    _ => return,
-                };
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 4096];
+                        let n = match tokio::time::timeout(std::time::Duration::from_secs(5), socket.read(&mut buf)).await {
+                            Ok(Ok(n)) if n > 0 => n,
+                            _ => return,
+                        };
 
-                let req_str = String::from_utf8_lossy(&buf[..n]);
-                let mut lines = req_str.lines();
-                let request_line = lines.next().unwrap_or("");
-                let mut parts = request_line.split_whitespace();
-                let method = parts.next().unwrap_or("GET");
-                let path = parts.next().unwrap_or("/");
+                        let req_str = String::from_utf8_lossy(&buf[..n]);
+                        let mut lines = req_str.lines();
+                        let request_line = lines.next().unwrap_or("");
+                        let mut parts = request_line.split_whitespace();
+                        let method = parts.next().unwrap_or("GET");
+                        let path = parts.next().unwrap_or("/");
 
-                // 提取请求体 (POST)
-                let body = if let Some(idx) = req_str.find("\r\n\r\n") {
-                    &req_str[idx + 4..]
-                } else if let Some(idx) = req_str.find("\n\n") {
-                    &req_str[idx + 2..]
-                } else {
-                    ""
-                };
+                        // 提取请求体 (POST)
+                        let body = if let Some(idx) = req_str.find("\r\n\r\n") {
+                            &req_str[idx + 4..]
+                        } else if let Some(idx) = req_str.find("\n\n") {
+                            &req_str[idx + 2..]
+                        } else {
+                            ""
+                        };
 
-                let (status, resp_json) = handle_request(method, path, body, &eng, &stk);
+                        let (status, resp_json) = handle_request(method, path, body, &eng, &stk);
 
-                let resp_payload = resp_json.to_string();
-                let http_response = format!(
-                    "HTTP/1.1 {}\r\n\
-                    Content-Type: application/json; charset=utf-8\r\n\
-                    Content-Length: {}\r\n\
-                    Access-Control-Allow-Origin: *\r\n\
-                    Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
-                    Access-Control-Allow-Headers: Content-Type\r\n\
-                    Connection: close\r\n\r\n{}",
-                    status,
-                    resp_payload.len(),
-                    resp_payload
-                );
+                        let resp_payload = resp_json.to_string();
+                        let http_response = format!(
+                            "HTTP/1.1 {}\r\n\
+                            Content-Type: application/json; charset=utf-8\r\n\
+                            Content-Length: {}\r\n\
+                            Access-Control-Allow-Origin: *\r\n\
+                            Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+                            Access-Control-Allow-Headers: Content-Type\r\n\
+                            Connection: close\r\n\r\n{}",
+                            status,
+                            resp_payload.len(),
+                            resp_payload
+                        );
 
-                let _ = socket.write_all(http_response.as_bytes()).await;
-                debug!("[DEBUG-SERVER] {} {} from {} → {}", method, path, client_addr, status);
-            });
+                        let _ = socket.write_all(http_response.as_bytes()).await;
+                        debug!("[DEBUG-SERVER] {} {} from {} → {}", method, path, client_addr, status);
+                    });
+                }
+            }
         }
     });
 }

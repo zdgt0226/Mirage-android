@@ -116,6 +116,7 @@ class CoreService : VpnService() {
         val action = intent?.action
         if (action == ACTION_STOP) {
             stopInternal()
+            stopSelf()
             return START_NOT_STICKY
         }
         if (intent == null) {
@@ -545,6 +546,7 @@ class CoreService : VpnService() {
 
     fun stopInternal(): Unit = synchronized(stateLock) {
         log("[core] stop()")
+        clearActive()
         cancelAllJobs()
         flushLogsAndStats()
         runCatching { MirageNative.clearDnsCache() }
@@ -730,8 +732,12 @@ class CoreService : VpnService() {
 
     override fun onRevoke() {
         log("[core] 系统任务栏/设置断开 VPN 连接 (onRevoke)")
-        stopInternal()
-        super.onRevoke()
+        try {
+            stopInternal()
+        } finally {
+            stopSelf()
+            super.onRevoke()
+        }
     }
 
     override fun onDestroy() {
@@ -825,7 +831,12 @@ class CoreService : VpnService() {
         override fun unregisterCallback(cb: ICoreCallback?) = unregisterCallbackInternal(cb)
     }
 
-    override fun onBind(intent: Intent?): IBinder? = binder
+    override fun onBind(intent: Intent?): IBinder? {
+        if (intent != null && SERVICE_INTERFACE == intent.action) {
+            return super.onBind(intent)
+        }
+        return binder
+    }
 
     companion object {
         const val ACTION_STOP = "com.mirage.android.STOP"
