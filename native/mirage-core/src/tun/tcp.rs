@@ -103,7 +103,7 @@ impl TunTcpStream {
         d
     }
 
-    /// 关闭连接并释放 socket (幂等)。
+    /// 关闭连接并触发优雅半关闭 (由 sweep 延迟深度回收，杜绝向客户端回送 TCP RST)。
     pub fn close(&self) {
         if !self.alive.swap(false, Ordering::Relaxed) {
             return;
@@ -115,13 +115,6 @@ impl TunTcpStream {
             }
         }
         self.stack.poll_now();
-        {
-            let mut g = lock_inner(&self.stack.inner);
-            if g.sockets.iter().any(|(h, _)| h == self.handle) {
-                g.sockets.remove(self.handle);
-            }
-            g.created_at.remove(&self.handle);
-        }
     }
 }
 
@@ -365,6 +358,7 @@ async fn relay_proxy(
     }
 
     let start_time = std::time::Instant::now();
+    let effective_ip = if crate::direct::is_fake_ip(dst.0) { None } else { Some(dst.0) };
     let dom_ref = direct_domain.as_deref();
     let dst_port = dst.1;
     let up_atomic = conn_up.clone();
@@ -382,6 +376,7 @@ async fn relay_proxy(
         let mut timed_out = false;
         let mut buf = [0u8; 65536];
         let mut timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
+            effective_ip,
             dst_port,
             dom_ref,
             false,
@@ -398,6 +393,7 @@ async fn relay_proxy(
                     }
                     if up_bytes == 0 {
                         timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
+                            effective_ip,
                             dst_port,
                             dom_ref,
                             true,
@@ -439,6 +435,7 @@ async fn relay_proxy(
         let mut down_bytes: u64 = 0;
         let mut timed_out = false;
         let mut timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
+            effective_ip,
             dst_port,
             dom_ref,
             false,
@@ -450,6 +447,7 @@ async fn relay_proxy(
                         let ttfb_ms = start_time.elapsed().as_millis() as u32;
                         crate::monitor::record_conn_timings(cid, 0, connect_ms, 0, ttfb_ms);
                         timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
+                            effective_ip,
                             dst_port,
                             dom_ref,
                             true,
@@ -705,8 +703,20 @@ async fn relay_direct(
             return;
         }
     };
+    let raw_fd = sock.as_raw_fd();
+    // 启用 TCP KeepAlive 并显式指定移动蜂窝网 NAT 活跃参数 (45s 探测, 10s 间隔, 3次重试)
+    let _ = sock.set_keepalive(true);
+    #[cfg(unix)]
+    unsafe {
+        let idle: libc::c_int = 45;
+        libc::setsockopt(raw_fd, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, &idle as *const _ as *const libc::c_void, std::mem::size_of_val(&idle) as libc::socklen_t);
+        let intvl: libc::c_int = 10;
+        libc::setsockopt(raw_fd, libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, &intvl as *const _ as *const libc::c_void, std::mem::size_of_val(&intvl) as libc::socklen_t);
+        let cnt: libc::c_int = 3;
+        libc::setsockopt(raw_fd, libc::IPPROTO_TCP, libc::TCP_KEEPCNT, &cnt as *const _ as *const libc::c_void, std::mem::size_of_val(&cnt) as libc::socklen_t);
+    }
     // protect: 直连 socket 也要绕过 TUN (否则 0.0.0.0/0→tun0 环路)
-    crate::protect::protect(sock.as_raw_fd());
+    crate::protect::protect(raw_fd);
     let is_strict_cn = direct_domain.as_ref().map(|d| crate::direct::is_cn_domain_strict(d)).unwrap_or(false);
     let is_raw_cn_ip = direct_domain.is_none() && crate::direct::is_cn_ip(target_ip);
     let connect_start = std::time::Instant::now();
@@ -773,6 +783,7 @@ async fn relay_direct(
         let mut timed_out = false;
         let mut buf = [0u8; 65536];
         let mut timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
+            Some(target_ip),
             dst_port,
             dom_ref,
             false,
@@ -784,6 +795,7 @@ async fn relay_direct(
                     if rw.write_all(&buf[..n]).await.is_err() { break; }
                     if up_bytes == 0 {
                         timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
+                            Some(target_ip),
                             dst_port,
                             dom_ref,
                             true,
@@ -820,6 +832,7 @@ async fn relay_direct(
         let mut timed_out = false;
         let mut buf = [0u8; 65536];
         let mut timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
+            Some(target_ip),
             dst_port,
             dom_ref,
             false,
@@ -833,6 +846,7 @@ async fn relay_direct(
                         let ttfb_ms = start_time.elapsed().as_millis() as u32;
                         crate::monitor::record_conn_timings(cid, dns_ms, connect_ms, 0, ttfb_ms);
                         timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
+                            Some(target_ip),
                             dst_port,
                             dom_ref,
                             true,

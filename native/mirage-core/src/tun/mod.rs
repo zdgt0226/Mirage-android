@@ -483,9 +483,12 @@ impl TunStack {
                         (t.state() == stcp::State::Listen
                             && t.remote_endpoint().is_none()
                             && now.duration_since(age) >= CATCHER_TTL)
-                        // 2. 深度回收残留的 Closed / TimeWait 僵尸 socket (防止 socket 集合无限膨胀拖慢轮询)
-                        || (t.state() == stcp::State::Closed || t.state() == stcp::State::TimeWait)
-                            && now.duration_since(age) >= std::time::Duration::from_secs(5)
+                        // 2. 深度回收残留的 Closed / TimeWait 僵尸 socket
+                        || ((t.state() == stcp::State::Closed || t.state() == stcp::State::TimeWait)
+                            && now.duration_since(age) >= std::time::Duration::from_secs(2))
+                        // 3. 兜底回收孤儿 FinWait (对端无响应)
+                        || ((t.state() == stcp::State::FinWait1 || t.state() == stcp::State::FinWait2 || t.state() == stcp::State::Closing)
+                            && now.duration_since(age) >= std::time::Duration::from_secs(15))
                     }
                     _ => false,
                 }
@@ -568,10 +571,13 @@ impl TunStack {
         let buf_size = if is_dns { 4 * 1024 } else { SOCK_BUF };
 
         // 建 catcher (普通数据流 512KB 极速滑动窗口，DNS 流 4KB 精简缓冲)
-        let sock = stcp::Socket::new(
+        let mut sock = stcp::Socket::new(
             stcp::SocketBuffer::new(vec![0u8; buf_size]),
             stcp::SocketBuffer::new(vec![0u8; buf_size]),
         );
+        if !is_dns {
+            sock.set_keep_alive(Some(smoltcp::time::Duration::from_secs(45)));
+        }
         let handle = g.sockets.add(sock);
         let g = &mut *g;
         let listen_endpoint = if is_dns {

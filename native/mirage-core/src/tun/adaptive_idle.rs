@@ -40,7 +40,7 @@ impl TrafficCategory {
         match self {
             TrafficCategory::Interactive => 300,
             TrafficCategory::MediaCdn => 10,
-            TrafficCategory::PushIm => 180,
+            TrafficCategory::PushIm => 900, // 15分钟长保活，覆盖 4G/5G 微信最长 9 分钟心跳周期
             TrafficCategory::GeneralApi => 30,
         }
     }
@@ -55,7 +55,7 @@ impl TrafficCategory {
                     Duration::from_secs(15)
                 }
             }
-            TrafficCategory::PushIm => Duration::from_secs(180),
+            TrafficCategory::PushIm => Duration::from_secs(900), // 15分钟长保活
             TrafficCategory::GeneralApi => {
                 if is_active_transfer {
                     Duration::from_secs(30)
@@ -161,6 +161,8 @@ const IM_SUFFIXES: &[&str] = &[
     // 国际 IM / 推送
     "telegram.org",
     "t.me",
+    "telesco.pe",
+    "tdesktop.com",
     "whatsapp.net",
     "whatsapp.com",
     "mtalk.google.com",
@@ -169,8 +171,19 @@ const IM_SUFFIXES: &[&str] = &[
     "discord.com",
     "matrix.org",
     "signal.org",
-    // 国内 IM / 第三方厂商推送
+    // 国内 IM / 微信 / QQ / 企微 / 钉钉 / 飞书 / 第三方厂商推送
     "weixin.qq.com",
+    "qq.com",
+    "wechat.com",
+    "tencent.com",
+    "servicewechat.com",
+    "tenpay.com",
+    "wxs.qq.com",
+    "wx.qq.com",
+    "dingtalk.com",
+    "laiwang.com",
+    "feishu.cn",
+    "larksuite.com",
     "jpush.cn",
     "getui.com",
     "getui.net",
@@ -188,6 +201,49 @@ const IM_SUFFIXES: &[&str] = &[
 #[inline]
 pub fn is_interactive_port(port: u16) -> bool {
     matches!(port, 22 | 23 | 3389)
+}
+
+#[inline]
+pub fn is_im_or_push_port(port: u16) -> bool {
+    matches!(port, 14000 | 5228 | 5229 | 5230 | 5222 | 5223)
+}
+
+/// 检查 IP 是否属于腾讯/微信等常用国内 IM 网段 (包含腾讯云与微信接入机)
+#[inline]
+pub fn is_tencent_or_im_ip(ip: std::net::IpAddr) -> bool {
+    let std::net::IpAddr::V4(v4) = ip else { return false };
+    let u = u32::from(v4);
+    // 腾讯公网典型地址段 (覆盖微信 Mars / 腾讯云接入机):
+    // 183.2.0.0/15 (0xB7020000 / 0xFFFE0000)
+    (u & 0xFFFE0000) == 0xB7020000
+    // 183.4.0.0/14 (0xB7040000 / 0xFFFC0000)
+    || (u & 0xFFFC0000) == 0xB7040000
+    // 120.232.0.0/13 (0x78E80000 / 0xFFF80000)
+    || (u & 0xFFF80000) == 0x78E80000
+    // 120.240.0.0/13 (0x78F00000 / 0xFFF80000)
+    || (u & 0xFFF80000) == 0x78F00000
+    // 14.17.0.0/16 (0x0E110000 / 0xFFFF0000)
+    || (u & 0xFFFF0000) == 0x0E110000
+    // 14.18.0.0/15 (0x0E120000 / 0xFFFE0000)
+    || (u & 0xFFFE0000) == 0x0E120000
+    // 14.215.0.0/16 (0x0ED70000 / 0xFFFF0000)
+    || (u & 0xFFFF0000) == 0x0ED70000
+    // 113.96.0.0/15 (0x71600000 / 0xFFFE0000)
+    || (u & 0xFFFE0000) == 0x71600000
+    // 113.108.0.0/16 (0x716C0000 / 0xFFFF0000)
+    || (u & 0xFFFF0000) == 0x716C0000
+    // 129.226.0.0/16 (0x81E20000 / 0xFFFF0000)
+    || (u & 0xFFFF0000) == 0x81E20000
+    // 119.28.0.0/15 (0x771C0000 / 0xFFFE0000)
+    || (u & 0xFFFE0000) == 0x771C0000
+    // 101.32.0.0/15 (0x65200000 / 0xFFFE0000)
+    || (u & 0xFFFE0000) == 0x65200000
+    // 43.128.0.0/12 (0x2B800000 / 0xFFF00000)
+    || (u & 0xFFF00000) == 0x2B800000
+    // 150.109.0.0/16 (0x966D0000 / 0xFFFF0000)
+    || (u & 0xFFFF0000) == 0x966D0000
+    // 162.14.0.0/16 (0xA20E0000 / 0xFFFF0000)
+    || (u & 0xFFFF0000) == 0xA20E0000
 }
 
 #[inline]
@@ -230,10 +286,24 @@ where
     f(map)
 }
 
-/// 判定连接分类并返回推荐的空闲超时 (包含 Phase 2 重连反弹检测)
-pub fn classify_connection(dst_port: u16, domain: Option<&str>) -> (TrafficCategory, Duration) {
+/// 判定连接分类并返回推荐的空闲超时 (包含 Phase 2 重连反弹检测与 IP 级 IM 判定)
+pub fn classify_connection(
+    dst_ip: Option<std::net::IpAddr>,
+    dst_port: u16,
+    domain: Option<&str>,
+) -> (TrafficCategory, Duration) {
     if is_interactive_port(dst_port) {
         return (TrafficCategory::Interactive, Duration::from_secs(300));
+    }
+
+    if is_im_or_push_port(dst_port) {
+        return (TrafficCategory::PushIm, Duration::from_secs(900));
+    }
+
+    if let Some(ip) = dst_ip {
+        if is_tencent_or_im_ip(ip) && matches!(dst_port, 80 | 443 | 8080 | 14000) {
+            return (TrafficCategory::PushIm, Duration::from_secs(900));
+        }
     }
 
     if let Some(dom) = domain {
@@ -321,6 +391,7 @@ fn record_initial_profile(domain: String, category: TrafficCategory, is_static: 
 
 /// 计算自适应超时时长
 pub fn compute_adaptive_timeout(
+    dst_ip: Option<std::net::IpAddr>,
     dst_port: u16,
     domain: Option<&str>,
     is_active_transfer: bool,
@@ -328,7 +399,11 @@ pub fn compute_adaptive_timeout(
     if is_interactive_port(dst_port) {
         return Duration::from_secs(300);
     }
-    // 未传输阶段: 统一给 15s 初始等待
+    let (cat, _) = classify_connection(dst_ip, dst_port, domain);
+    if cat == TrafficCategory::PushIm {
+        return Duration::from_secs(900);
+    }
+    // 未传输阶段: 针对通用 API 与媒体 CDN 统一给 15s 初始等待
     if !is_active_transfer {
         return Duration::from_secs(15);
     }
@@ -338,7 +413,6 @@ pub fn compute_adaptive_timeout(
             return Duration::from_secs(profile.assigned_idle_secs);
         }
     }
-    let (cat, _) = classify_connection(dst_port, domain);
     cat.idle_timeout(is_active_transfer)
 }
 
@@ -433,10 +507,10 @@ pub fn record_conn_metrics(
                 profile.churn_penalties = 0;
                 profile.zombie_decays = 0;
             }
-            // 特征 2: 双向持续微量小包且连接持续时间较长 -> 自动演进为 PushIm (180s 长保活)
+            // 特征 2: 双向持续微量小包且连接持续时间较长 -> 自动演进为 PushIm (900s 长保活)
             else if avg_up <= 2048 && avg_down <= 4096 && duration_ms >= 8000 {
                 profile.category = TrafficCategory::PushIm;
-                profile.assigned_idle_secs = 180;
+                profile.assigned_idle_secs = 900;
                 profile.churn_penalties = 0;
                 profile.zombie_decays = 0;
             }
@@ -495,20 +569,26 @@ mod tests {
 
     #[test]
     fn test_static_classification() {
-        assert_eq!(classify_connection(22, None).0, TrafficCategory::Interactive);
-        assert_eq!(classify_connection(443, Some("pbs.twimg.com")).0, TrafficCategory::MediaCdn);
-        assert_eq!(classify_connection(443, Some("mtalk.google.com")).0, TrafficCategory::PushIm);
-        assert_eq!(classify_connection(443, Some("img.alicdn.com")).0, TrafficCategory::MediaCdn);
-        assert_eq!(classify_connection(443, Some("i0.hdslb.com")).0, TrafficCategory::MediaCdn);
-        assert_eq!(classify_connection(443, Some("weixin.qq.com")).0, TrafficCategory::PushIm);
-        assert_eq!(classify_connection(443, Some("push.aliyun.com")).0, TrafficCategory::PushIm);
-        assert_eq!(classify_connection(443, Some("api.unknown-service.org")).0, TrafficCategory::GeneralApi);
+        assert_eq!(classify_connection(None, 22, None).0, TrafficCategory::Interactive);
+        assert_eq!(classify_connection(None, 443, Some("pbs.twimg.com")).0, TrafficCategory::MediaCdn);
+        assert_eq!(classify_connection(None, 443, Some("mtalk.google.com")).0, TrafficCategory::PushIm);
+        assert_eq!(classify_connection(None, 443, Some("img.alicdn.com")).0, TrafficCategory::MediaCdn);
+        assert_eq!(classify_connection(None, 443, Some("i0.hdslb.com")).0, TrafficCategory::MediaCdn);
+        assert_eq!(classify_connection(None, 443, Some("weixin.qq.com")).0, TrafficCategory::PushIm);
+        assert_eq!(classify_connection(None, 443, Some("push.aliyun.com")).0, TrafficCategory::PushIm);
+        assert_eq!(classify_connection(None, 443, Some("api.unknown-service.org")).0, TrafficCategory::GeneralApi);
+
+        // 验证微信专用端口与腾讯网段识别
+        assert_eq!(classify_connection(None, 14000, None).0, TrafficCategory::PushIm);
+        let tencent_ip: std::net::IpAddr = "183.3.226.35".parse().unwrap();
+        assert_eq!(classify_connection(Some(tencent_ip), 8080, None).0, TrafficCategory::PushIm);
+        assert_eq!(classify_connection(Some(tencent_ip), 8080, None).1.as_secs(), 900);
     }
 
     #[test]
     fn test_dynamic_learning_to_media_cdn() {
         let domain = "test-gallery.img-service.net";
-        let (cat, _) = classify_connection(443, Some(domain));
+        let (cat, _) = classify_connection(None, 443, Some(domain));
         assert_eq!(cat, TrafficCategory::GeneralApi);
 
         // 模拟 3 次大下行图片流 (上行 500B, 下行 64KB)
@@ -516,15 +596,15 @@ mod tests {
             record_conn_metrics(Some(domain), 500, 65536, 1500, CloseReason::ServerClosed, false);
         }
 
-        let (cat_learned, _) = classify_connection(443, Some(domain));
+        let (cat_learned, _) = classify_connection(None, 443, Some(domain));
         assert_eq!(cat_learned, TrafficCategory::MediaCdn);
-        assert_eq!(compute_adaptive_timeout(443, Some(domain), true).as_secs(), 10);
+        assert_eq!(compute_adaptive_timeout(None, 443, Some(domain), true).as_secs(), 10);
     }
 
     #[test]
     fn test_dynamic_learning_to_push_im() {
         let domain = "custom-socket.message-hub.io";
-        let (cat, _) = classify_connection(443, Some(domain));
+        let (cat, _) = classify_connection(None, 443, Some(domain));
         assert_eq!(cat, TrafficCategory::GeneralApi);
 
         // 模拟 3 次心跳小包 (上行 120B, 下行 180B, 持续 10 秒)
@@ -532,21 +612,21 @@ mod tests {
             record_conn_metrics(Some(domain), 120, 180, 10000, CloseReason::ClientClosed, true);
         }
 
-        let (cat_learned, _) = classify_connection(443, Some(domain));
+        let (cat_learned, _) = classify_connection(None, 443, Some(domain));
         assert_eq!(cat_learned, TrafficCategory::PushIm);
-        assert_eq!(compute_adaptive_timeout(443, Some(domain), true).as_secs(), 180);
+        assert_eq!(compute_adaptive_timeout(None, 443, Some(domain), true).as_secs(), 900);
     }
 
     #[test]
     fn test_churn_penalty() {
         let domain = "test-churn-app.api.io";
-        let _ = classify_connection(443, Some(domain));
+        let _ = classify_connection(None, 443, Some(domain));
 
         // 1. 连接正常交互后由于短超时关闭 (上行 4KB, 下行 6KB, 持续 2s)
         record_conn_metrics(Some(domain), 4096, 6144, 2000, CloseReason::IdleTimeout, true);
 
         // 2. 模拟 App 立即发生重连 (由于刚刚被 IdleTimeout 掐断, 触发 1.5x 惩罚)
-        let (_, timeout_after_churn) = classify_connection(443, Some(domain));
+        let (_, timeout_after_churn) = classify_connection(None, 443, Some(domain));
         // 初始 GeneralApi 为 30s，触发 1.5x 惩罚后应为 45s
         assert_eq!(timeout_after_churn.as_secs(), 45);
     }
@@ -554,7 +634,7 @@ mod tests {
     #[test]
     fn test_zombie_decay() {
         let domain = "test-zombie-app.api.io";
-        let _ = classify_connection(443, Some(domain));
+        let _ = classify_connection(None, 443, Some(domain));
 
         // 连接被 IdleTimeout 关闭且全程未被复用 (is_reused = false) -> 触发 0.8x 僵尸衰减
         record_conn_metrics(Some(domain), 4096, 6144, 2000, CloseReason::IdleTimeout, false);
@@ -568,17 +648,17 @@ mod tests {
     #[test]
     fn test_static_rule_immunity_from_churn_and_decay() {
         let static_cdn = "pbs.twimg.com";
-        let (cat, timeout) = classify_connection(443, Some(static_cdn));
+        let (cat, timeout) = classify_connection(None, 443, Some(static_cdn));
         assert_eq!(cat, TrafficCategory::MediaCdn);
         assert_eq!(timeout.as_secs(), 10);
 
         // 1. 模拟 IdleTimeout 且无复用 -> 静态规则不应被 Zombie 衰减
         record_conn_metrics(Some(static_cdn), 500, 20000, 1000, CloseReason::IdleTimeout, false);
-        let (_, timeout_after_idle) = classify_connection(443, Some(static_cdn));
+        let (_, timeout_after_idle) = classify_connection(None, 443, Some(static_cdn));
         assert_eq!(timeout_after_idle.as_secs(), 10);
 
         // 2. 模拟 1 秒后立即重连 -> 静态规则不应被 Churn 惩罚放大
-        let (_, timeout_after_reconnect) = classify_connection(443, Some(static_cdn));
+        let (_, timeout_after_reconnect) = classify_connection(None, 443, Some(static_cdn));
         assert_eq!(timeout_after_reconnect.as_secs(), 10);
 
         let profile = with_profiles_read(|map| map.get(static_cdn).cloned()).unwrap();
