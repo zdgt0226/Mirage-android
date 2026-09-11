@@ -69,6 +69,7 @@ object ConnectionOwnerResolver {
             }
         }
 
+        Log.i("ConnOwnerResolver", "resolve: proto=$protocol, src=$srcIp:$srcPort, dst=$dstIp:$dstPort")
         var resolvedUid: Int? = null
 
         // 1. Android 10+ (API 29+) 优先使用 ConnectivityManager
@@ -79,14 +80,20 @@ object ConnectionOwnerResolver {
                     val local = InetSocketAddress(InetAddress.getByName(srcIp), srcPort)
                     val remote = InetSocketAddress(InetAddress.getByName(dstIp), dstPort)
                     val uid = cm.getConnectionOwnerUid(protocol, local, remote)
+                    Log.i("ConnOwnerResolver", "getConnectionOwnerUid(proto=$protocol, local=$local, remote=$remote) -> $uid")
                     if (uid > 0 && uid != Process.INVALID_UID) uid else null
+                }.onFailure { e ->
+                    Log.w("ConnOwnerResolver", "getConnectionOwnerUid 抛出异常: ${e.message}", e)
                 }.getOrNull()
+            } else {
+                Log.w("ConnOwnerResolver", "connectivityManager 为 null!")
             }
         }
 
         // 2. Android 9 / API 28 或系统 API 失败时，通过 procfs 读取
         if (resolvedUid == null) {
             resolvedUid = resolveUidFromProcfs(protocol, srcIp, srcPort)
+            Log.i("ConnOwnerResolver", "resolveUidFromProcfs -> $resolvedUid")
         }
 
         val uid = resolvedUid ?: return null
@@ -97,6 +104,7 @@ object ConnectionOwnerResolver {
         }
 
         val packageName = getPackageNameForUid(uid)
+        Log.i("ConnOwnerResolver", "uid=$uid -> package=$packageName")
         if (!packageName.isNullOrBlank()) {
             synchronized(portCache) {
                 portCache.put(cacheKey, PortCacheEntry(now, packageName))
@@ -116,7 +124,12 @@ object ConnectionOwnerResolver {
 
         val pm = packageManager ?: return null
         val pkg = runCatching {
-            pm.getPackagesForUid(uid)?.firstOrNull() ?: pm.getNameForUid(uid)
+            val list = pm.getPackagesForUid(uid)
+            val name = pm.getNameForUid(uid)
+            Log.d("ConnOwnerResolver", "getPackagesForUid($uid) -> ${list?.contentToString()}, getNameForUid -> $name")
+            list?.firstOrNull() ?: name
+        }.onFailure { e ->
+            Log.w("ConnOwnerResolver", "getPackageNameForUid($uid) 失败: ${e.message}", e)
         }.getOrNull()
 
         if (!pkg.isNullOrBlank()) {
