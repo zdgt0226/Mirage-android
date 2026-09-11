@@ -14,7 +14,8 @@ data class ConnectionInfo(
     val upBytes: Long,
     val downBytes: Long,
     val startTime: Long,
-    val durationSecs: Long
+    val durationSecs: Long,
+    val sourceApp: String? = null
 ) {
     val upFormatted: String get() = formatBytes(upBytes)
     val downFormatted: String get() = formatBytes(downBytes)
@@ -32,7 +33,8 @@ data class ConnectionInfo(
                 upBytes = json.optLong("up_bytes", 0),
                 downBytes = json.optLong("down_bytes", 0),
                 startTime = json.optLong("start_time", 0),
-                durationSecs = json.optLong("duration_secs", 0)
+                durationSecs = json.optLong("duration_secs", 0),
+                sourceApp = json.optString("source_app").takeIf { it.isNotBlank() && it != "null" }
             )
         }
 

@@ -109,6 +109,7 @@ class CoreService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         setActive(this)
+        com.mirage.android.core.ConnectionOwnerResolver.init(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

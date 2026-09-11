@@ -135,8 +135,13 @@ object CoreController {
         call { it.clearNativeLogs() } ?: true
     fun getLogs(): String =
         call { it.logs } ?: ""
-    fun closeConnection(id: Long): Boolean =
-        call { it.closeConnection(id) } ?: false
+    fun closeConnection(id: Long): Boolean {
+        if (CommandBusClient.isConnected.value) {
+            CommandBusClient.sendCloseConnection(id)
+            return true
+        }
+        return call { it.closeConnection(id) } ?: false
+    }
     fun closeAllConnections(): Int =
         call { it.closeAllConnections() } ?: 0
     fun setOutboundMode(mode: Int): Boolean =

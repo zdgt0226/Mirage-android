@@ -49,6 +49,16 @@ class RecentRequestAdapter(
             }
 
             binding.tvTarget.text = item.target
+
+            val app = item.sourceApp
+            if (!app.isNullOrBlank()) {
+                val label = com.mirage.android.core.ConnectionOwnerResolver.getAppLabel(app, binding.root.context)
+                binding.tvSourceApp.text = label
+                binding.tvSourceApp.visibility = android.view.View.VISIBLE
+            } else {
+                binding.tvSourceApp.visibility = android.view.View.GONE
+            }
+
             binding.tvRuleInfo.text = if (item.resolvedIp.isNotBlank()) {
                 "${item.matchedRule} · ${item.resolvedIp}"
             } else {

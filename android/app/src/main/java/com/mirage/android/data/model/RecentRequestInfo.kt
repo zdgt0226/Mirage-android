@@ -20,7 +20,8 @@ data class RecentRequestInfo(
     val dnsMs: Long = 0,
     val connectMs: Long = 0,
     val tlsMs: Long = 0,
-    val ttfbMs: Long = 0
+    val ttfbMs: Long = 0,
+    val sourceApp: String? = null
 ) {
     val upFormatted: String get() = formatBytes(upBytes)
     val downFormatted: String get() = formatBytes(downBytes)
@@ -46,7 +47,8 @@ data class RecentRequestInfo(
                 dnsMs = obj.optLong("dns_ms", 0),
                 connectMs = obj.optLong("connect_ms", 0),
                 tlsMs = obj.optLong("tls_ms", 0),
-                ttfbMs = obj.optLong("ttfb_ms", 0)
+                ttfbMs = obj.optLong("ttfb_ms", 0),
+                sourceApp = obj.optString("source_app").takeIf { it.isNotBlank() && it != "null" }
             )
         }
 

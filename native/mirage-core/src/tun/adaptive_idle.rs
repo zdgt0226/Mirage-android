@@ -291,7 +291,14 @@ pub fn classify_connection(
     dst_ip: Option<std::net::IpAddr>,
     dst_port: u16,
     domain: Option<&str>,
+    source_app: Option<&str>,
 ) -> (TrafficCategory, Duration) {
+    if let Some(app) = source_app {
+        if crate::attribution::is_im_or_push_package(app) {
+            return (TrafficCategory::PushIm, Duration::from_secs(900));
+        }
+    }
+
     if is_interactive_port(dst_port) {
         return (TrafficCategory::Interactive, Duration::from_secs(300));
     }
@@ -395,11 +402,17 @@ pub fn compute_adaptive_timeout(
     dst_port: u16,
     domain: Option<&str>,
     is_active_transfer: bool,
+    source_app: Option<&str>,
 ) -> Duration {
+    if let Some(app) = source_app {
+        if crate::attribution::is_im_or_push_package(app) {
+            return Duration::from_secs(900);
+        }
+    }
     if is_interactive_port(dst_port) {
         return Duration::from_secs(300);
     }
-    let (cat, _) = classify_connection(dst_ip, dst_port, domain);
+    let (cat, _) = classify_connection(dst_ip, dst_port, domain, source_app);
     if cat == TrafficCategory::PushIm {
         return Duration::from_secs(900);
     }
@@ -569,26 +582,40 @@ mod tests {
 
     #[test]
     fn test_static_classification() {
-        assert_eq!(classify_connection(None, 22, None).0, TrafficCategory::Interactive);
-        assert_eq!(classify_connection(None, 443, Some("pbs.twimg.com")).0, TrafficCategory::MediaCdn);
-        assert_eq!(classify_connection(None, 443, Some("mtalk.google.com")).0, TrafficCategory::PushIm);
-        assert_eq!(classify_connection(None, 443, Some("img.alicdn.com")).0, TrafficCategory::MediaCdn);
-        assert_eq!(classify_connection(None, 443, Some("i0.hdslb.com")).0, TrafficCategory::MediaCdn);
-        assert_eq!(classify_connection(None, 443, Some("weixin.qq.com")).0, TrafficCategory::PushIm);
-        assert_eq!(classify_connection(None, 443, Some("push.aliyun.com")).0, TrafficCategory::PushIm);
-        assert_eq!(classify_connection(None, 443, Some("api.unknown-service.org")).0, TrafficCategory::GeneralApi);
+        assert_eq!(classify_connection(None, 22, None, None).0, TrafficCategory::Interactive);
+        assert_eq!(classify_connection(None, 443, Some("pbs.twimg.com"), None).0, TrafficCategory::MediaCdn);
+        assert_eq!(classify_connection(None, 443, Some("mtalk.google.com"), None).0, TrafficCategory::PushIm);
+        assert_eq!(classify_connection(None, 443, Some("img.alicdn.com"), None).0, TrafficCategory::MediaCdn);
+        assert_eq!(classify_connection(None, 443, Some("i0.hdslb.com"), None).0, TrafficCategory::MediaCdn);
+        assert_eq!(classify_connection(None, 443, Some("weixin.qq.com"), None).0, TrafficCategory::PushIm);
+        assert_eq!(classify_connection(None, 443, Some("push.aliyun.com"), None).0, TrafficCategory::PushIm);
+        assert_eq!(classify_connection(None, 443, Some("api.unknown-service.org"), None).0, TrafficCategory::GeneralApi);
 
         // 验证微信专用端口与腾讯网段识别
-        assert_eq!(classify_connection(None, 14000, None).0, TrafficCategory::PushIm);
+        assert_eq!(classify_connection(None, 14000, None, None).0, TrafficCategory::PushIm);
         let tencent_ip: std::net::IpAddr = "183.3.226.35".parse().unwrap();
-        assert_eq!(classify_connection(Some(tencent_ip), 8080, None).0, TrafficCategory::PushIm);
-        assert_eq!(classify_connection(Some(tencent_ip), 8080, None).1.as_secs(), 900);
+        assert_eq!(classify_connection(Some(tencent_ip), 8080, None, None).0, TrafficCategory::PushIm);
+        assert_eq!(classify_connection(Some(tencent_ip), 8080, None, None).1.as_secs(), 900);
+    }
+
+    #[test]
+    fn test_app_attribution_push_im() {
+        // 任意非标端口或未知域名，只要包名识别为 IM/推送，均判定为 PushIm (900s)
+        let (cat, timeout) = classify_connection(None, 12345, Some("custom.example.org"), Some("com.tencent.mm"));
+        assert_eq!(cat, TrafficCategory::PushIm);
+        assert_eq!(timeout.as_secs(), 900);
+
+        let (cat2, timeout2) = classify_connection(None, 8888, None, Some("org.telegram.messenger"));
+        assert_eq!(cat2, TrafficCategory::PushIm);
+        assert_eq!(timeout2.as_secs(), 900);
+
+        assert_eq!(compute_adaptive_timeout(None, 8888, None, true, Some("com.tencent.mobileqq")).as_secs(), 900);
     }
 
     #[test]
     fn test_dynamic_learning_to_media_cdn() {
         let domain = "test-gallery.img-service.net";
-        let (cat, _) = classify_connection(None, 443, Some(domain));
+        let (cat, _) = classify_connection(None, 443, Some(domain), None);
         assert_eq!(cat, TrafficCategory::GeneralApi);
 
         // 模拟 3 次大下行图片流 (上行 500B, 下行 64KB)
@@ -596,15 +623,15 @@ mod tests {
             record_conn_metrics(Some(domain), 500, 65536, 1500, CloseReason::ServerClosed, false);
         }
 
-        let (cat_learned, _) = classify_connection(None, 443, Some(domain));
+        let (cat_learned, _) = classify_connection(None, 443, Some(domain), None);
         assert_eq!(cat_learned, TrafficCategory::MediaCdn);
-        assert_eq!(compute_adaptive_timeout(None, 443, Some(domain), true).as_secs(), 10);
+        assert_eq!(compute_adaptive_timeout(None, 443, Some(domain), true, None).as_secs(), 10);
     }
 
     #[test]
     fn test_dynamic_learning_to_push_im() {
         let domain = "custom-socket.message-hub.io";
-        let (cat, _) = classify_connection(None, 443, Some(domain));
+        let (cat, _) = classify_connection(None, 443, Some(domain), None);
         assert_eq!(cat, TrafficCategory::GeneralApi);
 
         // 模拟 3 次心跳小包 (上行 120B, 下行 180B, 持续 10 秒)
@@ -612,21 +639,21 @@ mod tests {
             record_conn_metrics(Some(domain), 120, 180, 10000, CloseReason::ClientClosed, true);
         }
 
-        let (cat_learned, _) = classify_connection(None, 443, Some(domain));
+        let (cat_learned, _) = classify_connection(None, 443, Some(domain), None);
         assert_eq!(cat_learned, TrafficCategory::PushIm);
-        assert_eq!(compute_adaptive_timeout(None, 443, Some(domain), true).as_secs(), 900);
+        assert_eq!(compute_adaptive_timeout(None, 443, Some(domain), true, None).as_secs(), 900);
     }
 
     #[test]
     fn test_churn_penalty() {
         let domain = "test-churn-app.api.io";
-        let _ = classify_connection(None, 443, Some(domain));
+        let _ = classify_connection(None, 443, Some(domain), None);
 
         // 1. 连接正常交互后由于短超时关闭 (上行 4KB, 下行 6KB, 持续 2s)
         record_conn_metrics(Some(domain), 4096, 6144, 2000, CloseReason::IdleTimeout, true);
 
         // 2. 模拟 App 立即发生重连 (由于刚刚被 IdleTimeout 掐断, 触发 1.5x 惩罚)
-        let (_, timeout_after_churn) = classify_connection(None, 443, Some(domain));
+        let (_, timeout_after_churn) = classify_connection(None, 443, Some(domain), None);
         // 初始 GeneralApi 为 30s，触发 1.5x 惩罚后应为 45s
         assert_eq!(timeout_after_churn.as_secs(), 45);
     }
@@ -634,7 +661,7 @@ mod tests {
     #[test]
     fn test_zombie_decay() {
         let domain = "test-zombie-app.api.io";
-        let _ = classify_connection(None, 443, Some(domain));
+        let _ = classify_connection(None, 443, Some(domain), None);
 
         // 连接被 IdleTimeout 关闭且全程未被复用 (is_reused = false) -> 触发 0.8x 僵尸衰减
         record_conn_metrics(Some(domain), 4096, 6144, 2000, CloseReason::IdleTimeout, false);
@@ -648,17 +675,17 @@ mod tests {
     #[test]
     fn test_static_rule_immunity_from_churn_and_decay() {
         let static_cdn = "pbs.twimg.com";
-        let (cat, timeout) = classify_connection(None, 443, Some(static_cdn));
+        let (cat, timeout) = classify_connection(None, 443, Some(static_cdn), None);
         assert_eq!(cat, TrafficCategory::MediaCdn);
         assert_eq!(timeout.as_secs(), 10);
 
         // 1. 模拟 IdleTimeout 且无复用 -> 静态规则不应被 Zombie 衰减
         record_conn_metrics(Some(static_cdn), 500, 20000, 1000, CloseReason::IdleTimeout, false);
-        let (_, timeout_after_idle) = classify_connection(None, 443, Some(static_cdn));
+        let (_, timeout_after_idle) = classify_connection(None, 443, Some(static_cdn), None);
         assert_eq!(timeout_after_idle.as_secs(), 10);
 
         // 2. 模拟 1 秒后立即重连 -> 静态规则不应被 Churn 惩罚放大
-        let (_, timeout_after_reconnect) = classify_connection(None, 443, Some(static_cdn));
+        let (_, timeout_after_reconnect) = classify_connection(None, 443, Some(static_cdn), None);
         assert_eq!(timeout_after_reconnect.as_secs(), 10);
 
         let profile = with_profiles_read(|map| map.get(static_cdn).cloned()).unwrap();

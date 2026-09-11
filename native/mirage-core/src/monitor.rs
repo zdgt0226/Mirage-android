@@ -263,6 +263,8 @@ pub struct ConnectionRecord {
     pub down_bytes: u64,
     pub start_time: u64,
     pub duration_secs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_app: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -286,6 +288,8 @@ pub struct RecentRequestRecord {
     pub tls_ms: u32,
     #[serde(default)]
     pub ttfb_ms: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_app: Option<String>,
 }
 
 pub struct LiveConnection {
@@ -297,6 +301,7 @@ pub struct LiveConnection {
     pub down_bytes: Arc<AtomicU64>,
     pub start_time: u64,
     pub abort: Arc<tokio::sync::Notify>,
+    pub source_app: Option<String>,
 }
 
 const RECENT_REQUESTS_CAP: usize = 300;
@@ -304,14 +309,25 @@ static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 static ACTIVE_CONNECTIONS: Mutex<Option<std::collections::HashMap<u64, LiveConnection>>> = Mutex::new(None);
 static RECENT_REQUESTS: Mutex<Option<VecDeque<RecentRequestRecord>>> = Mutex::new(None);
 
-/// 注册新连接，返回 (id, up_atomic, down_atomic, abort_notify)。
-/// 读写协程可直接原子累加，无需争抢全局大锁，实现实时无锁流量统计与定向中断。
+/// 注册新连接 (兼容旧调用，无 source_app)
 pub fn record_conn_start(
     protocol: &str,
     target: &str,
     resolved_ip: &str,
     matched_rule: &str,
     outbound: &str,
+) -> (u64, Arc<AtomicU64>, Arc<AtomicU64>, Arc<tokio::sync::Notify>) {
+    record_conn_start_with_app(protocol, target, resolved_ip, matched_rule, outbound, None)
+}
+
+/// 注册新连接，附带来源应用包名 (用于精准溯源与分流画像)
+pub fn record_conn_start_with_app(
+    protocol: &str,
+    target: &str,
+    resolved_ip: &str,
+    matched_rule: &str,
+    outbound: &str,
+    source_app: Option<String>,
 ) -> (u64, Arc<AtomicU64>, Arc<AtomicU64>, Arc<tokio::sync::Notify>) {
     let id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
     let start_time = std::time::SystemTime::now()
@@ -332,6 +348,7 @@ pub fn record_conn_start(
         down_bytes: down_bytes.clone(),
         start_time,
         abort: abort.clone(),
+        source_app: source_app.clone(),
     };
 
     let req_item = RecentRequestRecord {
@@ -350,6 +367,7 @@ pub fn record_conn_start(
         connect_ms: 0,
         tls_ms: 0,
         ttfb_ms: 0,
+        source_app,
     };
 
     {
@@ -460,6 +478,8 @@ struct ConnectionRecordRef<'a> {
     pub down_bytes: u64,
     pub start_time: u64,
     pub duration_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_app: Option<&'a str>,
 }
 
 /// 获取当前所有活跃连接的实时 JSON 快照 (零拷贝借用序列化)
@@ -486,6 +506,7 @@ pub fn get_connections_json() -> String {
                 down_bytes: c.down_bytes.load(Ordering::Relaxed),
                 start_time: c.start_time,
                 duration_secs: now.saturating_sub(c.start_time),
+                source_app: c.source_app.as_deref(),
             })
             .collect();
         serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())

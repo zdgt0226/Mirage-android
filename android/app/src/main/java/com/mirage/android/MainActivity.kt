@@ -80,6 +80,7 @@ class MainActivity : AppCompatActivity() {
 
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        com.mirage.android.core.ConnectionOwnerResolver.init(applicationContext)
 
         // 统一处理 Window Insets: 顶部状态栏沉浸, 底部避让系统导航栏与悬浮底栏
         androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->

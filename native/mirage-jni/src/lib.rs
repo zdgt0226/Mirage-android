@@ -122,9 +122,10 @@ fn init_logging() {
 
         // panic hook: Rust panic 会 abort 进程 (闪退), 至少把堆栈写进日志便于定位
         std::panic::set_hook(Box::new(|info| {
-            eprintln!("[mirage-jni] PANIC: {info}");
+            tracing::error!("[mirage-jni] PANIC: {info}");
             let bt = std::backtrace::Backtrace::force_capture();
-            eprintln!("[mirage-jni] stack:\n{bt}");
+            tracing::error!("[mirage-jni] stack:\n{bt}");
+            eprintln!("[mirage-jni] PANIC: {info}\nstack:\n{bt}");
         }));
     });
 }
@@ -261,6 +262,47 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_start(
         }
     }));
 
+    let vm_for_attr = std::sync::Arc::clone(&vm);
+    let class_for_attr = class_ref.clone();
+    mirage_core::attribution::set_package_resolver(Box::new(move |proto, src_ip, src_port, dst_ip, dst_port| {
+        use jni::objects::JValue;
+        let mut env = vm_for_attr.attach_current_thread_as_daemon().ok()?;
+        let src_ip_str = env.new_string(src_ip.to_string()).ok()?;
+        let dst_ip_str = env.new_string(dst_ip.to_string()).ok()?;
+        let res = env.call_static_method(
+            &class_for_attr,
+            "resolveConnectionOwner",
+            "(ILjava/lang/String;ILjava/lang/String;I)Ljava/lang/String;",
+            &[
+                JValue::Int(proto as i32),
+                JValue::Object(&src_ip_str),
+                JValue::Int(src_port as i32),
+                JValue::Object(&dst_ip_str),
+                JValue::Int(dst_port as i32),
+            ],
+        );
+        match res {
+            Ok(val) => {
+                let obj = val.l().ok()?;
+                if obj.is_null() {
+                    None
+                } else {
+                    let jstr = JString::from(obj);
+                    let pkg: String = env.get_string(&jstr).ok()?.into();
+                    if pkg.is_empty() {
+                        None
+                    } else {
+                        Some(pkg)
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!("[mirage-jni] resolveConnectionOwner 失败: {e}");
+                None
+            }
+        }
+    }));
+
     // 专用 tokio runtime (独立线程, 不占主线程)。必须先建 runtime 再在其内部
     // 调 Engine::new —— WarmPool::new 会 tokio::spawn 预热任务, 无 runtime 上下文
     // 直接 panic (JNI 边界 panic = abort = App 闪退, 真机实测踩坑)。
@@ -304,6 +346,9 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_start(
             return -3;
         }
     };
+
+    // 启动统一命令总线流式推送服务 (@mirage_cmd.sock)
+    mirage_core::command_server::start_command_server(stack.stop_notify.clone(), Some(rt.handle()));
 
     *RUNTIME.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(RunState {
         engine,

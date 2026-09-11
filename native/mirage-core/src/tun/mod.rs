@@ -101,7 +101,7 @@ pub struct TunStack {
     /// 已停止标志 (stop 幂等)。
     stopped: Arc<AtomicBool>,
     /// 泵的退出信号 (stop 时 notify)。
-    pub(crate) stop_notify: Arc<Notify>,
+    pub stop_notify: Arc<Notify>,
     cfg: TunConfig,
     /// 原始 TUN fd (stop 时原子关闭; 读线程持 dup 副本)。
     fd: std::sync::atomic::AtomicI32,

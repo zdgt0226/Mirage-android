@@ -65,6 +65,8 @@ class VpnRepository(private val context: Context) {
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var telemetryJob: Job? = null
+    private var commandBusStatsJob: Job? = null
+    private var commandBusReqsJob: Job? = null
     private val telemetryWakeChannel = Channel<Unit>(Channel.CONFLATED)
     private val isAppForeground = AtomicBoolean(true)
     private val isMonitorActive = AtomicBoolean(false)
@@ -271,6 +273,22 @@ class VpnRepository(private val context: Context) {
     }
 
     private fun startTelemetry() {
+        com.mirage.android.core.CommandBusClient.start()
+        if (commandBusStatsJob?.isActive != true) {
+            commandBusStatsJob = scope.launch(Dispatchers.Main) {
+                com.mirage.android.core.CommandBusClient.statsFlow.collect { stats ->
+                    _trafficStats.value = stats
+                }
+            }
+        }
+        if (commandBusReqsJob?.isActive != true) {
+            commandBusReqsJob = scope.launch(Dispatchers.Main) {
+                com.mirage.android.core.CommandBusClient.recentRequestsFlow.collect { reqs ->
+                    _recentRequests.value = reqs
+                }
+            }
+        }
+
         telemetryJob?.cancel()
         telemetryJob = scope.launch(Dispatchers.IO) {
             var tick = 0L
@@ -288,13 +306,16 @@ class VpnRepository(private val context: Context) {
 
                     val foreground = isAppForeground.get()
                     val monitorActive = isMonitorActive.get()
+                    val isBusConnected = com.mirage.android.core.CommandBusClient.isConnected.value
 
                     // 1. 基础流量与延迟统计:
-                    // 前台每 1s 采样 (Home 首页图表); 后台降频为 5s 采样 (超低功耗待机)
+                    // 若命令总线已通过 Unix Domain Socket 建立流式推送，则跳过 Binder IPC 轮询；未连接时降级走 Binder 采样
                     if (foreground || tick % 5 == 0L) {
-                        val statsArr = CoreController.getStats()
-                        if (statsArr != null && statsArr.size >= 7) {
-                            _trafficStats.value = TrafficStats.fromArray(statsArr)
+                        if (!isBusConnected) {
+                            val statsArr = CoreController.getStats()
+                            if (statsArr != null && statsArr.size >= 7) {
+                                _trafficStats.value = TrafficStats.fromArray(statsArr)
+                            }
                         }
                         val lat = CoreController.latencyMs()
                         _latencyMs.value = lat
@@ -327,22 +348,24 @@ class VpnRepository(private val context: Context) {
                             }
                         }
 
-                        // 最近请求流: 每 2s 轮询一次 (或首次进入监控页时立即拉取)
-                        if (tick % 2 == 0L || lastReqsJson.isEmpty()) {
-                            val reqsJson = CoreController.getRecentRequestsJson()
-                            if (reqsJson != lastReqsJson) {
-                                lastReqsJson = reqsJson
-                                if (reqsJson.isNotBlank() && reqsJson != "[]") {
-                                    val parsedReqs = mutableListOf<com.mirage.android.data.model.RecentRequestInfo>()
-                                    runCatching {
-                                        val arr = org.json.JSONArray(reqsJson)
-                                        for (i in 0 until arr.length()) {
-                                            parsedReqs.add(com.mirage.android.data.model.RecentRequestInfo.fromJson(arr.getJSONObject(i)))
+                        // 最近请求流: 若命令总线未连接，降级走 Binder 轮询；总线已推送则无需 Binder 调取
+                        if (!isBusConnected) {
+                            if (tick % 2 == 0L || lastReqsJson.isEmpty()) {
+                                val reqsJson = CoreController.getRecentRequestsJson()
+                                if (reqsJson != lastReqsJson) {
+                                    lastReqsJson = reqsJson
+                                    if (reqsJson.isNotBlank() && reqsJson != "[]") {
+                                        val parsedReqs = mutableListOf<com.mirage.android.data.model.RecentRequestInfo>()
+                                        runCatching {
+                                            val arr = org.json.JSONArray(reqsJson)
+                                            for (i in 0 until arr.length()) {
+                                                parsedReqs.add(com.mirage.android.data.model.RecentRequestInfo.fromJson(arr.getJSONObject(i)))
+                                            }
                                         }
+                                        _recentRequests.value = parsedReqs
+                                    } else {
+                                        _recentRequests.value = emptyList()
                                     }
-                                    _recentRequests.value = parsedReqs
-                                } else {
-                                    _recentRequests.value = emptyList()
                                 }
                             }
                         }
@@ -367,6 +390,11 @@ class VpnRepository(private val context: Context) {
     private fun stopTelemetry() {
         telemetryJob?.cancel()
         telemetryJob = null
+        commandBusStatsJob?.cancel()
+        commandBusStatsJob = null
+        commandBusReqsJob?.cancel()
+        commandBusReqsJob = null
+        com.mirage.android.core.CommandBusClient.stop()
         _trafficStats.value = TrafficStats()
         _latencyMs.value = -1L
     }

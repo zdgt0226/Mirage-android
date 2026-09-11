@@ -148,4 +148,12 @@ object MirageNative {
     fun protectFd(fd: Int) {
         com.mirage.android.CoreService.protectFd(fd)
     }
+
+    /**
+     * Rust 侧同步调用: 查询指定 TCP/UDP 连接归属的应用包名 (精准溯源与 IM 分流)。
+     */
+    @JvmStatic
+    fun resolveConnectionOwner(protocol: Int, srcIp: String, srcPort: Int, dstIp: String, dstPort: Int): String? {
+        return ConnectionOwnerResolver.resolve(protocol, srcIp, srcPort, dstIp, dstPort)
+    }
 }

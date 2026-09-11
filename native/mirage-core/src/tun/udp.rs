@@ -164,6 +164,7 @@ async fn udp_flow_relay(
 ) {
     let _guard = FlowGuard { stack: stack.clone(), key };
     let flow_id = NEXT_FLOW_ID.fetch_add(1, Ordering::Relaxed);
+    let source_app = crate::attribution::resolve_package(17, key.src, key.src_port, key.dst, key.dst_port);
 
     // 复合分流规则决策
     let reverse_domain = engine.fake_ip_reverse(&key.dst);
@@ -171,7 +172,7 @@ async fn udp_flow_relay(
 
     if action == crate::direct::RuleAction::Block {
         let target_str = reverse_domain.as_deref().map(|d| d.to_string()).unwrap_or_else(|| format!("{}:{}", key.dst, key.dst_port));
-        let (cid, _, _, _) = crate::monitor::record_conn_start("UDP", &target_str, &key.dst.to_string(), &matched_rule, "BLOCK");
+        let (cid, _, _, _) = crate::monitor::record_conn_start_with_app("UDP", &target_str, &key.dst.to_string(), &matched_rule, "BLOCK", source_app);
         crate::monitor::record_conn_close(cid, 0, 0, "Blocked");
         return;
     }
@@ -185,6 +186,7 @@ async fn udp_flow_relay(
             rx,
             matched_rule.clone(),
             source,
+            source_app.clone(),
         )
         .await
         {
@@ -221,7 +223,7 @@ async fn udp_flow_relay(
     } else {
         key.dst.to_string()
     };
-    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("UDP", &target_display, &resolved_str, &matched_rule, "PROXY");
+    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start_with_app("UDP", &target_display, &resolved_str, &matched_rule, "PROXY", source_app);
 
     // ── UDP Mux 路径: 多流复用 K 条长命共享隧道 (脱钩 pool_size 限制) ──
     if crate::proxy::udp_mux::udp_mux_enabled() {
@@ -869,6 +871,7 @@ async fn udp_flow_direct(
     mut rx: tokio::sync::mpsc::Receiver<(SocketAddr, SocketAddr, Vec<u8>)>,
     matched_rule: String,
     source: crate::direct::DecisionSource,
+    source_app: Option<String>,
 ) -> Option<tokio::sync::mpsc::Receiver<(SocketAddr, SocketAddr, Vec<u8>)>> {
     let is_fake = engine.is_fake_ip(&key.dst);
     let target_ip = if is_fake {
@@ -926,7 +929,7 @@ async fn udp_flow_direct(
     let client = SocketAddr::new(key.src, key.src_port);
     debug!("[TUN-UDP/direct] 新流 {} → {}", fmt_flow(&key), dst);
 
-    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start("UDP", &target_display, &target_ip.to_string(), &matched_rule, "DIRECT");
+    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start_with_app("UDP", &target_display, &target_ip.to_string(), &matched_rule, "DIRECT", source_app);
     let sock_rc = std::sync::Arc::new(sock);
 
     // 下行: 客户端 → 目标
