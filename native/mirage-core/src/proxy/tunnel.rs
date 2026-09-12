@@ -91,11 +91,10 @@ impl Tunnel {
             reader,
             writer,
             created_at: std::time::Instant::now(),
-            // 30 ~ 50s 随机抖动, 必须 < 服务端 first_chunk 超时 60s, 否则
-            // pool 会发出"服务端已 reap 但客户端以为还活着"的死 tunnel,
-            // 触发 handler 5 分钟级 read timeout (用户实测过).
+            // 20 ~ 30s 随机抖动 (缩短空闲存活期，规避移动蜂窝网络 30s CGNAT 静默超时风险),
+            // 必须 < 服务端 first_chunk 超时 60s, 配合 TCP Keepalive 15s 保活。
             // 抖动是为了避免大量 warmup 同时刷新冲垮服务端.
-            max_age_sec: 30 + fastrand::u64(0..20),
+            max_age_sec: 20 + fastrand::u64(0..10),
         }
     }
 
@@ -170,5 +169,15 @@ mod tests {
         server.flush().await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(tunnel.is_stale(), "收到意外数据的隧道应判 stale");
+    }
+
+    #[tokio::test]
+    async fn tunnel_max_age_jitter_bounds() {
+        let (tunnel, _server) = make_tunnel().await;
+        assert!(
+            tunnel.max_age_sec >= 20 && tunnel.max_age_sec < 30,
+            "max_age 必须在 [20, 30) 秒内以规避 30s CGNAT 超时 (当前: {})",
+            tunnel.max_age_sec
+        );
     }
 }

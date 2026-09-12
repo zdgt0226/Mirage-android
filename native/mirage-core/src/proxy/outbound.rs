@@ -253,7 +253,6 @@ impl OutboundNode {
                 anyhow::bail!("outbound `{tag}` 是 block, 拒绝连接 {target}")
             }
             OutboundNode::Mirage { pool, .. } => {
-                let mut tunnel = pool.get().await?;
                 // 目标头: [2B len][host:port]; 服务端据此远程解析并连接 (Domain 保留域名交服务端
                 // 解析, 抗污染)。与 handler.rs 一致。
                 let hp = target.host_port();
@@ -264,8 +263,25 @@ impl OutboundNode {
                 let mut hdr = Vec::with_capacity(2 + tb.len());
                 hdr.extend_from_slice(&(tb.len() as u16).to_be_bytes());
                 hdr.extend_from_slice(tb);
-                tunnel.writer.send_data(&hdr).await?;
-                Ok(OutStream::Mirage(crate::proxy::mirage_stream::MirageStream::from_tunnel(tunnel)))
+
+                let mut last_err = None;
+                for attempt in 0..2 {
+                    let mut tunnel = match pool.get().await {
+                        Ok(t) => t,
+                        Err(e) => {
+                            last_err = Some(e);
+                            continue;
+                        }
+                    };
+                    match tunnel.writer.send_data(&hdr).await {
+                        Ok(()) => return Ok(OutStream::Mirage(crate::proxy::mirage_stream::MirageStream::from_tunnel(tunnel))),
+                        Err(e) => {
+                            tracing::warn!("[Outbound] 隧道发送目标头失败 (attempt={attempt}): {e}, 自动丢弃半死连接并获取新隧道重试");
+                            last_err = Some(e.into());
+                        }
+                    }
+                }
+                Err(last_err.unwrap_or_else(|| anyhow::anyhow!("获取 Mirage 隧道失败")))
             }
             // 移动端裁剪: WG / Shadowsocks 出站已移除 (见 OutboundNode 枚举注释)。
             // resolve_leaf 已把组解到叶子; 仍是组 = 无健康成员可用。

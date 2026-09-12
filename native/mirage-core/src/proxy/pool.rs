@@ -692,13 +692,13 @@ impl WarmPool {
                 SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
             }?;
             let raw_fd = sock.as_raw_fd();
-            // 启用 TCP KeepAlive 并显式指定移动蜂窝网 NAT 活跃参数 (45s 探测, 10s 间隔, 3次重试)
+            // 启用 TCP KeepAlive 并显式指定移动蜂窝网 NAT 活跃参数 (15s 探测, 5s 间隔, 3次重试, 击穿 30s CGNAT 阈值)
             let _ = sock.set_keepalive(true);
             #[cfg(unix)]
             unsafe {
-                let idle: libc::c_int = 45;
+                let idle: libc::c_int = 15;
                 libc::setsockopt(raw_fd, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, &idle as *const _ as *const libc::c_void, std::mem::size_of_val(&idle) as libc::socklen_t);
-                let intvl: libc::c_int = 10;
+                let intvl: libc::c_int = 5;
                 libc::setsockopt(raw_fd, libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, &intvl as *const _ as *const libc::c_void, std::mem::size_of_val(&intvl) as libc::socklen_t);
                 let cnt: libc::c_int = 3;
                 libc::setsockopt(raw_fd, libc::IPPROTO_TCP, libc::TCP_KEEPCNT, &cnt as *const _ as *const libc::c_void, std::mem::size_of_val(&cnt) as libc::socklen_t);

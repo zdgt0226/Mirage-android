@@ -261,14 +261,34 @@ async fn connect_tunnel(
         anyhow::bail!("默认出站不是 Mirage");
     };
 
-    let mut tunnel = pool.get().await?;
     let hp = target.host_port();
     let tb = hp.as_bytes();
     let mut hdr = Vec::with_capacity(2 + tb.len());
     hdr.extend_from_slice(&(tb.len() as u16).to_be_bytes());
     hdr.extend_from_slice(tb);
-    tunnel.writer.send_data(&hdr).await?;
-    Ok(tunnel)
+
+    // 0-RTT 首包/目标头重试机制：
+    // 若从 WarmPool 取得的空闲隧道因蜂窝移动 CGNAT 超时已半死，
+    // 在首次写入目标头时可能触发 EPIPE/ECONNRESET 或写失败。
+    // 自动丢弃该坏死隧道并从连接池获取新鲜隧道重试（最多重试 2 次）。
+    let mut last_err = None;
+    for attempt in 0..2 {
+        let mut tunnel = match pool.get().await {
+            Ok(t) => t,
+            Err(e) => {
+                last_err = Some(e);
+                continue;
+            }
+        };
+        match tunnel.writer.send_data(&hdr).await {
+            Ok(()) => return Ok(tunnel),
+            Err(e) => {
+                warn!("[TUN-TCP] 隧道发送目标头失败 (attempt={attempt}): {e}, 自动重试新鲜隧道");
+                last_err = Some(e.into());
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("获取隧道失败")))
 }
 
 /// TCP relay 任务入口: 等 Established → 解析目标 → 建隧道 → 双向转发。
@@ -343,7 +363,7 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
 /// 代理路径: smoltcp socket ⇄ Mirage 加密隧道
 async fn relay_proxy(
     stack: Arc<TunStack>,
-    stream: TunTcpStream,
+    mut stream: TunTcpStream,
     dst: (std::net::IpAddr, u16),
     direct_domain: Option<String>,
     initial_payload: Vec<u8>,
@@ -380,18 +400,46 @@ async fn relay_proxy(
     );
     crate::monitor::record_conn_timings(cid, 0, connect_ms, 0, 0);
 
+    // 预读首包（若嗅探阶段未预读，且客户端已推流，用 15ms 快速预读，用于 0-RTT 首包写入和故障重试）
+    let mut initial_data = initial_payload;
+    if initial_data.is_empty() {
+        let mut buf = [0u8; 16384];
+        if let Ok(Ok(n)) = tokio::time::timeout(std::time::Duration::from_millis(15), stream.read(&mut buf)).await {
+            if n > 0 {
+                initial_data.extend_from_slice(&buf[..n]);
+            }
+        }
+    }
+
     // 拆成读写半程: upload (app→tunnel) / download (tunnel→app)
     let (mut tun_reader, mut tun_writer) = (tunnel.reader, tunnel.writer);
-    let (mut local_rd, mut local_wr) = tokio::io::split(stream);
 
-    // 如果嗅探期间预读了首包数据，优先推入隧道发送
-    if !initial_payload.is_empty() {
-        if tun_writer.send_data(&initial_payload).await.is_err() {
-            crate::monitor::record_conn_close(cid, 0, 0, "Initial Write Failed");
-            return;
+    // 发送首包数据：若发送失败，说明从池中取到的隧道可能由于运营商 CGNAT 静默超时已半死，
+    // 此时立即重连一条新鲜隧道重试发送，完全对上层应用透明
+    if !initial_data.is_empty() {
+        if tun_writer.send_data(&initial_data).await.is_err() {
+            warn!("[TUN-TCP] 首次推入 initial_data 失败，首选隧道已断开，尝试使用新隧道重试...");
+            match connect_tunnel(&stack, dst, direct_domain.clone()).await {
+                Ok(mut retry_tunnel) => {
+                    if let Err(e) = retry_tunnel.writer.send_data(&initial_data).await {
+                        warn!("[TUN-TCP] 重试隧道发送 initial_data 再次失败: {e}");
+                        crate::monitor::record_conn_close(cid, 0, 0, "Initial Write Failed");
+                        return;
+                    }
+                    tun_reader = retry_tunnel.reader;
+                    tun_writer = retry_tunnel.writer;
+                }
+                Err(e) => {
+                    warn!("[TUN-TCP] 重建隧道失败: {e}");
+                    crate::monitor::record_conn_close(cid, 0, 0, "Initial Write Failed");
+                    return;
+                }
+            }
         }
-        conn_up.fetch_add(initial_payload.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        conn_up.fetch_add(initial_data.len() as u64, std::sync::atomic::Ordering::Relaxed);
     }
+
+    let (mut local_rd, mut local_wr) = tokio::io::split(stream);
 
     let start_time = std::time::Instant::now();
     let effective_ip = if crate::direct::is_fake_ip(dst.0) { None } else { Some(dst.0) };
@@ -747,13 +795,13 @@ async fn relay_direct(
         }
     };
     let raw_fd = sock.as_raw_fd();
-    // 启用 TCP KeepAlive 并显式指定移动蜂窝网 NAT 活跃参数 (45s 探测, 10s 间隔, 3次重试)
+    // 启用 TCP KeepAlive 并显式指定移动蜂窝网 NAT 活跃参数 (15s 探测, 5s 间隔, 3次重试, 击穿 30s CGNAT 阈值)
     let _ = sock.set_keepalive(true);
     #[cfg(unix)]
     unsafe {
-        let idle: libc::c_int = 45;
+        let idle: libc::c_int = 15;
         libc::setsockopt(raw_fd, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, &idle as *const _ as *const libc::c_void, std::mem::size_of_val(&idle) as libc::socklen_t);
-        let intvl: libc::c_int = 10;
+        let intvl: libc::c_int = 5;
         libc::setsockopt(raw_fd, libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, &intvl as *const _ as *const libc::c_void, std::mem::size_of_val(&intvl) as libc::socklen_t);
         let cnt: libc::c_int = 3;
         libc::setsockopt(raw_fd, libc::IPPROTO_TCP, libc::TCP_KEEPCNT, &cnt as *const _ as *const libc::c_void, std::mem::size_of_val(&cnt) as libc::socklen_t);
