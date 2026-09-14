@@ -58,6 +58,7 @@ class CoreService : VpnService() {
     private var failoverRestartJob: Job? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var screenReceiver: BroadcastReceiver? = null
+    private var screenJob: Job? = null
     @Volatile
     var currentPhysicalNetwork: Network? = null
     private var lastRecordedUp = -1L
@@ -92,6 +93,7 @@ class CoreService : VpnService() {
         trafficJob?.cancel(); trafficJob = null
         watchdogJob?.cancel(); watchdogJob = null
         failoverRestartJob?.cancel(); failoverRestartJob = null
+        screenJob?.cancel(); screenJob = null
         networkCallback?.let { cb ->
             runCatching { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) }
             networkCallback = null
@@ -329,7 +331,8 @@ class CoreService : VpnService() {
                 override fun onReceive(context: Context?, intent: Intent?) {
                     when (intent?.action) {
                         Intent.ACTION_SCREEN_OFF -> {
-                            scope.launch {
+                            screenJob?.cancel()
+                            screenJob = scope.launch {
                                 delay(15000)
                                 val target = com.mirage.android.data.repository.AppFilterManager.calculateAdaptivePoolSize(screenOn = false, hasActiveHighTraffic = false)
                                 LogStore.append("[power] 息屏低功耗模式: 连接池缩容至 $target 条")
@@ -337,6 +340,8 @@ class CoreService : VpnService() {
                             }
                         }
                         Intent.ACTION_SCREEN_ON -> {
+                            screenJob?.cancel()
+                            screenJob = null
                             val target = com.mirage.android.data.repository.AppFilterManager.calculateAdaptivePoolSize(screenOn = true, hasActiveHighTraffic = false)
                             LogStore.append("[power] 屏幕点亮: 连接池恢复至 $target 条")
                             runCatching { MirageNative.setPoolSize(target) }
@@ -348,17 +353,22 @@ class CoreService : VpnService() {
             runCatching { registerReceiver(receiver, screenFilter) }
         }
 
-        // 注册系统默认底层物理网络监听 (Wi-Fi <-> 蜂窝移动网络切换时即时冲刷暖池坏死连接，并绑定底层物理网络)
+        // 注册底层物理网络监听 (Wi-Fi <-> 蜂窝移动网络切换时即时冲刷暖池坏死连接，并绑定底层物理网络)
         val cm = getSystemService(ConnectivityManager::class.java)
         if (cm != null && networkCallback == null) {
             val cb = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
-                    val caps = cm.getNetworkCapabilities(network)
-                    if (caps == null || caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) {
+                    val caps = runCatching { cm.getNetworkCapabilities(network) }.getOrNull() ?: return
+                    if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) {
                         return
                     }
                     val old = currentPhysicalNetwork
                     if (old != null && old != network) {
+                        val oldCaps = runCatching { cm.getNetworkCapabilities(old) }.getOrNull()
+                        if (oldCaps != null && oldCaps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) && caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                            LogStore.append("[core] 检测到备用蜂窝网络就绪: $network, 当前保留 Wi-Fi: $old")
+                            return
+                        }
                         LogStore.append("[core] 底层物理网络切换: $old -> $network, 冲刷暖池与失效连接")
                         runCatching { MirageNative.flushPool() }
                     }
@@ -378,27 +388,43 @@ class CoreService : VpnService() {
                 }
                 override fun onLost(network: Network) {
                     if (currentPhysicalNetwork == network) {
-                        currentPhysicalNetwork = null
-                        runCatching { MirageNative.setActiveNetwork(0L) }
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                            runCatching { setUnderlyingNetworks(null) }
+                        val nextPhysical = cm.allNetworks.firstOrNull { net ->
+                            net != network && runCatching {
+                                val c = cm.getNetworkCapabilities(net)
+                                c != null &&
+                                c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                                c.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) &&
+                                (c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || c.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) || c.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
+                            }.getOrDefault(false)
                         }
-                        LogStore.append("[core] 底层物理网络断开: $network, 冲刷空闲连接池")
-                        runCatching { MirageNative.flushPool() }
+
+                        if (nextPhysical != null) {
+                            currentPhysicalNetwork = nextPhysical
+                            LogStore.append("[core] 底层物理网络故障转移: $network 丢失 -> 快速接管至备用网络 $nextPhysical")
+                            runCatching { MirageNative.setActiveNetwork(nextPhysical.networkHandle) }
+                            runCatching { MirageNative.flushPool() }
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                                runCatching { setUnderlyingNetworks(arrayOf(nextPhysical)) }
+                            }
+                        } else {
+                            currentPhysicalNetwork = null
+                            LogStore.append("[core] 所有底层物理网络断开: $network, 冲刷空闲连接池")
+                            runCatching { MirageNative.setActiveNetwork(0L) }
+                            runCatching { MirageNative.flushPool() }
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                                runCatching { setUnderlyingNetworks(null) }
+                            }
+                        }
                     }
                 }
             }
             networkCallback = cb
             runCatching {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                    cm.registerDefaultNetworkCallback(cb)
-                } else {
-                    val req = NetworkRequest.Builder()
-                        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                        .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                        .build()
-                    cm.registerNetworkCallback(req, cb)
-                }
+                val req = NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                    .build()
+                cm.registerNetworkCallback(req, cb)
             }
         }
 

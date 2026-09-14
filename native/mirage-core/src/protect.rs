@@ -46,6 +46,9 @@ fn bind_socket_to_network(net_handle: u64, fd: i32) -> bool {
         if ret != 0 {
             let errno = std::io::Error::last_os_error();
             tracing::warn!("[protect] android_setsocknetwork(handle={}, fd={}) 失败: {}", net_handle, fd, errno);
+            // 自愈机制：若句柄失效 (如 ENONET / 64: Machine is not on the network, 或 EINVAL / 22),
+            // 说明底层网络已被系统销毁。立即清空 ACTIVE_NET_HANDLE, 避免后续套接字持续被死句柄毒化
+            ACTIVE_NET_HANDLE.store(0, Ordering::Release);
             return false;
         }
         true
