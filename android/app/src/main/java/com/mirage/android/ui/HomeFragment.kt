@@ -92,6 +92,11 @@ class HomeFragment : Fragment() {
             showDnsConfigDialog()
         }
 
+        binding.tunCard.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
+            showTunConfigDialog()
+        }
+
         setupOutboundModeToggle()
         updateTunSummary()
 
