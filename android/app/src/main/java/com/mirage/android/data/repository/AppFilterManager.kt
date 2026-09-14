@@ -34,12 +34,20 @@ object AppFilterManager {
 
     /**
      * 计算自适应连接池目标容量 (息屏低功耗 vs 活跃全速)
+     * @param screenOn 屏幕是否点亮
+     * @param hasActiveHighTraffic 是否有活跃的高吞吐流量
+     * @param basePoolSize 用户手动设定的基准连接池大小 (默认 16)
      */
-    fun calculateAdaptivePoolSize(screenOn: Boolean, hasActiveHighTraffic: Boolean): Int {
+    fun calculateAdaptivePoolSize(
+        screenOn: Boolean,
+        hasActiveHighTraffic: Boolean,
+        basePoolSize: Int = 16
+    ): Int {
+        val safeBase = basePoolSize.coerceIn(1, 64)
         return if (screenOn || hasActiveHighTraffic) {
-            16
+            safeBase
         } else {
-            4
+            minOf(4, safeBase).coerceAtLeast(1)
         }
     }
 }

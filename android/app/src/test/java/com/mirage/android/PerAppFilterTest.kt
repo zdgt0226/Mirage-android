@@ -72,14 +72,23 @@ class PerAppFilterTest {
 
     @Test
     fun testScenario5_AdaptiveWarmPoolSizeCalculation() {
-        // 前台亮屏状态 -> 16
+        // 默认基准 (16)
         assertEquals(16, AppFilterManager.calculateAdaptivePoolSize(screenOn = true, hasActiveHighTraffic = false))
         assertEquals(16, AppFilterManager.calculateAdaptivePoolSize(screenOn = true, hasActiveHighTraffic = true))
-        
-        // 息屏且无活跃高吞吐流量 -> 缩容至 4
         assertEquals(4, AppFilterManager.calculateAdaptivePoolSize(screenOn = false, hasActiveHighTraffic = false))
-        
-        // 息屏但有后台大流量下载 (如正在下载文件) -> 维持 16
         assertEquals(16, AppFilterManager.calculateAdaptivePoolSize(screenOn = false, hasActiveHighTraffic = true))
+
+        // 用户设定为 32
+        assertEquals(32, AppFilterManager.calculateAdaptivePoolSize(screenOn = true, hasActiveHighTraffic = false, basePoolSize = 32))
+        assertEquals(4, AppFilterManager.calculateAdaptivePoolSize(screenOn = false, hasActiveHighTraffic = false, basePoolSize = 32))
+        assertEquals(32, AppFilterManager.calculateAdaptivePoolSize(screenOn = false, hasActiveHighTraffic = true, basePoolSize = 32))
+
+        // 用户设定为 8
+        assertEquals(8, AppFilterManager.calculateAdaptivePoolSize(screenOn = true, hasActiveHighTraffic = false, basePoolSize = 8))
+        assertEquals(4, AppFilterManager.calculateAdaptivePoolSize(screenOn = false, hasActiveHighTraffic = false, basePoolSize = 8))
+
+        // 用户设定为 2 (轻量化，息屏不膨胀)
+        assertEquals(2, AppFilterManager.calculateAdaptivePoolSize(screenOn = true, hasActiveHighTraffic = false, basePoolSize = 2))
+        assertEquals(2, AppFilterManager.calculateAdaptivePoolSize(screenOn = false, hasActiveHighTraffic = false, basePoolSize = 2))
     }
 }

@@ -334,16 +334,26 @@ class CoreService : VpnService() {
                             screenJob?.cancel()
                             screenJob = scope.launch {
                                 delay(15000)
-                                val target = com.mirage.android.data.repository.AppFilterManager.calculateAdaptivePoolSize(screenOn = false, hasActiveHighTraffic = false)
-                                LogStore.append("[power] 息屏低功耗模式: 连接池缩容至 $target 条")
+                                val base = com.mirage.android.core.NodeStore.getPoolSize(this@CoreService)
+                                val target = com.mirage.android.data.repository.AppFilterManager.calculateAdaptivePoolSize(
+                                    screenOn = false,
+                                    hasActiveHighTraffic = false,
+                                    basePoolSize = base
+                                )
+                                LogStore.append("[power] 息屏低功耗模式: 连接池缩容至 $target 条 (基准: $base 条)")
                                 runCatching { MirageNative.setPoolSize(target) }
                             }
                         }
                         Intent.ACTION_SCREEN_ON -> {
                             screenJob?.cancel()
                             screenJob = null
-                            val target = com.mirage.android.data.repository.AppFilterManager.calculateAdaptivePoolSize(screenOn = true, hasActiveHighTraffic = false)
-                            LogStore.append("[power] 屏幕点亮: 连接池恢复至 $target 条")
+                            val base = com.mirage.android.core.NodeStore.getPoolSize(this@CoreService)
+                            val target = com.mirage.android.data.repository.AppFilterManager.calculateAdaptivePoolSize(
+                                screenOn = true,
+                                hasActiveHighTraffic = false,
+                                basePoolSize = base
+                            )
+                            LogStore.append("[power] 屏幕点亮: 连接池恢复至用户设定 $target 条")
                             runCatching { MirageNative.setPoolSize(target) }
                         }
                     }
