@@ -1171,6 +1171,7 @@ mod tests {
 
     #[test]
     fn geosite_cn_direct_does_not_hijack_foreign_domains() {
+        let _guard = acquire_test_guard(); // 与其余测试串行, 免并发 set_custom_rules 踩全局 router_store
         // 复现 Play 更新慢根因: geosite:cn 数据误含 googleapis.com 等境外域名,
         // 若 cn→direct 直接生效会把 Google 服务直连到 DNS 污染的国内假 IP。
         // 规则: geosite:cn→direct (排前), geosite:google→proxy (排后)。
@@ -1201,6 +1202,7 @@ mod tests {
 
     #[test]
     fn test_is_cn_ip_accuracy_and_boundary_cases() {
+        let _guard = acquire_test_guard(); // 恢复模块不变量: 每个测试都持 TEST_LOCK
         // 1. 经典国内公共 DNS 与真实国内 IP 必中 (包括旧版线性遍历曾漏判的 114.114.114.114)
         assert!(is_cn_ip("114.114.114.114".parse().unwrap()), "114.114.114.114 必须命中 CN IP");
         assert!(is_cn_ip("223.5.5.5".parse().unwrap()), "223.5.5.5 必须命中 CN IP");
@@ -1526,6 +1528,7 @@ mod tests {
 
     #[test]
     fn test_default_router_ip_substring_immunity() {
+        let _guard = acquire_test_guard(); // 恢复模块不变量: 每个测试都持 TEST_LOCK
         // 1. 精确匹配与子域名匹配应正常返回对应路由器 IP
         assert_eq!(
             default_router_ip_for_domain("tplogin.cn"),
