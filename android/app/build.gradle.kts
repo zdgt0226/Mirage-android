@@ -1,6 +1,7 @@
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.Properties
 
 plugins {
     id("com.android.application")
@@ -36,7 +37,7 @@ android {
     // 密钥材料一律来自环境变量或未纳入版本控制的 keystore.properties, 绝不提交进仓库。
     // 四项缺任意一项则不创建 signingConfig, assembleRelease 会产出未签名包并
     // 在下方给出明确提示 —— 宁可构建失败, 也不要静默回落到 AOSP 调试密钥。
-    val keystoreProps = java.util.Properties().apply {
+    val keystoreProps = Properties().apply {
         val f = rootProject.file("keystore.properties")
         if (f.exists()) f.inputStream().use { load(it) }
     }

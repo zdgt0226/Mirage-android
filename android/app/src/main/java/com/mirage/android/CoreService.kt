@@ -33,7 +33,6 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.net.InetAddress
-import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * 独立内核进程 (:core) 的 CoreService。
@@ -46,10 +45,28 @@ import java.util.concurrent.CopyOnWriteArrayList
  */
 class CoreService : VpnService() {
 
+    /**
+     * 服务状态机。
+     *
+     * `MirageNative.isRunning()` 不足以充当状态: 它是原生原子量, 在停止流程中途
+     * 会短暂为 false, 恰好让被 stateLock 挡住的 startInternal 误判为「可以启动」,
+     * 于是用户点了断开、VPN 却自己回来。这里用显式状态在同一把锁内判定,
+     * Stopping 一旦置位, 任何排队中的 startInternal 立即放弃。
+     */
+    private enum class ServiceState { Stopped, Starting, Running, Stopping }
+
     private val stateLock = Any()
+    @Volatile
+    private var serviceState = ServiceState.Stopped
     private var tunFd: ParcelFileDescriptor? = null
     private var scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-    private val callbacks = CopyOnWriteArrayList<ICoreCallback>()
+
+    /**
+     * 用 RemoteCallbackList 而非普通集合: 它按 binder 身份去重, 并在客户端进程
+     * 死亡时通过 death recipient 自动摘除。此前用 CopyOnWriteArrayList,
+     * UI 进程被杀后死条目永久留存, 之后每条日志都对死 binder 发一次注定失败的事务。
+     */
+    private val callbacks = android.os.RemoteCallbackList<ICoreCallback>()
 
     private var logJob: Job? = null
     private var notifJob: Job? = null
@@ -87,11 +104,22 @@ class CoreService : VpnService() {
         }
     }
 
-    private fun cancelAllJobs() {
+    /**
+     * 取消全部周期性后台任务。
+     *
+     * 必须在 startInternal 开头也调用一次: failover 重启路径直接调 startInternal
+     * 而不经过 stopInternal, 若不先取消, 每次重启都会再起一套 log/notif/traffic/watchdog,
+     * 而旧的那套仍在跑 —— 多个 watchdog 各自触发 failover, 增长快于线性。
+     */
+    private fun cancelPeriodicJobs() {
         logJob?.cancel(); logJob = null
         notifJob?.cancel(); notifJob = null
         trafficJob?.cancel(); trafficJob = null
         watchdogJob?.cancel(); watchdogJob = null
+    }
+
+    private fun cancelAllJobs() {
+        cancelPeriodicJobs()
         failoverRestartJob?.cancel(); failoverRestartJob = null
         screenJob?.cancel(); screenJob = null
         networkCallback?.let { cb ->
@@ -127,30 +155,130 @@ class CoreService : VpnService() {
             stopSelf(startId)
             return START_NOT_STICKY
         }
-        // startForegroundService 启动: 5 秒内必须 startForeground, 否则系统杀服务/崩溃
-        startForegroundCompat()
-        // 加载选中的内核 (自定义或内置)
-        NativeLoader.load(this)
+        // 启动中/已运行时不重入 (meow BaseService 的 onStartCommand 守卫同理)
+        if (serviceState == ServiceState.Starting || serviceState == ServiceState.Running) {
+            log("[core] 已在运行或启动中, 忽略重复启动请求")
+            return START_NOT_STICKY
+        }
+        // startForegroundService 启动: 5 秒内必须 startForeground, 否则系统杀服务/崩溃。
+        // 此时隧道尚未建立, 通知文案必须是「正在连接」, 不能一上来就写「已连接」。
+        startForegroundCompat(connected = false)
+
+        // 加载选中的内核 (自定义或内置)。返回值必须检查: 加载失败后任何
+        // MirageNative.* 调用都会抛 UnsatisfiedLinkError(Error), 直接杀掉 :core。
+        if (!NativeLoader.load(this)) {
+            log("[core] 原生内核加载失败, 无法启动")
+            failAndStop(startId)
+            return START_NOT_STICKY
+        }
+
         val uri = intent.getStringExtra("uri")
         val poolSize = intent.getIntExtra("pool_size", -1)
         // 直接驱动启动 (建 TUN + 内核), 不依赖 UI 后续 AIDL 调用
-        startInternal(uri, poolSize)
+        val rc = startInternal(uri, poolSize)
+        if (rc != 0) {
+            log("[core] 启动失败 rc=$rc, 停止服务")
+            failAndStop(startId)
+            return START_NOT_STICKY
+        }
+        // 隧道就绪后才把通知改成「已连接」
+        updateNotif("流量经 Mirage 隧道转发")
         return START_NOT_STICKY
+    }
+
+    /** 启动失败的统一收尾: 撤掉前台通知并终止服务, 不留「已连接」假象。 */
+    private fun failAndStop(startId: Int) {
+        notifyState()
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+        }
+        runCatching { getSystemService(NotificationManager::class.java)?.cancel(1) }
+        serviceState = ServiceState.Stopped
+        stopSelf(startId)
     }
 
     // ── ICoreService 实现 ────────────────────────────────────────────────
 
-    fun log(msg: String) {
-        LogStore.append(msg)
-        callbacks.forEach { runCatching { it.onLog(msg) } }
+    /**
+     * 向所有存活的客户端回调广播。
+     *
+     * RemoteCallbackList 的 beginBroadcast/finishBroadcast 不可重入, 而 log() 会从
+     * binder 线程、主线程和多个协程同时触达, 故必须整体加锁。
+     */
+    private fun broadcast(action: (ICoreCallback) -> Unit) {
+        synchronized(callbacks) {
+            val n = runCatching { callbacks.beginBroadcast() }.getOrDefault(0)
+            try {
+                for (i in 0 until n) {
+                    runCatching { action(callbacks.getBroadcastItem(i)) }
+                }
+            } finally {
+                if (n >= 0) runCatching { callbacks.finishBroadcast() }
+            }
+        }
     }
 
+    fun log(msg: String) {
+        LogStore.append(msg)
+        broadcast { it.onLog(msg) }
+    }
+
+    /**
+     * 启动 TUN 与内核。返回 0 成功, 负数为错误码。
+     *
+     * 调用方必须处理非 0 返回 —— 失败后服务不该继续以「已连接」的前台通知驻留。
+     */
     fun startInternal(uriOverride: String? = null, poolSizeOverride: Int = -1): Int = synchronized(stateLock) {
+        // 停止流程进行中 (可能正持锁或刚释放锁): 放弃本次启动。
+        // 这是「用户点断开后 VPN 自己回来」的根因守卫 —— failoverRestartJob 的
+        // cancel() 是协作式的, 不保证已 join, 它可能已经越过 isActive 检查在此排队。
+        if (serviceState == ServiceState.Stopping) {
+            log("[core] 正在停止中, 忽略本次启动请求")
+            return -6
+        }
         setActive(this)
-        if (MirageNative.isRunning()) {
+        if (serviceState == ServiceState.Running &&
+            runCatching { MirageNative.isRunning() }.getOrDefault(false)) {
             notifyState()
             return 0
         }
+        serviceState = ServiceState.Starting
+        // failover 重启路径不经过 stopInternal, 必须在此清掉上一轮的周期任务,
+        // 否则每次重启都叠加一套, watchdog 会成倍增长。
+        cancelPeriodicJobs()
+
+        val rc = try {
+            startLocked(uriOverride, poolSizeOverride)
+        } catch (t: Throwable) {
+            // 必须捕 Throwable 而非 Exception: 原生库加载失败抛的是 UnsatisfiedLinkError,
+            // 属于 Error, 此前无人接管, 会直接带走整个 :core 进程, 而用户只看到
+            // 通知栏「已连接」闪一下然后一切消失。
+            log("[core] 启动异常: ${t.javaClass.simpleName}: ${t.message ?: "无详情"}")
+            -7
+        }
+
+        if (rc == 0) {
+            serviceState = ServiceState.Running
+        } else {
+            // 任何失败都必须回到干净状态: 否则服务会带着「已连接」的前台通知
+            // 和零隧道继续驻留, 用户以为自己受保护。
+            serviceState = ServiceState.Stopped
+            cancelPeriodicJobs()
+            runCatching { MirageNative.stop() }
+            tunFd?.let { runCatching { it.close() } }
+            tunFd = null
+        }
+        notifyState()
+        return rc
+    }
+
+    /** startInternal 的实际执行体; 调用方已持有 stateLock 并负责 serviceState 与失败清理。 */
+    private fun startLocked(uriOverride: String?, poolSizeOverride: Int): Int {
         val uri = if (!uriOverride.isNullOrBlank()) uriOverride else NodeStore.getSelectedUri(this)
         if (uri.isEmpty()) {
             log("[core] 无选中节点")
@@ -257,7 +385,8 @@ class CoreService : VpnService() {
             return -5
         }
         tunFd = fd
-        startForegroundCompat()
+        // TUN 已建立但内核尚未启动, 仍处于连接中
+        startForegroundCompat(connected = false)
 
         // 显式绑定底层物理网络 (解决 Xiaomi HyperOS / Samsung OneUI / 5G 防火墙静默丢包与内核 eBPF 穿透)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -569,7 +698,7 @@ class CoreService : VpnService() {
             val newIdx = nodes.indexOfFirst { it.uri == best.first.uri }
             if (newIdx >= 0) {
                 NodeStore.setSelected(this, newIdx)
-                callbacks.forEach { runCatching { it.onNodeChanged(newIdx, best.first.uri) } }
+                broadcast { it.onNodeChanged(newIdx, best.first.uri) }
             }
         } else {
             // 最优还是当前 → 完整重启连接 (撤 TUN 后重建, 清 stale 隧道)
@@ -587,6 +716,12 @@ class CoreService : VpnService() {
     }
 
     fun stopInternal(): Unit = synchronized(stateLock) {
+        if (serviceState == ServiceState.Stopping || serviceState == ServiceState.Stopped) {
+            return
+        }
+        // 在锁内、且在做任何实际拆除之前置位: 排队中的 startInternal 拿到锁后
+        // 会看到 Stopping 并放弃, 这样「断开后又自己连上」的竞态就不存在了。
+        serviceState = ServiceState.Stopping
         log("[core] stop()")
         clearActive(this)
         cancelAllJobs()
@@ -604,8 +739,12 @@ class CoreService : VpnService() {
             }
         }
         runCatching { getSystemService(NotificationManager::class.java)?.cancel(1) }
+        serviceState = ServiceState.Stopped
         notifyState()
         runCatching { sendBroadcast(Intent(ACTION_VPN_STOPPED).setPackage(packageName)) }
+        // 服务是用 startForegroundService 起的, 属于 started service —— 不调 stopSelf
+        // 就会一直驻留, :core 进程连同已加载的原生库与整个堆永不释放。
+        stopSelf()
     }
 
     fun setNodeInternal(uri: String): Boolean {
@@ -648,23 +787,28 @@ class CoreService : VpnService() {
     fun testNodeInternal(uri: String, timeoutMs: Int): Long = MirageNative.testNode(uri, timeoutMs)
 
     fun registerCallbackInternal(cb: ICoreCallback?) {
-        if (cb != null && !callbacks.contains(cb)) {
-            callbacks.add(cb)
-            // 注册后立即推一次当前运行状态
-            runCatching { cb.onStateChanged(MirageNative.isRunning()) }
-        }
+        if (cb == null) return
+        // register() 按 binder 身份去重, 重连后重复注册不会累积
+        synchronized(callbacks) { callbacks.register(cb) }
+        // 注册后立即推一次当前运行状态
+        runCatching { cb.onStateChanged(MirageNative.isRunning()) }
     }
 
-    fun unregisterCallbackInternal(cb: ICoreCallback?) { callbacks.remove(cb) }
+    fun unregisterCallbackInternal(cb: ICoreCallback?) {
+        if (cb == null) return
+        synchronized(callbacks) { callbacks.unregister(cb) }
+    }
 
     private fun notifyState() {
-        val running = MirageNative.isRunning()
-        callbacks.forEach { runCatching { it.onStateChanged(running) } }
+        // 原生库未成功加载时 isRunning() 抛 UnsatisfiedLinkError(Error), 必须兜住:
+        // failAndStop 正是在这种情况下调用本函数的。
+        val running = runCatching { MirageNative.isRunning() }.getOrDefault(false)
+        broadcast { it.onStateChanged(running) }
     }
 
     // ── 前台通知 ─────────────────────────────────────────────────────────
 
-    private fun startForegroundCompat() {
+    private fun startForegroundCompat(connected: Boolean = true) {
         val channel = NotificationChannel("mirage_status", "Mirage VPN 运行状态", NotificationManager.IMPORTANCE_DEFAULT).apply {
             description = "Mirage VPN 运行状态、流量监控与快捷断开"
             setShowBadge(false)
@@ -685,8 +829,8 @@ class CoreService : VpnService() {
         )
 
         val notif: Notification = NotificationCompat.Builder(this, "mirage_status")
-            .setContentTitle("Mirage 已连接")
-            .setContentText("流量经 Mirage 隧道转发")
+            .setContentTitle(if (connected) "Mirage 已连接" else "Mirage 正在连接…")
+            .setContentText(if (connected) "流量经 Mirage 隧道转发" else "正在建立隧道")
             .setSmallIcon(R.drawable.ic_notification_mirage)
             .setColor(0xFF2481CC.toInt())
             .setContentIntent(pi)
@@ -786,12 +930,16 @@ class CoreService : VpnService() {
         clearActive(this)
         log("[core] onDestroy()")
         synchronized(stateLock) {
+            serviceState = ServiceState.Stopping
             cancelAllJobs()
             flushLogsAndStats()
             runCatching { MirageNative.stop() }
             runCatching { tunFd?.close() }
             tunFd = null
+            serviceState = ServiceState.Stopped
         }
+        // 解除所有 binder death recipient, 否则注册表随服务对象一起泄漏
+        runCatching { synchronized(callbacks) { callbacks.kill() } }
         scope.cancel()
         runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
