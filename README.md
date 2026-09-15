@@ -78,19 +78,52 @@
 项目提供全自动构建脚本，通过隔离容器完成 Rust 交叉编译与 Android Gradle 打包：
 
 ```bash
-# 执行一键构建 (自动完成 mirage-jni 编译、16KB 对齐与 APK 签名打包)
+# 开发构建 (debug, 默认)
 bash scripts/build-android.sh
+
+# 分发构建 (release: R8 混淆 + 资源裁剪 + 正式签名)
+VARIANT=release bash scripts/build-android.sh
 ```
 
-构建产物存放于 `.build/out/`：
-- `app-debug.apk`：最新构建版本软链接；
-- `mirage-v<版本>-<时间戳>.apk`：版本化历史归档产物。
+构建产物存放于 `.build/out/`，文件名携带变体标识：
+
+| 变体 | 产物 | 用途 |
+| :--- | :--- | :--- |
+| `debug` | `app-debug.apk` / `mirage-v<版本>-debug-<时间戳>.apk` | **仅限本机开发** |
+| `release` | `app-release.apk` / `mirage-v<版本>-release-<时间戳>.apk` | 分发 |
+
+> ⚠️ **debug 产物不可分发**：带 `debuggable` 标志、无 R8 混淆、由 AOSP 公开调试密钥签名，
+> 且编译进了未鉴权的本机调试接口（`debug_server`，仅在 `debug_assertions` 或
+> `debug-server` feature 下编译）。任何交付给他人的包必须用 `VARIANT=release`。
+
+**配置分发签名**（二选一，两者均不入版本控制）：
+
+```bash
+# 方式 A: android/keystore.properties
+cat > android/keystore.properties <<'EOF'
+storeFile=/绝对路径/mirage-release.jks
+storePassword=***
+keyAlias=mirage
+keyPassword=***
+EOF
+
+# 方式 B: 环境变量
+export MIRAGE_KEYSTORE_PATH=/绝对路径/mirage-release.jks
+export MIRAGE_KEYSTORE_PASSWORD=***
+export MIRAGE_KEY_ALIAS=mirage
+export MIRAGE_KEY_PASSWORD=***
+```
+
+未配置时 `assembleRelease` 会产出**未签名** APK 并告警，不会静默回落到调试密钥。
 
 ### 2. 安装与使用
 
 ```bash
-# 通过 ADB 安装至设备
+# 开发调试
 adb install -r .build/out/app-debug.apk
+
+# 分发版本
+adb install -r .build/out/app-release.apk
 ```
 
 1. **添加节点**：打开 App → 进入「节点」Tab → 点击右上角添加（支持扫描/粘贴 `mirage://密码@host:端口?sni=...` 或手动配置）；
@@ -135,6 +168,23 @@ Mirage-android/
 - 本项目加密分帧与握手认证针对移动端弱网与防主动探测进行了深度优化；
 - 请在受信任的服务端部署配套 Mirage-rs 服务节点；
 - 开启前向保密 (PFS) 时需确保客户端与服务端均启用对应选项。
+
+### 客户端审计与修复路线
+
+Android 客户端已完成一轮系统性审计（对照 [meow-android](https://github.com/madeye/meow) 同构实现逐条复核），
+完整缺陷清单、验证证据与分批修复顺序见 **[审计路线图](https://claude.ai/artifact/FaiBQfWKqSji1sFDVzHtsA)**。
+
+**第 0 批（已完成）** —— 四项独立暴露面，无架构改动：
+
+| 项 | 问题 | 处置 |
+| :--- | :--- | :--- |
+| 1 | `debug_server` 无鉴权且随每个构建发布，同机任意 App 可读 DNS/连接状态并强制断连 | 移至 `cfg(any(debug_assertions, feature = "debug-server"))`；release 产物实测零残留 |
+| 2 | `mirage://` 深链静默导入**并自动选中**节点，网页链接即可构成中间人 | 结构化校验 + 确认框展示 host/port/SNI + 永不自动选中 |
+| 3 | 唯一构建路径产出 `debuggable`、调试密钥签名却命名为发布版的 APK | 新增正式签名配置 + R8 + JNI keep 规则；产物名携带变体 |
+| 4 | `clearActive()` 无身份检查，旧实例销毁会抹掉活跃实例致 `protect()` 失效 | 改为同一性比较 `clearActive(this)` |
+
+**待处理**：第 1 批状态机（消除停止后自动重启、job 累积、启动失败无提示）、
+第 2 批网络层（失败切换拆 TUN 导致的周期性明文泄露）、第 3 批配置与数据、第 4 批工程基线。
 
 ---
 
