@@ -4,6 +4,18 @@
 
 ---
 
+## [2026-09-15] 修 flaky 测试: mirage-core `direct` 路由测试并发踩全局规则
+
+`direct.rs` 里 3 个单元测试 (`geosite_cn_direct_does_not_hijack_foreign_domains` /
+`test_is_cn_ip_accuracy_and_boundary_cases` / `test_default_router_ip_substring_immunity`)
+未调 `acquire_test_guard()`, 而 cargo 默认并行跑测试。其中
+`geosite_cn_direct_does_not_hijack_foreign_domains` 会 `set_custom_rules` **写全局
+`router_store`**, 与持锁测试并发时中途改掉规则 → 持锁测试 (如 `test_composite_rule_and_or`)
+的 `route_decision` 在 set→read 间隙读到入侵者的规则 → `left == right` 断言间歇性失败
+(CI Android job 偶发 red)。根因用压力线程复现坐实 (并发 `set_custom_rules` 把 composite
+res2 从 Direct 踩成 Proxy)。**修**: 给这 3 个测试补 `acquire_test_guard()`, 恢复"每个
+触碰全局状态的测试都持 `TEST_LOCK` 串行"的模块不变量 (12/12 测试全覆盖)。全 lib 30× 循环零失败。
+
 ## [2026-08-20] 移动端连接稳定性、生命周期与 FD 泄露彻底调优
 
 ### 1. 根治 `flushPool` 切网跨线程 Panic 闪退 (Critical)
