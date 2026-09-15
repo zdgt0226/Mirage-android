@@ -279,7 +279,10 @@ impl TunStack {
         let pump_stack = stack.clone();
         tokio::spawn(pump(pump_stack, rx));
 
-        // 启动远程调试 REST API (127.0.0.1:9090)
+        // 启动本机调试 REST API (127.0.0.1:9090)。
+        // 该接口无鉴权且 loopback 在 Android 上不做 App 间隔离, 故仅限 debug 构建;
+        // 分发构建中整个模块不参与编译 (见 lib.rs 上的 cfg)。
+        #[cfg(any(debug_assertions, feature = "debug-server"))]
         crate::debug_server::start_debug_server(9090, Arc::clone(&engine), Arc::clone(&stack));
 
         info!("TUN 引擎已启动 (mtu={}, fd={})", mtu, fd);

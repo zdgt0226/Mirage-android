@@ -5,18 +5,30 @@
 # 流程:
 #   1. 宿主: cargo-ndk 交叉编译 mirage-jni (arm64-v8a + x86_64) → jniLibs
 #   2. 宿主: 把 android 源码 bind 进 android-builder 容器
-#   3. 容器内: gradle assembleDebug → APK 输出到宿主
+#   3. 容器内: gradle assemble{Debug,Release} → APK 输出到宿主
 #
 # 用法:
-#   scripts/build-android.sh          # 完整构建
+#   scripts/build-android.sh          # 完整构建 (debug, 仅供本机开发)
 #   scripts/build-android.sh native   # 只构建 Rust 原生库
 #   scripts/build-android.sh apk      # 只构建 APK (用已有 jniLibs)
+#
+#   VARIANT=release scripts/build-android.sh    # 分发构建 (R8 + 正式签名)
+#
+# ⚠ debug 产物带 debuggable 标志、无 R8 混淆、且由 AOSP 公开调试密钥签名,
+#   并内含未鉴权的本机调试接口。任何交付给他人的包必须用 VARIANT=release。
+#   release 签名材料来自 android/keystore.properties 或 MIRAGE_KEYSTORE_* 环境变量
+#   (均不入版本控制); 缺失时产出未签名 APK 并告警, 不会回落到调试密钥。
 # ============================================================================
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 CONTAINER="android-builder"
 NDK="/opt/android-sdk/ndk/26.3.11579264"
 CARGO="${CARGO:-cargo}"
+VARIANT="${VARIANT:-debug}"
+case "$VARIANT" in
+    debug|release) ;;
+    *) echo "!! VARIANT 只能是 debug 或 release (当前: $VARIANT)" >&2; exit 1 ;;
+esac
 
 cmd="${1:-all}"
 
@@ -51,6 +63,21 @@ build_apk() {
     mkdir -p "$HERE/.build/out" "$HERE/.build/gradle-home"
     chown 1000:1000 "$HERE/.build/out" "$HERE/.build/gradle-home" 2>/dev/null || true
 
+    local gradle_task apk_name
+    if [[ "$VARIANT" == "release" ]]; then
+        gradle_task="assembleRelease"
+        # 无签名配置时 AGP 产出 app-release-unsigned.apk, 有则 app-release.apk
+        apk_name="app-release.apk"
+        if [[ -z "${MIRAGE_KEYSTORE_PATH:-}" && ! -f "$HERE/android/keystore.properties" ]]; then
+            echo "  !! 未配置分发签名, 产物将是未签名 APK (不可直接安装/分发)" >&2
+            apk_name="app-release-unsigned.apk"
+        fi
+    else
+        gradle_task="assembleDebug"
+        apk_name="app-debug.apk"
+    fi
+    echo "  -- 构建变体: $VARIANT ($gradle_task)"
+
     local ver="0.3.0"
     local timestamp
     timestamp=$(date +%Y%m%d_%H%M%S)
@@ -78,20 +105,25 @@ build_apk() {
             export GRADLE_USER_HOME=/root/.gradle
             export GRADLE_OPTS=\"-Dorg.gradle.native=false\"
             export PATH=/opt/jdk-17/bin:/opt/gradle-8.9/bin:\$PATH
+            export MIRAGE_KEYSTORE_PATH=\"${MIRAGE_KEYSTORE_PATH:-}\"
+            export MIRAGE_KEYSTORE_PASSWORD=\"${MIRAGE_KEYSTORE_PASSWORD:-}\"
+            export MIRAGE_KEY_ALIAS=\"${MIRAGE_KEY_ALIAS:-}\"
+            export MIRAGE_KEY_PASSWORD=\"${MIRAGE_KEY_PASSWORD:-}\"
             cd /workspace
-            gradle clean assembleDebug -PbuildTime=\"$build_date\" -PbuildTag=\"$build_tag\" -PversionCode=$git_count -PversionName=\"$ver\" --no-daemon 2>&1 > /tmp/gradle_err.log || (cat /tmp/gradle_err.log | grep -B2 -A6 -iE \"e: file|error:|unresolved\" | head -40)
-            cp app/build/outputs/apk/debug/app-debug.apk /output/latest-build.apk 2>/dev/null || true
+            gradle clean $gradle_task -PbuildTime=\"$build_date\" -PbuildTag=\"$build_tag\" -PversionCode=$git_count -PversionName=\"$ver\" --no-daemon 2>&1 > /tmp/gradle_err.log || (cat /tmp/gradle_err.log | grep -B2 -A6 -iE \"e: file|error:|unresolved\" | head -40)
+            cp app/build/outputs/apk/$VARIANT/$apk_name /output/latest-build.apk 2>/dev/null || true
         " 2>&1 | tail -25
 
     local raw_apk="$HERE/.build/out/latest-build.apk"
     if [[ -f "$raw_apk" ]]; then
-        local versioned_apk="$HERE/.build/out/mirage-v${ver}-${timestamp}.apk"
-        local release_name_apk="$HERE/.build/out/mirage-v${ver}-debug.apk"
-        local default_apk="$HERE/.build/out/app-debug.apk"
+        # 变体写进文件名: debug 包带 debuggable 标志与调试签名, 绝不能被误当成分发包
+        local versioned_apk="$HERE/.build/out/mirage-v${ver}-${VARIANT}-${timestamp}.apk"
+        local latest_apk="$HERE/.build/out/mirage-v${ver}-${VARIANT}.apk"
+        local default_apk="$HERE/.build/out/app-${VARIANT}.apk"
 
         # 保留带时间戳与版本号的历史存档，不覆盖之前版本
         cp "$raw_apk" "$versioned_apk"
-        cp "$raw_apk" "$release_name_apk"
+        cp "$raw_apk" "$latest_apk"
         mv "$raw_apk" "$default_apk"
 
         echo ""

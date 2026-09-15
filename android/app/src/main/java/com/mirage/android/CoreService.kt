@@ -296,6 +296,11 @@ class CoreService : VpnService() {
             val remoteDns = dnsPrefs.getString("remote_dns", "1.1.1.1") ?: "1.1.1.1"
             MirageNative.setDnsServers(directDns, remoteDns)
         }
+        runCatching {
+            val vpnPrefs = getSharedPreferences("mirage_vpn_prefs", Context.MODE_PRIVATE)
+            val blockQuic = vpnPrefs.getBoolean("block_quic", true)
+            MirageNative.setBlockQuic(blockQuic)
+        }
 
         val poolSize = if (poolSizeOverride > 0) poolSizeOverride else NodeStore.getPoolSize(this)
         log("[core] 开始启动内核 (uri=${uri.take(30)}..., poolSize=$poolSize, mtu=$mtu)")
@@ -583,7 +588,7 @@ class CoreService : VpnService() {
 
     fun stopInternal(): Unit = synchronized(stateLock) {
         log("[core] stop()")
-        clearActive()
+        clearActive(this)
         cancelAllJobs()
         flushLogsAndStats()
         runCatching { MirageNative.clearDnsCache() }
@@ -778,7 +783,7 @@ class CoreService : VpnService() {
     }
 
     override fun onDestroy() {
-        clearActive()
+        clearActive(this)
         log("[core] onDestroy()")
         synchronized(stateLock) {
             cancelAllJobs()
@@ -904,8 +909,19 @@ class CoreService : VpnService() {
         @JvmStatic
         fun getActive(): CoreService? = active
 
+        /**
+         * 清除活跃实例引用。
+         *
+         * 必须传入调用方自身并做同一性比较: Android 异步销毁旧 Service 对象,
+         * 若用户快速「停止 → 再连接」, 新实例可能已经 setActive(this) 完成建连,
+         * 此时旧实例的 onDestroy 才跑到这里。无条件置空会把活跃实例抹掉,
+         * 导致 protectFd 找不到实例 → 隧道 socket 不受保护 → 被路由回 TUN 自环,
+         * 表现为「显示已连接但零吞吐」。
+         */
         @JvmStatic
-        fun clearActive() { active = null }
+        fun clearActive(s: CoreService) {
+            if (active === s) active = null
+        }
 
         /**
          * 绕过局域网 (Bypass LAN) 的非私有 IPv4 网段分解列表。

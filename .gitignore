@@ -11,3 +11,8 @@ android/.gradle/
 .idea/
 *.iml
 .DS_Store
+
+# 分发签名材料 (绝不入库)
+android/keystore.properties
+*.jks
+*.keystore

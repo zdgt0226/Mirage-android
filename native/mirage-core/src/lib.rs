@@ -33,6 +33,13 @@ pub mod time_sync;
 pub mod monitor;
 pub mod protect;
 pub mod tun;
+/// 未鉴权的本机调试 REST 接口。
+///
+/// Android 不隔离 App 之间的 loopback: 任何持有 INTERNET 权限的应用都能访问
+/// 127.0.0.1:9090, 读取 DNS / 连接状态, 并通过 POST /debug/control 关闭全部连接。
+/// 因此该模块绝不可进入分发构建 —— 仅在 debug 构建, 或显式开启 `debug-server`
+/// feature 时才编译。
+#[cfg(any(debug_assertions, feature = "debug-server"))]
 pub mod debug_server;
 pub mod attribution;
 pub mod command_server;

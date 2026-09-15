@@ -31,13 +31,51 @@ android {
         }
     }
 
+    // 分发签名配置。
+    //
+    // 密钥材料一律来自环境变量或未纳入版本控制的 keystore.properties, 绝不提交进仓库。
+    // 四项缺任意一项则不创建 signingConfig, assembleRelease 会产出未签名包并
+    // 在下方给出明确提示 —— 宁可构建失败, 也不要静默回落到 AOSP 调试密钥。
+    val keystoreProps = java.util.Properties().apply {
+        val f = rootProject.file("keystore.properties")
+        if (f.exists()) f.inputStream().use { load(it) }
+    }
+    fun secret(key: String, env: String): String? =
+        (keystoreProps.getProperty(key) ?: System.getenv(env))?.takeIf { it.isNotBlank() }
+
+    val ksPath = secret("storeFile", "MIRAGE_KEYSTORE_PATH")
+    val ksPass = secret("storePassword", "MIRAGE_KEYSTORE_PASSWORD")
+    val ksAlias = secret("keyAlias", "MIRAGE_KEY_ALIAS")
+    val ksAliasPass = secret("keyPassword", "MIRAGE_KEY_PASSWORD")
+    val hasReleaseSigning = ksPath != null && ksPass != null && ksAlias != null && ksAliasPass != null
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(ksPath!!)
+                storePassword = ksPass
+                keyAlias = ksAlias
+                keyPassword = ksAliasPass
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            } else {
+                logger.warn(
+                    "[mirage] 未找到分发签名配置 (keystore.properties 或 MIRAGE_KEYSTORE_* 环境变量), " +
+                        "assembleRelease 将产出未签名 APK。切勿用调试密钥分发。"
+                )
+            }
         }
     }
 

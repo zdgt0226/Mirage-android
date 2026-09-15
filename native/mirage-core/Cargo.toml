@@ -31,6 +31,12 @@ libc = "0.2.186"
 smoltcp = { version = "0.13", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv4-fragmentation", "proto-ipv6", "socket-tcp", "socket-udp", "async", "log"] }
 # TUN 设备抽象: Android (mirage-jni) 与 iOS 共用; v1 直接用 fd (unix)
 
+[features]
+# 本机调试 REST 接口 (127.0.0.1:9090)。无鉴权, 绝不可开启于分发构建。
+# debug 构建自动启用 (见 lib.rs 的 cfg(debug_assertions)); 此 feature 仅供
+# 需要在 release profile 下本地排障时显式开启。
+debug-server = []
+
 [dev-dependencies]
 # tun_e2e example 的 ctrl_c 需 signal; 只在 example/test 编入, release .so (无 dev-deps) 仍精简
 tokio = { version = "1.52.3", features = ["signal"] }

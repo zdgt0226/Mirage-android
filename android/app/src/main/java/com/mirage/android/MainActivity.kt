@@ -209,13 +209,54 @@ class MainActivity : AppCompatActivity() {
         coreManagerDialog?.show()
     }
 
+    /**
+     * 处理外部传入的 mirage:// 深链。
+     *
+     * MainActivity 是 exported + BROWSABLE, 任何应用或网页都能触发这里。
+     * 因此必须: (1) 结构化校验而非前缀判断; (2) 展示真实 host:port 让用户确认;
+     * (3) 绝不自动选中 —— 否则一个 <a href="mirage://attacker:443"> 就能把用户
+     * 下一次连接的出口换成攻击者的服务器, 构成完整中间人。
+     */
     private fun handleIncomingUri(intent: Intent?) {
-        val uri = intent?.dataString
-        if (uri?.startsWith("mirage://") == true) {
-            val repo = NodeRepository.getInstance(this)
-            val idx = repo.addNode(Node(uri = uri, name = Node.defaultName(uri)))
-            repo.setSelected(idx)
-            Toast.makeText(this, "已导入并选中节点", Toast.LENGTH_SHORT).show()
+        val uri = intent?.dataString ?: return
+        // 消费掉, 避免 onNewIntent/重建时重复弹窗
+        intent.data = null
+
+        val node = parseNodeUri(uri)
+        if (node == null) {
+            Toast.makeText(this, "节点链接无效，已忽略", Toast.LENGTH_SHORT).show()
+            return
         }
+
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("导入节点")
+            .setMessage(
+                "来自外部链接的节点请求：\n\n" +
+                    "服务器：${node.server}\n" +
+                    "端口：${node.port}\n" +
+                    (if (node.sni.isNotBlank()) "SNI：${node.sni}\n" else "") +
+                    "\n只有在你信任该链接来源时才导入。导入后不会自动切换，需要你手动选中。"
+            )
+            .setPositiveButton("导入") { _, _ ->
+                NodeRepository.getInstance(this).addNode(node)
+                Toast.makeText(this, "已导入节点，请在节点页手动选中", Toast.LENGTH_LONG).show()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 结构化校验 mirage:// 链接; 非法返回 null。 */
+    private fun parseNodeUri(uri: String): Node? {
+        if (!uri.startsWith("mirage://") || uri.length > MAX_NODE_URI_LEN) return null
+        val node = Node(uri = uri, name = Node.defaultName(uri))
+        if (node.server.isBlank()) return null
+        val port = node.port.toIntOrNull() ?: return null
+        if (port !in 1..65535) return null
+        return node
+    }
+
+    private companion object {
+        /** 外部链接长度上限, 防止超长 URI 撑爆解析与对话框。 */
+        const val MAX_NODE_URI_LEN = 2048
     }
 }
