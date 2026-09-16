@@ -294,8 +294,41 @@ object GeoManager {
         val success: Boolean,
         val message: String,
         val geositeTags: Int = 0,
-        val geoipCodes: Int = 0
+        val geoipCodes: Int = 0,
+        /**
+         * 本次产物是否通过 SHA-256 完整性校验。
+         *
+         * 内置源必定为 true（校验失败或拿不到摘要时整体失败，见 [downloadWithMirrors]）；
+         * 用户自定义源在上游未提供 `.sha256sum` 时为 false —— 此时产物未经校验，
+         * 调用方必须向用户明示。
+         */
+        val verified: Boolean = true
     )
+
+    /** 单个镜像的下载结果。[verified] 为 false 表示产物未经 SHA-256 校验。 */
+    private data class DownloadOutcome(val ok: Boolean, val verified: Boolean)
+
+    /**
+     * 该 URL 是否属于内置源（含内置回退镜像），内置源强制要求 SHA-256 校验。
+     *
+     * 判定依据是完整 URL 相等，不做前缀或域名匹配 —— 自定义源即使指向同一域名
+     * 也不会被误认为内置源而继承其信任级别。
+     */
+    @JvmStatic
+    internal fun isBuiltinUrl(url: String): Boolean {
+        val u = url.trim()
+        return BUILTIN_MIRROR_URLS.any { it.equals(u, ignoreCase = true) }
+    }
+
+    /** 内置源与内置回退镜像的全部 URL。 */
+    private val BUILTIN_MIRROR_URLS: Set<String> by lazy {
+        BUILTIN_SOURCES.flatMap { listOf(it.geositeUrl, it.geoipUrl) }.toSet() + setOf(
+            "https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat",
+            "https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat",
+            "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat",
+            "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geoip.dat"
+        )
+    }
 
     fun getGeoDir(context: Context): File {
         val dir = File(context.filesDir, "geo")
@@ -474,24 +507,33 @@ object GeoManager {
 
         // 1. 下载 geosite.dat
         onProgress("正在从「${activeSource.name}」下载 GeoSite 数据集…", 15)
-        val siteOk = downloadWithMirrors(siteMirrors, siteTmp) { progress ->
+        val siteOutcome = downloadWithMirrors(siteMirrors, siteTmp) { progress ->
             onProgress("正在下载 GeoSite 数据集 (${progress}%)…", (15 + progress * 0.35).toInt())
         }
-        if (!siteOk || siteTmp.length() < 50 * 1024) {
+        if (!siteOutcome.ok || siteTmp.length() < 50 * 1024) {
             siteTmp.delete()
-            return@withContext GeoUpdateResult(false, "GeoSite 数据集下载失败，请检查网络或更换更新 URL")
+            return@withContext GeoUpdateResult(
+                false,
+                "GeoSite 数据集下载或完整性校验失败，请检查网络或更换更新 URL"
+            )
         }
 
         // 2. 下载 geoip.dat
         onProgress("正在下载 GeoIP 数据集…", 55)
-        val ipOk = downloadWithMirrors(ipMirrors, ipTmp) { progress ->
+        val ipOutcome = downloadWithMirrors(ipMirrors, ipTmp) { progress ->
             onProgress("正在下载 GeoIP 数据集 (${progress}%)…", (55 + progress * 0.35).toInt())
         }
-        if (!ipOk || ipTmp.length() < 50 * 1024) {
+        if (!ipOutcome.ok || ipTmp.length() < 50 * 1024) {
             siteTmp.delete()
             ipTmp.delete()
-            return@withContext GeoUpdateResult(false, "GeoIP 数据集下载失败，请检查网络或更换更新 URL")
+            return@withContext GeoUpdateResult(
+                false,
+                "GeoIP 数据集下载或完整性校验失败，请检查网络或更换更新 URL"
+            )
         }
+
+        // 两个数据集里只要有一个未经校验，整体即视为未校验
+        val verified = siteOutcome.verified && ipOutcome.verified
 
         // 3. 原子替换与校验 (原子 move，捕获异常并正确传播失败)
         onProgress("正在校验与安装 Geo 数据文件…", 92)
@@ -525,42 +567,68 @@ object GeoManager {
             .putLong(KEY_LAST_UPDATE, System.currentTimeMillis())
             .apply()
 
-        onProgress("Geo 数据集更新成功！", 100)
+        onProgress(if (verified) "Geo 数据集更新成功！" else "Geo 数据集已更新（未校验）", 100)
         GeoUpdateResult(
             success = true,
-            message = "成功更新 Geo 规则集: $siteCount 个 Site 标签, $ipCount 个 IP 分类",
+            message = buildString {
+                append("成功更新 Geo 规则集: $siteCount 个 Site 标签, $ipCount 个 IP 分类")
+                if (!verified) {
+                    append("\n⚠️ 该自定义源未提供 SHA-256 摘要，本次产物未经完整性校验")
+                }
+            },
             geositeTags = siteCount,
-            geoipCodes = ipCount
+            geoipCodes = ipCount,
+            verified = verified
         )
     }
 
+    /**
+     * 依次尝试各镜像下载到 [dest]，成功即返回。
+     *
+     * 完整性策略：内置源（[isBuiltinUrl]）强制 SHA-256 校验，拿不到摘要或校验不过
+     * 一律丢弃产物并换下一个镜像；自定义源允许在上游无摘要时放行，但结果标记
+     * `verified = false`。
+     */
     private fun downloadWithMirrors(
         mirrors: List<String>,
         dest: File,
         onProgress: (Int) -> Unit
-    ): Boolean {
+    ): DownloadOutcome {
         for (url in mirrors) {
             if (!url.startsWith("https://", ignoreCase = true)) continue
             try {
                 val ok = downloadFile(url, dest, onProgress)
                 if (ok && dest.exists() && dest.length() > 50 * 1024) {
+                    val requireSha = isBuiltinUrl(url)
                     val expectedSha = fetchSha256("$url.sha256sum")
-                    if (expectedSha != null) {
-                        val actualSha = computeSha256(dest)
-                        if (!actualSha.equals(expectedSha, ignoreCase = true)) {
-                            Log.w(TAG, "SHA-256 校验不匹配 ($url): 期望=$expectedSha, 实际=$actualSha, 丢弃产物")
+
+                    if (expectedSha == null) {
+                        // 内置源必须 fail-closed。能阻断 .dat 的对手同样能阻断 .sha256sum,
+                        // 若此处放行, 只要多拦一个请求就能把完整性校验降级掉 —— 等于没有保护。
+                        if (requireSha) {
+                            Log.w(TAG, "内置源未能获取 SHA-256 摘要 ($url)，拒绝该镜像并尝试下一个")
                             dest.delete()
                             continue
                         }
-                        Log.d(TAG, "SHA-256 校验通过: $actualSha")
+                        // 自定义源: 上游通常不提供 .sha256sum, 放行但标记未校验, 由 UI 明示。
+                        Log.w(TAG, "自定义源未提供 SHA-256 摘要 ($url)，产物未经校验")
+                        return DownloadOutcome(ok = true, verified = false)
                     }
-                    return true
+
+                    val actualSha = computeSha256(dest)
+                    if (!actualSha.equals(expectedSha, ignoreCase = true)) {
+                        Log.w(TAG, "SHA-256 校验不匹配 ($url): 期望=$expectedSha, 实际=$actualSha, 丢弃产物")
+                        dest.delete()
+                        continue
+                    }
+                    Log.d(TAG, "SHA-256 校验通过: $actualSha")
+                    return DownloadOutcome(ok = true, verified = true)
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "镜像下载失败 $url: ${e.message}")
             }
         }
-        return false
+        return DownloadOutcome(ok = false, verified = false)
     }
 
     private fun downloadFile(urlStr: String, dest: File, onProgress: (Int) -> Unit): Boolean {
