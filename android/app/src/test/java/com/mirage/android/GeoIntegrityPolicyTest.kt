@@ -1,6 +1,7 @@
 package com.mirage.android
 
 import com.mirage.android.core.GeoManager
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -121,5 +122,34 @@ class GeoIntegrityPolicyTest {
                 "  https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat  "
             )
         )
+    }
+
+    // ── 失败原因分级 ────────────────────────────────────────────────────
+
+    /**
+     * 「摘要对不上」与「拿不到摘要」必须给用户不同的说法。
+     *
+     * 折叠成同一句话时，一次真实的篡改与一个糟糕的 CDN 日在界面上无法区分，
+     * 用户既无法判断该重试还是该换源，也看不出自己可能正在被攻击。
+     */
+    @Test
+    fun failureReasonsAreDistinguishableToTheUser() {
+        val msgs = GeoManager.FailureReason.values().associateWith {
+            GeoManager.describeFailure("GeoIP 数据集", it)
+        }
+        // 四种原因两两不同
+        assertEquals(
+            "每种失败原因必须有独立文案",
+            GeoManager.FailureReason.values().size,
+            msgs.values.toSet().size
+        )
+        // 篡改与不可用不能混为一谈
+        assertTrue(msgs[GeoManager.FailureReason.MISMATCH]!!.contains("篡改"))
+        assertFalse(msgs[GeoManager.FailureReason.DIGEST_UNAVAILABLE]!!.contains("篡改"))
+        // 不可用应提示重试, 上游不提供则不该提示重试
+        assertTrue(msgs[GeoManager.FailureReason.DIGEST_UNAVAILABLE]!!.contains("重试"))
+        assertFalse(msgs[GeoManager.FailureReason.DIGEST_ABSENT]!!.contains("重试"))
+        // 文案里要带上是哪个数据集
+        msgs.values.forEach { assertTrue(it.startsWith("GeoIP 数据集")) }
     }
 }

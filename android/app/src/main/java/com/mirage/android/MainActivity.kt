@@ -124,7 +124,12 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             val status = GeoManager.getGeoStatus(this@MainActivity)
             if (!status.isReady) {
-                GeoManager.updateGeoFiles(this@MainActivity) { _, _ -> }
+                // 自动路径: allowUnverified 保持默认 false。未通过 SHA-256 校验的
+                // Geo 数据绝不在无人看着的情况下装进持有 TUN 的 :core 进程。
+                val result = GeoManager.updateGeoFiles(this@MainActivity) { _, _ -> }
+                if (!result.success) {
+                    android.util.Log.w("Mirage", "[geo] 自动更新未安装: ${result.message}")
+                }
             }
         }
     }

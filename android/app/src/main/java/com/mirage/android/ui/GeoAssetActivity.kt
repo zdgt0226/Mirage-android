@@ -321,7 +321,9 @@ class GeoAssetActivity : AppCompatActivity() {
         binding.progressUpdate.progress = 0
 
         lifecycleScope.launch {
-            val result = GeoManager.updateGeoFiles(this@GeoAssetActivity) { msg, progress ->
+            // 手动路径: 用户在前台主动发起且会看到结果, 允许安装未校验产物,
+            // 但下方必须用阻塞式对话框告知, 不能只靠一闪而过的 Toast。
+            val result = GeoManager.updateGeoFiles(this@GeoAssetActivity, allowUnverified = true) { msg, progress ->
                 lifecycleScope.launch(Dispatchers.Main) {
                     binding.tvProgressMsg.text = msg
                     binding.progressUpdate.progress = progress
@@ -333,7 +335,20 @@ class GeoAssetActivity : AppCompatActivity() {
             binding.tvProgressMsg.visibility = View.GONE
 
             if (result.success) {
-                Toast.makeText(this@GeoAssetActivity, result.message, Toast.LENGTH_LONG).show()
+                if (result.verified) {
+                    Toast.makeText(this@GeoAssetActivity, result.message, Toast.LENGTH_LONG).show()
+                } else {
+                    // 未校验是安全相关状态, 必须用户显式确认过一次, Toast 会被错过
+                    androidx.appcompat.app.AlertDialog.Builder(this@GeoAssetActivity)
+                        .setTitle("已安装，但未经校验")
+                        .setMessage(
+                            result.message +
+                                "\n\n该源未提供 SHA-256 摘要，无法确认下载内容与上游一致。" +
+                                "若该源不可信，路由规则可能已被篡改。"
+                        )
+                        .setPositiveButton("我知道了", null)
+                        .show()
+                }
                 refreshStatus()
                 if (binding.rvTags.visibility == View.VISIBLE) {
                     startLoadingTags()

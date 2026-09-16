@@ -30,6 +30,7 @@ object GeoManager {
     private const val KEY_GEOSITE_URL = "geosite_url"
     private const val KEY_GEOIP_URL = "geoip_url"
     private const val KEY_LAST_UPDATE = "last_update_time"
+    private const val KEY_VERIFIED = "last_update_verified"
 
     // 官方默认源 (多镜像兜底)
     const val DEFAULT_GEOSITE_URL = "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat"
@@ -279,12 +280,15 @@ object GeoManager {
         val geoipSize: Long,
         val lastUpdateTime: String,
         val geositeTagCount: Int,
-        val geoipCodeCount: Int
+        val geoipCodeCount: Int,
+        /** 当前在盘数据是否通过 SHA-256 校验。false 需常驻可见，不能只靠一次性 Toast。 */
+        val verified: Boolean = true
     ) {
         val isReady: Boolean get() = geositeExists || geoipExists
         val displaySummary: String
             get() = if (isReady) {
-                "Geo: 已就绪 (${geositeTagCount} Sites / ${geoipCodeCount} IPs) · $lastUpdateTime"
+                val mark = if (verified) "" else "（未校验）"
+                "Geo: 已就绪$mark (${geositeTagCount} Sites / ${geoipCodeCount} IPs) · $lastUpdateTime"
             } else {
                 "Geo: 未下载 (使用系统内置 CN 白名单)"
             }
@@ -305,8 +309,32 @@ object GeoManager {
         val verified: Boolean = true
     )
 
+    /** 镜像全部失败时的原因，决定给用户的说法。 */
+    internal enum class FailureReason {
+        /** 下载本身失败 (网络、404、体积不足)。 */
+        DOWNLOAD,
+        /** 摘要拿到了但对不上 —— 疑似篡改或镜像内容不一致。 */
+        MISMATCH,
+        /** 上游确实不发布摘要 (404)。 */
+        DIGEST_ABSENT,
+        /** 摘要重试后仍不可达 —— 网络或镜像问题。 */
+        DIGEST_UNAVAILABLE,
+    }
+
     /** 单个镜像的下载结果。[verified] 为 false 表示产物未经 SHA-256 校验。 */
-    private data class DownloadOutcome(val ok: Boolean, val verified: Boolean)
+    private data class DownloadOutcome(
+        val ok: Boolean,
+        val verified: Boolean,
+        val failure: FailureReason = FailureReason.DOWNLOAD,
+    )
+
+    /** 把失败原因翻译成用户可读的说法。 */
+    internal fun describeFailure(what: String, reason: FailureReason): String = when (reason) {
+        FailureReason.DOWNLOAD -> "$what 下载失败，请检查网络或更换更新 URL"
+        FailureReason.MISMATCH -> "$what 完整性校验不通过（内容与上游摘要不符，疑似被篡改或镜像不一致），已拒绝安装"
+        FailureReason.DIGEST_ABSENT -> "$what 的上游未提供 SHA-256 摘要，内置源要求强制校验，已拒绝安装"
+        FailureReason.DIGEST_UNAVAILABLE -> "$what 无法获取 SHA-256 摘要（网络或镜像暂时不可用），已拒绝安装；请稍后重试"
+    }
 
     /**
      * 该 URL 是否属于内置源（含内置回退镜像），内置源强制要求 SHA-256 校验。
@@ -425,7 +453,9 @@ object GeoManager {
             geoipSize = if (ipFile.exists()) ipFile.length() else 0L,
             lastUpdateTime = getLastUpdateTime(context),
             geositeTagCount = siteTags,
-            geoipCodeCount = ipCodes
+            geoipCodeCount = ipCodes,
+            // 默认 true: 老版本升级上来时盘上数据来自内置源, 按已校验处理
+            verified = sp.getBoolean(KEY_VERIFIED, true)
         )
     }
 
@@ -488,8 +518,16 @@ object GeoManager {
     /**
      * 执行在线更新/下载 Geo 文件。
      */
+    /**
+     * 执行在线更新/下载 Geo 文件。
+     *
+     * @param allowUnverified 是否允许安装未通过 SHA-256 校验的产物。
+     *   默认 **false**：自动/后台路径绝不静默把未校验数据装进持有 TUN 的 :core 进程。
+     *   仅当用户在前台明确发起更新、且能看到结果提示时才传 true。
+     */
     suspend fun updateGeoFiles(
         context: Context,
+        allowUnverified: Boolean = false,
         onProgress: (String, Int) -> Unit
     ): GeoUpdateResult = withContext(Dispatchers.IO) {
         val activeSource = getActiveSource(context)
@@ -520,10 +558,7 @@ object GeoManager {
         }
         if (!siteOutcome.ok || siteTmp.length() < 50 * 1024) {
             siteTmp.delete()
-            return@withContext GeoUpdateResult(
-                false,
-                "GeoSite 数据集下载或完整性校验失败，请检查网络或更换更新 URL"
-            )
+            return@withContext GeoUpdateResult(false, describeFailure("GeoSite 数据集", siteOutcome.failure))
         }
 
         // 2. 下载 geoip.dat
@@ -534,14 +569,25 @@ object GeoManager {
         if (!ipOutcome.ok || ipTmp.length() < 50 * 1024) {
             siteTmp.delete()
             ipTmp.delete()
-            return@withContext GeoUpdateResult(
-                false,
-                "GeoIP 数据集下载或完整性校验失败，请检查网络或更换更新 URL"
-            )
+            return@withContext GeoUpdateResult(false, describeFailure("GeoIP 数据集", ipOutcome.failure))
         }
 
         // 两个数据集里只要有一个未经校验，整体即视为未校验
         val verified = siteOutcome.verified && ipOutcome.verified
+
+        // 拒绝在自动路径上安装未校验产物。必须在原子替换之前判断 —— 一旦 move 完成
+        // 就会被 loadGeoFilesToNative 热加载进 :core，再回滚已无意义。
+        if (!verified && !allowUnverified) {
+            siteTmp.delete()
+            ipTmp.delete()
+            Log.w(TAG, "产物未通过 SHA-256 校验且当前路径不允许未校验安装，已丢弃")
+            return@withContext GeoUpdateResult(
+                success = false,
+                message = "该数据源未提供可校验的 SHA-256 摘要，已拒绝自动安装。" +
+                    "如确认信任该源，请在「Geo 资产」页手动发起更新并确认。",
+                verified = false
+            )
+        }
 
         // 3. 原子替换与校验 (原子 move，捕获异常并正确传播失败)
         onProgress("正在校验与安装 Geo 数据文件…", 92)
@@ -573,6 +619,7 @@ object GeoManager {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .putLong(KEY_LAST_UPDATE, System.currentTimeMillis())
+            .putBoolean(KEY_VERIFIED, verified)
             .apply()
 
         onProgress(if (verified) "Geo 数据集更新成功！" else "Geo 数据集已更新（未校验）", 100)
@@ -602,41 +649,61 @@ object GeoManager {
         dest: File,
         onProgress: (Int) -> Unit
     ): DownloadOutcome {
+        // 记录最后一次失败原因, 用于给用户一个准确的说法 ——
+        // 「疑似篡改」和「拿不到摘要」必须可区分, 否则一次真实攻击与一个糟糕的
+        // CDN 日在界面上长得一模一样。
+        var lastFailure = FailureReason.DOWNLOAD
         for (url in mirrors) {
             if (!url.startsWith("https://", ignoreCase = true)) continue
             try {
                 val ok = downloadFile(url, dest, onProgress)
                 if (ok && dest.exists() && dest.length() > 50 * 1024) {
                     val requireSha = isBuiltinUrl(url)
-                    val expectedSha = fetchSha256("$url.sha256sum")
-
-                    if (expectedSha == null) {
-                        // 内置源必须 fail-closed。能阻断 .dat 的对手同样能阻断 .sha256sum,
-                        // 若此处放行, 只要多拦一个请求就能把完整性校验降级掉 —— 等于没有保护。
-                        if (requireSha) {
-                            Log.w(TAG, "内置源未能获取 SHA-256 摘要 ($url)，拒绝该镜像并尝试下一个")
-                            dest.delete()
-                            continue
+                    when (val digest = fetchSha256("$url.sha256sum")) {
+                        is DigestResult.Found -> {
+                            val actual = computeSha256(dest)
+                            if (!actual.equals(digest.hex, ignoreCase = true)) {
+                                Log.w(TAG, "SHA-256 不匹配 ($url): 期望=${digest.hex}, 实际=$actual, 丢弃产物")
+                                dest.delete()
+                                lastFailure = FailureReason.MISMATCH
+                                continue
+                            }
+                            Log.d(TAG, "SHA-256 校验通过: $actual")
+                            return DownloadOutcome(ok = true, verified = true)
                         }
-                        // 自定义源: 上游通常不提供 .sha256sum, 放行但标记未校验, 由 UI 明示。
-                        Log.w(TAG, "自定义源未提供 SHA-256 摘要 ($url)，产物未经校验")
-                        return DownloadOutcome(ok = true, verified = false)
+                        DigestResult.Absent -> {
+                            // 上游确实不发布摘要。内置源 fail-closed: 能阻断 .dat 的对手
+                            // 同样能阻断 .sha256sum, 放行等于把校验降级掉。
+                            if (requireSha) {
+                                Log.w(TAG, "内置源上游无 SHA-256 摘要 ($url)，拒绝该镜像")
+                                dest.delete()
+                                lastFailure = FailureReason.DIGEST_ABSENT
+                                continue
+                            }
+                            Log.w(TAG, "自定义源未提供 SHA-256 摘要 ($url)，产物未经校验")
+                            return DownloadOutcome(ok = true, verified = false)
+                        }
+                        DigestResult.Unavailable -> {
+                            // 重试后仍拿不到 —— 网络/镜像问题, 不是「上游不提供」。
+                            if (requireSha) {
+                                Log.w(TAG, "内置源摘要暂不可达 ($url)，拒绝该镜像")
+                                dest.delete()
+                                lastFailure = FailureReason.DIGEST_UNAVAILABLE
+                                continue
+                            }
+                            Log.w(TAG, "自定义源摘要暂不可达 ($url)，产物未经校验")
+                            return DownloadOutcome(ok = true, verified = false)
+                        }
                     }
-
-                    val actualSha = computeSha256(dest)
-                    if (!actualSha.equals(expectedSha, ignoreCase = true)) {
-                        Log.w(TAG, "SHA-256 校验不匹配 ($url): 期望=$expectedSha, 实际=$actualSha, 丢弃产物")
-                        dest.delete()
-                        continue
-                    }
-                    Log.d(TAG, "SHA-256 校验通过: $actualSha")
-                    return DownloadOutcome(ok = true, verified = true)
                 }
+                lastFailure = FailureReason.DOWNLOAD
             } catch (e: Exception) {
                 Log.w(TAG, "镜像下载失败 $url: ${e.message}")
+                runCatching { dest.delete() }
+                lastFailure = FailureReason.DOWNLOAD
             }
         }
-        return DownloadOutcome(ok = false, verified = false)
+        return DownloadOutcome(ok = false, verified = false, failure = lastFailure)
     }
 
     private fun downloadFile(urlStr: String, dest: File, onProgress: (Int) -> Unit): Boolean {
@@ -710,14 +777,52 @@ object GeoManager {
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
-    private fun fetchSha256(shaUrl: String): String? {
-        if (!shaUrl.startsWith("https://", ignoreCase = true)) return null
-        return runCatching {
+    /**
+     * 摘要获取结果。
+     *
+     * 必须区分「上游确实不提供摘要」与「这次没拿到」—— 两者在 fail-closed 下
+     * 都会拒绝镜像，但含义、重试策略和给用户的说法完全不同。把它们折叠成
+     * `String?` 会让一次瞬时 5xx 被当成「该源不发布摘要」，进而静默换源。
+     */
+    internal sealed interface DigestResult {
+        data class Found(val hex: String) : DigestResult
+        /** 上游明确没有这个文件 (404/410)。 */
+        object Absent : DigestResult
+        /** 暂时拿不到: 5xx、超时、连接失败、响应不含合法摘要。 */
+        object Unavailable : DigestResult
+    }
+
+    /** 摘要获取的重试次数。GitHub release 资产 CDN 实测会出现连续数次 5xx 后自愈。 */
+    private const val SHA_FETCH_ATTEMPTS = 3
+    /** 摘要响应读取上限 (字符)。合法内容是 64 hex + 文件名, 远小于此。 */
+    private const val MAX_DIGEST_CHARS = 4096
+
+    /**
+     * 获取 `<artifact>.sha256sum`，瞬时失败自动重试。
+     *
+     * 404/410 直接判定 [DigestResult.Absent] 且不重试 —— 上游不提供，重试无意义。
+     */
+    private fun fetchSha256(shaUrl: String): DigestResult {
+        if (!shaUrl.startsWith("https://", ignoreCase = true)) return DigestResult.Unavailable
+        var last: DigestResult = DigestResult.Unavailable
+        for (attempt in 1..SHA_FETCH_ATTEMPTS) {
+            last = fetchSha256Once(shaUrl)
+            if (last is DigestResult.Found || last is DigestResult.Absent) return last
+            if (attempt < SHA_FETCH_ATTEMPTS) {
+                Log.w(TAG, "摘要暂时不可达 ($shaUrl)，第 $attempt 次重试")
+                runCatching { Thread.sleep(600L * attempt) }
+            }
+        }
+        return last
+    }
+
+    private fun fetchSha256Once(shaUrl: String): DigestResult {
+        var conn: HttpURLConnection? = null
+        return try {
             var url = URL(shaUrl)
             var redirects = 0
-            var conn: HttpURLConnection? = null
             while (redirects < 5) {
-                if (!url.protocol.equals("https", ignoreCase = true)) return null
+                if (!url.protocol.equals("https", ignoreCase = true)) return DigestResult.Unavailable
                 conn = url.openConnection() as HttpURLConnection
                 conn.instanceFollowRedirects = false
                 conn.connectTimeout = 10000
@@ -726,21 +831,34 @@ object GeoManager {
                 conn.connect()
                 val code = conn.responseCode
                 if (code in 300..399) {
-                    val loc = conn.getHeaderField("Location") ?: break
+                    val loc = conn.getHeaderField("Location") ?: return DigestResult.Unavailable
                     url = URL(url, loc)
                     conn.disconnect()
+                    conn = null
                     redirects++
                     continue
                 }
-                if (code == HttpURLConnection.HTTP_OK) {
-                    val text = conn.inputStream.bufferedReader().use { it.readText() }
-                    val match = Regex("^[a-fA-F0-9]{64}").find(text.trim())
-                    return@runCatching match?.value?.lowercase()
+                if (code == HttpURLConnection.HTTP_NOT_FOUND || code == HttpURLConnection.HTTP_GONE) {
+                    return DigestResult.Absent
                 }
-                break
+                if (code == HttpURLConnection.HTTP_OK) {
+                    // 摘要文件只有几十字节。设上限, 避免恶意镜像用超大响应体撑爆内存。
+                    val buf = CharArray(MAX_DIGEST_CHARS)
+                    val n = conn.inputStream.bufferedReader().use { it.read(buf, 0, MAX_DIGEST_CHARS) }
+                    if (n <= 0) return DigestResult.Unavailable
+                    val text = String(buf, 0, n).trim()
+                    val match = Regex("^[a-fA-F0-9]{64}").find(text)
+                    return match?.value?.lowercase()?.let { DigestResult.Found(it) }
+                        ?: DigestResult.Unavailable
+                }
+                return DigestResult.Unavailable
             }
-            conn?.disconnect()
-            null
-        }.getOrNull()
+            DigestResult.Unavailable
+        } catch (e: Exception) {
+            Log.w(TAG, "摘要请求失败 ($shaUrl): ${e.message}")
+            DigestResult.Unavailable
+        } finally {
+            runCatching { conn?.disconnect() }
+        }
     }
 }
