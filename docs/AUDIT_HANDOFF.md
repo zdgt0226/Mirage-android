@@ -3,9 +3,9 @@
 > 面向接手本项目的协作者与 AI Agent。
 > 配套可视化路线图：<https://claude.ai/artifact/FaiBQfWKqSji1sFDVzHtsA>
 >
-> **审计基线** `fd6cd3e` · **已完成** 第 0、1、2 批（`cade5d7`、`3aeb445`、`fbf26f1`）及原生 60ms 预读（`f3274b1`）· **未完成** 第 3、4 批
+> **审计基线** `fd6cd3e` · **已完成** 第 0、1、2、3 批（`cade5d7`、`3aeb445`、`fbf26f1`、`d9e3280`）及原生 60ms 预读（`f3274b1`）· **未完成** 第 4 批
 >
-> 本文所有 `file:line` 基于 `fbf26f1`。引用旧行号的历史记录已失效，以本文为准。
+> 本文所有 `file:line` 基于 `d9e3280`。引用旧行号的历史记录已失效，以本文为准。
 
 ---
 
@@ -98,15 +98,24 @@ cd native/mirage-core && cargo test --lib && cargo build --release
 | 1 | failover 拆掉 TUN 描述符（`tunFd?.close()`）并 `delay(3000)`，导致 3 秒内全局流量经物理网卡明文外泄 | 重连与 failover 不关 fd，`startLocked` 复用存活 `tunFd`，仅在真正断开时释放；failover 路径返回 `false` 激活退避；watchdog 首行检测物理网络离线直接跳过 | 实机 Sony SO-02K (Android 9) 验证：VPN 接口 `tun0` 保持存活，无明文外泄 |
 | 2 | `onCapabilitiesChanged` 在蜂窝信号/带宽变化时将 `setUnderlyingNetworks` 误写为蜂窝，与 Rust `ACTIVE_NET_HANDLE` 背离 | 全面迁移为 `registerDefaultNetworkCallback`（API 24+），单一原子入口 `switchTo(n: Network?)` 严格同步状态，移除已废弃的 `cm.allNetworks` 扫描 | 编译 warning 归零；实机 `dumpsys connectivity` 验证 UnderlyingNetwork 严格绑定 `WIFI (209)` |
 
-### 第 0/1/2 批验证结果（容器内实测与实机）
+#### 第 3 批 — `d9e3280`（配置与数据：解耦跨进程 IPC、归属解析移出建连热路径、加固 Geo OTA）
+
+| # | 问题 | 处置 | 验证方式 |
+| :-- | :--- | :--- | :--- |
+| 1 | 3.1 跨进程配置不一致：UI 与 `:core` 将 SharedPreferences 作为跨进程通信，`:core` 缓存永不刷新且 failover 双向写竞争 | 彻底消除 SharedPreferences IPC：`startVpn` 全量打包 Intent extras、`:core` 内存持有 `ServiceConfig`、AIDL 补齐热更新、`doFailover` 移除 `:core` 侧 `NodeStore.setSelected` 仅单向回调 UI 落盘 | 容器内编译与单元测试通过；实机测试动态修改设置无异常 |
+| 2 | 3.2 `mirage_routing_prefs` 双进程写，整份快照落盘相互覆盖 | 移除 `CoreService` 侧对 `mirage_routing_prefs` 磁盘写，只调用 `MirageNative.setOutboundMode`，持久化收归 UI 进程 | 实机验证分流模式切换（规则/全局/直连）即时生效 |
+| 3 | 3.3 Geo 替换非原子且失败静默报成功（`delete() + renameTo()` 空窗风险） | 使用 `Files.move(..., ATOMIC_MOVE, REPLACE_EXISTING)` 原子替换，异常严格捕获并上报 `GeoUpdateResult.success = false` | 实机下载验证：`.tmp` 稳步写入，未产生文件丢失空窗 |
+| 4 | 3.4 Geo OTA 零完整性校验且无 URL scheme 约束 | 强制限制 `https://` 协议白名单；下载 `.sha256sum` 并完成完整性校验；`ConfigBackup` 严格校验备份 URL | 单元测试与实机镜像下载双向验证 |
+| 5 | 3.5 连接归属解析阻塞数据面，0% 命中率缓存与 Binder 同步 IPC 串行化建连 | 移除关键路径同步归属阻塞，改由 `tokio::task::spawn_blocking` 异步解析并回填至 `monitor::update_conn_app`；删除 0% 命中率的 `portCache`，保留 `uidToPackageCache`，诊断日志降级为 `Log.d` | 实机并发连接测试：4+ 连接同时秒级放行，UI 监控列表异步回填「Google Play 服务」与「X」应用归属 |
+
+### 第 0/1/2/3 批验证结果（容器内实测与实机）
 
 ```
-compileDebugKotlin     clean（0 警告，已消除全部 allNetworks 弃用警告）
+compileDebugKotlin     clean（0 错误）
 assembleDebug          13.7 MB
-assembleRelease         9.4 MB   R8 + 资源裁剪，−31%
 testDebugUnitTest      BUILD SUCCESSFUL
 cargo test --lib       131 passed, 0 failed
-实机验证                Sony SO-02K (Android 9) / SM-S9260 实机通过，Google/Baidu 双向正常，断连无幽灵重启
+实机验证                Sony SO-02K (Android 9) 实测通过：连接秒建、并发无卡顿、归属异步上屏、断连无残留
 ```
 
 **R8 keep 规则验证**（拆 release dex，确认 JNI 边界未被混淆打断）：
@@ -124,85 +133,6 @@ grep -oE "MirageNative;\.[a-zA-Z]+" all.txt | sort -u   # 方法名应保持原�
 ---
 
 ## 2. 未完成
-
-### 第 3 批 — 配置与数据
-
-#### 3.1 跨进程配置不一致（改了设置不生效，且无提示）
-
-`:core` 是独立进程（`AndroidManifest.xml` 的 `android:process=":core"`），
-而 `SharedPreferencesImpl` 按 (文件, 进程) 缓存，跨进程写不会让对方缓存失效。
-`CoreController` 用 `BIND_AUTO_CREATE` 绑定且 `unbind` 只在实际不会被调用的 `destroy()` 里，
-所以 `:core` 与 UI 进程同寿，其缓存**永不刷新**。
-
-在 `:core` 内读、但由 UI 进程写的配置：
-
-| 位置 | 配置 | 症状 |
-| :--- | :--- | :--- |
-| `CoreService.kt:300` | `TunConfigStore.isBypassLanEnabled` | 改了绕过局域网，停止再启动仍是旧值 |
-| `CoreService.kt:312` | `TunConfigStore.isIpv6Enabled` | 同上 |
-| `CoreService.kt:323` | `TunConfigStore.getMtu` | 同上 |
-| `CoreService.kt:333` | `AppFilterStore.getConfig` | 分应用名单改动不生效 |
-| `CoreService.kt:423` | `mirage_dns_prefs` | DNS 改动不生效 |
-| `CoreService.kt:429` | `mirage_vpn_prefs` block_quic | 同上 |
-| `CoreService.kt:621/635/667` | `SettingsStore` 自动重连/检查间隔/failover 模式 | **关掉自动重连不生效** |
-| `CoreService.kt:700` | `NodeStore.setSelected`（`:core` 写，UI 也写） | 双向读改写整个 JSON blob，最后写入者覆盖，failover 后两边节点选择不一致 |
-
-**修法**：停止把 SharedPreferences 当 IPC 通道。
-`ICoreService.aidl` 已有 `setDnsServers` / `setBlockQuic` / `setOutboundMode` 的正确范式，
-照此补 `setBypassLan` / `setIpv6` / `setMtu` / `setAppFilterConfig` / `setAutoReconnect` /
-`setCheckInterval` / `setFailoverMode`，由 `:core` 在内存中持有；
-或在 `start()` 时把完整 TUN 配置作为 AIDL/Intent 参数传入（`uri`/`pool_size` 已是这个模式）。
-节点选择改为只经 `ICoreCallback.onNodeChanged` 单向回流，删掉 `:core` 侧的 `NodeStore.setSelected`。
-
-#### 3.2 `mirage_routing_prefs` 双进程写（埋雷，非现患）
-
-`VpnRepository.kt:271` 与 `CoreService.kt`（binder `setOutboundMode`）都写同一文件。
-`apply()` 落盘的是整份进程内缓存快照，两个独立缓存互相覆盖。
-目前该文件只有 `outbound_mode` 一个键，丢失更新无从发生——但下一个往里加键的人会中招。
-**修法**：删掉 `:core` 侧那次写，只留 `MirageNative.setOutboundMode`，持久化归 UI 进程。
-
-#### 3.3 Geo 替换不原子，且失败被报成成功
-
-`GeoManager.kt:484-490`：
-
-```kotlin
-siteFile.delete()          // ← 此刻起 geosite.dat 不存在
-siteTmp.renameTo(siteFile) // ← 返回值从不检查
-```
-
-随后 `:510` 无条件 `success = true`。进程在 delete 与 rename 之间死亡 → 文件彻底丢失，
-静默退化为无 Geo 路由；`renameTo()` 在部分 OEM 存储上静默返回 false 时，UI 仍显示「更新成功」。
-
-**修法**：`Files.move(tmp.toPath(), dest.toPath(), ATOMIC_MOVE, REPLACE_EXISTING)`
-一步替换（POSIX `rename()` 原子且覆盖），并把失败传回 `GeoUpdateResult.success`。
-
-#### 3.4 Geo OTA 零完整性校验
-
-唯一门槛是 `dest.length() > 50 * 1024`，之后直接把下载来的二进制喂给 `:core` 进程内的 Rust 解析器。
-自定义镜像 URL 无 scheme 白名单，`ConfigBackup.import()` 还会无校验导入 `geosite_url` / `geoip_url`。
-
-**修法**：下载 `.sha256sum` 并在原子替换前校验；自定义源限 `https://`；
-`ConfigBackup.import()` 校验 URL scheme。
-
-#### 3.5 连接归属解析阻塞数据面
-
-- `native/mirage-core/src/tun/tcp.rs:310` — `resolve_package()` 同步调用，每条新 TCP 连接必经
-- `native/mirage-core/src/tun/udp.rs:167` — 同上
-- `ConnectionOwnerResolver.kt:62` — 缓存键 `(protocol << 32) | srcPort`
-- `ConnectionOwnerResolver.kt:82` — miss 时 `cm.getConnectionOwnerUid()`，跨 Binder 同步 IPC
-- `native/mirage-jni/src/lib.rs` — tokio runtime `.worker_threads(2)`
-
-缓存键含 srcPort，而 srcPort 每条连接都不同，512 条 LRU 对新连接命中率≈0。
-所以实际是「每条新连接一次同步 Binder 往返」，而 tokio 只有 2 个 worker——
-两条连接同时卡在 Binder 上，整个数据面停摆。网页加载典型 6–12 条并发连接会被串行化。
-
-附带：`ConnectionOwnerResolver.kt:72` 与 `:83` 每次 miss 打两条 `Log.i`，release 也打。
-
-**修法**：把归属解析移出建连关键路径——`spawn_blocking` 异步执行，
-解析完成后回填给 monitor，不阻塞 `relay_tcp`。前置的 `portCache` 应删除或改为按 UID 缓存
-（`uidToPackageCache` 本身是对的，问题只在 srcPort 那层）。
-
----
 
 ### 第 4 批 — 工程基线
 
