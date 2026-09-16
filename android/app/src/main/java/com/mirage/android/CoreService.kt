@@ -12,7 +12,6 @@ import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
@@ -81,6 +80,24 @@ class CoreService : VpnService() {
     private var lastRecordedUp = -1L
     private var lastRecordedDown = -1L
 
+    private val netLock = Any()
+
+    /**
+     * 原子切换底层物理网络。
+     * 严格同步 currentPhysicalNetwork、Rust 侧 ACTIVE_NET_HANDLE、以及 VpnService 底层网络映射。
+     */
+    private fun switchTo(n: Network?) = synchronized(netLock) {
+        if (n == currentPhysicalNetwork) return
+        val old = currentPhysicalNetwork
+        currentPhysicalNetwork = n
+        LogStore.append("[core] 底层物理网络切换: $old -> $n (handle=${n?.networkHandle ?: 0L})")
+        runCatching { MirageNative.setActiveNetwork(n?.networkHandle ?: 0L) }
+        runCatching { MirageNative.flushPool() }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            runCatching { setUnderlyingNetworks(n?.let { arrayOf(it) }) }
+        }
+    }
+
     private fun flushLogsAndStats() {
         runCatching {
             val logs = (LogStore.all() + MirageNative.recentLogs().toList()).joinToString("\n")
@@ -130,10 +147,7 @@ class CoreService : VpnService() {
             runCatching { unregisterReceiver(it) }
             screenReceiver = null
         }
-        currentPhysicalNetwork = null
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            runCatching { setUnderlyingNetworks(null) }
-        }
+        switchTo(null)
     }
 
     override fun onCreate() {
@@ -290,124 +304,128 @@ class CoreService : VpnService() {
             return -2
         }
 
-        // 清理并关闭可能遗留的旧 tunFd
-        tunFd?.let { runCatching { it.close() } }
-        tunFd = null
-
-        val builder = Builder()
-        builder.setSession("Mirage")
-        builder.addAddress("198.18.0.1", 32)
-        val bypassLan = TunConfigStore.isBypassLanEnabled(this)
-        if (bypassLan) {
-            log("[core] 启用绕过局域网: 路由排除 RFC 1918 / 组播 / 广播私有网段")
-            NON_LAN_IPV4_ROUTES.forEach { (net, prefix) ->
-                builder.addRoute(net, prefix)
-            }
-        } else {
-            builder.addRoute("0.0.0.0", 0)
-        }
-        builder.addRoute("198.18.0.0", 15)
-        builder.addDnsServer(InetAddress.getByName("198.19.0.53"))
-        // 捕获 IPv6 流量，防止 Android 14/15/16 5G 蜂窝网络 IPv6 绕过 VPN 直连物理网卡被 GFW 阻断
-        if (TunConfigStore.isIpv6Enabled(this)) {
-            runCatching {
-                builder.addAddress("fdfe:dcba:9876::1", 128)
-                if (!bypassLan) {
-                    builder.addRoute("::", 0)
-                } else {
-                    // IPv6 绕过链路本地 fe80::/10 与 ULA fc00::/7
-                    builder.addRoute("2000::", 3) // 全球单播公网地址 (2000::/3)
-                }
-            }
-        }
         val mtu = TunConfigStore.getMtu(this)
-        builder.setMtu(mtu)
 
-        // 分应用代理 (Per-App Proxy / Split Tunneling)
-        //
-        // addAllowedApplication 与 addDisallowedApplication 在同一个 Builder 上互斥,
-        // 后调用的一方会抛 UnsupportedOperationException。usedAllowList 记录白名单是否已生效,
-        // 供下方的自我排除判断该不该调用 addDisallowedApplication。
-        var usedAllowList = false
-        runCatching {
-            val filterConfig = com.mirage.android.core.AppFilterStore.getConfig(this)
-            val installedPackages = packageManager.getInstalledApplications(0).map { it.packageName }
-            when (filterConfig.mode) {
-                com.mirage.android.data.model.AppFilterMode.ALLOW -> {
-                    val allowed = com.mirage.android.data.repository.AppFilterManager.computeEffectiveAllowed(filterConfig, installedPackages)
-                    if (allowed.isNotEmpty()) {
-                        log("[filter] 启用白名单分应用代理: 仅代理 ${allowed.size} 款应用")
-                        // computeEffectiveAllowed 已剔除自身包名, 白名单模式下本应用天然在 VPN 之外,
-                        // 无需 (也不能) 再调 addDisallowedApplication。
-                        usedAllowList = true
-                        allowed.forEach { pkg ->
-                            runCatching { builder.addAllowedApplication(pkg) }
-                        }
-                    }
+        // 修复 2.1: 重连/failover 时复用已建立的 TUN 描述符，杜绝关闭重建窗口内的明文泄露
+        val fd = if (tunFd?.fileDescriptor?.valid() == true) {
+            log("[core] 复用现有 TUN 描述符 (fd=${tunFd?.fd})，保持 VPN 接口存活")
+            tunFd!!
+        } else {
+            // 清理并关闭可能遗留的失效 tunFd
+            tunFd?.let { runCatching { it.close() } }
+            tunFd = null
+
+            val builder = Builder()
+            builder.setSession("Mirage")
+            builder.addAddress("198.18.0.1", 32)
+            val bypassLan = TunConfigStore.isBypassLanEnabled(this)
+            if (bypassLan) {
+                log("[core] 启用绕过局域网: 路由排除 RFC 1918 / 组播 / 广播私有网段")
+                NON_LAN_IPV4_ROUTES.forEach { (net, prefix) ->
+                    builder.addRoute(net, prefix)
                 }
-                com.mirage.android.data.model.AppFilterMode.DISALLOW -> {
-                    val disallowed = com.mirage.android.data.repository.AppFilterManager.computeEffectiveDisallowed(filterConfig, installedPackages)
-                    if (disallowed.isNotEmpty()) {
-                        log("[filter] 启用黑名单分应用代理: 绕过 ${disallowed.size} 款应用")
-                        disallowed.forEach { pkg ->
-                            runCatching { builder.addDisallowedApplication(pkg) }
-                        }
+            } else {
+                builder.addRoute("0.0.0.0", 0)
+            }
+            builder.addRoute("198.18.0.0", 15)
+            builder.addDnsServer(InetAddress.getByName("198.19.0.53"))
+            // 捕获 IPv6 流量，防止 Android 14/15/16 5G 蜂窝网络 IPv6 绕过 VPN 直连物理网卡被 GFW 阻断
+            if (TunConfigStore.isIpv6Enabled(this)) {
+                runCatching {
+                    builder.addAddress("fdfe:dcba:9876::1", 128)
+                    if (!bypassLan) {
+                        builder.addRoute("::", 0)
+                    } else {
+                        // IPv6 绕过链路本地 fe80::/10 与 ULA fc00::/7
+                        builder.addRoute("2000::", 3) // 全球单播公网地址 (2000::/3)
                     }
                 }
             }
-        }.onFailure {
-            // getInstalledApplications 跨 Binder 传输在应用极多的设备上可能抛
-            // TransactionTooLargeException / DeadObjectException。此前这里静默吞掉,
-            // 分应用配置失效且无任何痕迹。
-            log("[filter] 分应用代理配置失败, 本次回退为全局代理: ${it.message}")
-        }
+            builder.setMtu(mtu)
 
-        // 自身应用强制排除在 VPN 之外 (防止自环)。
-        // 必须放在上面的 runCatching 之外: 分应用配置抛异常时, 自我排除仍要生效,
-        // 否则本应用自己的非 protect socket (订阅更新 / Geo OTA 等) 会绕回 TUN。
-        if (!usedAllowList) {
-            runCatching { builder.addDisallowedApplication(packageName) }
-                .onFailure { log("[core] 自身应用排除 VPN 失败: ${it.message}") }
-        }
+            // 分应用代理 (Per-App Proxy / Split Tunneling)
+            //
+            // addAllowedApplication 与 addDisallowedApplication 在同一个 Builder 上互斥,
+            // 后调用的一方会抛 UnsupportedOperationException。usedAllowList 记录白名单是否已生效,
+            // 供下方的自我排除判断该不该调用 addDisallowedApplication。
+            var usedAllowList = false
+            runCatching {
+                val filterConfig = com.mirage.android.core.AppFilterStore.getConfig(this)
+                val installedPackages = packageManager.getInstalledApplications(0).map { it.packageName }
+                when (filterConfig.mode) {
+                    com.mirage.android.data.model.AppFilterMode.ALLOW -> {
+                        val allowed = com.mirage.android.data.repository.AppFilterManager.computeEffectiveAllowed(filterConfig, installedPackages)
+                        if (allowed.isNotEmpty()) {
+                            log("[filter] 启用白名单分应用代理: 仅代理 ${allowed.size} 款应用")
+                            // computeEffectiveAllowed 已剔除自身包名, 白名单模式下本应用天然在 VPN 之外,
+                            // 无需 (也不能) 再调 addDisallowedApplication。
+                            usedAllowList = true
+                            allowed.forEach { pkg ->
+                                runCatching { builder.addAllowedApplication(pkg) }
+                            }
+                        }
+                    }
+                    com.mirage.android.data.model.AppFilterMode.DISALLOW -> {
+                        val disallowed = com.mirage.android.data.repository.AppFilterManager.computeEffectiveDisallowed(filterConfig, installedPackages)
+                        if (disallowed.isNotEmpty()) {
+                            log("[filter] 启用黑名单分应用代理: 绕过 ${disallowed.size} 款应用")
+                            disallowed.forEach { pkg ->
+                                runCatching { builder.addDisallowedApplication(pkg) }
+                            }
+                        }
+                    }
+                }
+            }.onFailure {
+                // getInstalledApplications 跨 Binder 传输在应用极多的设备上可能抛
+                // TransactionTooLargeException / DeadObjectException。此前这里静默吞掉,
+                // 分应用配置失效且无任何痕迹。
+                log("[filter] 分应用代理配置失败, 本次回退为全局代理: ${it.message}")
+            }
 
-        val fd = try { builder.establish() } catch (e: Exception) {
-            log("[core] TUN establish 异常: ${e.message}")
-            return -3
-        } ?: run {
-            log("[core] TUN establish 返回 null")
-            return -4
+            // 自身应用强制排除在 VPN 之外 (防止自环)。
+            // 必须放在上面的 runCatching 之外: 分应用配置抛异常时, 自我排除仍要生效,
+            // 否则本应用自己的非 protect socket (订阅更新 / Geo OTA 等) 会绕回 TUN。
+            if (!usedAllowList) {
+                runCatching { builder.addDisallowedApplication(packageName) }
+                    .onFailure { log("[core] 自身应用排除 VPN 失败: ${it.message}") }
+            }
+
+            val established = try { builder.establish() } catch (e: Exception) {
+                log("[core] TUN establish 异常: ${e.message}")
+                return -3
+            } ?: run {
+                log("[core] TUN establish 返回 null")
+                return -4
+            }
+            tunFd = established
+            established
         }
         val rawFd = try {
             fd.fd
         } catch (e: Exception) {
             log("[core] 获取 TUN 文件描述符异常: ${e.message}")
             runCatching { fd.close() }
+            tunFd = null
             return -5
         }
-        tunFd = fd
         // TUN 已建立但内核尚未启动, 仍处于连接中
         startForegroundCompat(connected = false)
 
         // 显式绑定底层物理网络 (解决 Xiaomi HyperOS / Samsung OneUI / 5G 防火墙静默丢包与内核 eBPF 穿透)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            runCatching {
-                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-                val isPhysical = { net: Network ->
-                    val caps = cm?.getNetworkCapabilities(net)
-                    caps != null && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                }
-                val active = cm?.activeNetwork
-                val physical = if (active != null && isPhysical(active)) {
-                    active
-                } else {
-                    cm?.allNetworks?.firstOrNull { isPhysical(it) }
-                }
-                if (physical != null) {
-                    setUnderlyingNetworks(arrayOf(physical))
-                    currentPhysicalNetwork = physical
-                    runCatching { MirageNative.setActiveNetwork(physical.networkHandle) }
-                    log("[core] 启动即时绑定底层物理网络: $physical (handle=${physical.networkHandle})")
-                }
+        runCatching {
+            val cm = getSystemService(ConnectivityManager::class.java)
+            val isPhysical = { net: Network ->
+                val caps = cm?.getNetworkCapabilities(net)
+                caps != null && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            }
+            val active = cm?.activeNetwork
+            val physical = if (active != null && isPhysical(active)) {
+                active
+            } else {
+                null
+            }
+            if (physical != null) {
+                switchTo(physical)
             }
         }
 
@@ -501,74 +519,37 @@ class CoreService : VpnService() {
         val cm = getSystemService(ConnectivityManager::class.java)
         if (cm != null && networkCallback == null) {
             val cb = object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
-                    val caps = runCatching { cm.getNetworkCapabilities(network) }.getOrNull() ?: return
-                    if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) {
-                        return
-                    }
-                    val old = currentPhysicalNetwork
-                    if (old != null && old != network) {
-                        val oldCaps = runCatching { cm.getNetworkCapabilities(old) }.getOrNull()
-                        if (oldCaps != null && oldCaps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) && caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
-                            LogStore.append("[core] 检测到备用蜂窝网络就绪: $network, 当前保留 Wi-Fi: $old")
-                            return
-                        }
-                        LogStore.append("[core] 底层物理网络切换: $old -> $network, 冲刷暖池与失效连接")
-                        runCatching { MirageNative.flushPool() }
-                    }
-                    currentPhysicalNetwork = network
-                    runCatching { MirageNative.setActiveNetwork(network.networkHandle) }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                        runCatching { setUnderlyingNetworks(arrayOf(network)) }
-                    }
+                private fun isPhysical(network: Network, caps: NetworkCapabilities?): Boolean {
+                    val c = caps ?: cm.getNetworkCapabilities(network) ?: return false
+                    return !c.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                            c.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
                 }
-                override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
-                    if (networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) || !networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) {
-                        return
-                    }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                        runCatching { setUnderlyingNetworks(arrayOf(network)) }
-                    }
-                }
-                override fun onLost(network: Network) {
-                    if (currentPhysicalNetwork == network) {
-                        val nextPhysical = cm.allNetworks.firstOrNull { net ->
-                            net != network && runCatching {
-                                val c = cm.getNetworkCapabilities(net)
-                                c != null &&
-                                c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                                c.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) &&
-                                (c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || c.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) || c.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
-                            }.getOrDefault(false)
-                        }
 
-                        if (nextPhysical != null) {
-                            currentPhysicalNetwork = nextPhysical
-                            LogStore.append("[core] 底层物理网络故障转移: $network 丢失 -> 快速接管至备用网络 $nextPhysical")
-                            runCatching { MirageNative.setActiveNetwork(nextPhysical.networkHandle) }
-                            runCatching { MirageNative.flushPool() }
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                                runCatching { setUnderlyingNetworks(arrayOf(nextPhysical)) }
-                            }
-                        } else {
-                            currentPhysicalNetwork = null
-                            LogStore.append("[core] 所有底层物理网络断开: $network, 冲刷空闲连接池")
-                            runCatching { MirageNative.setActiveNetwork(0L) }
-                            runCatching { MirageNative.flushPool() }
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                                runCatching { setUnderlyingNetworks(null) }
-                            }
+                override fun onAvailable(network: Network) {
+                    if (isPhysical(network, null)) {
+                        switchTo(network)
+                    }
+                }
+
+                override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                    if (isPhysical(network, networkCapabilities)) {
+                        switchTo(network)
+                    }
+                }
+
+                override fun onLost(network: Network) {
+                    synchronized(netLock) {
+                        if (currentPhysicalNetwork == network) {
+                            switchTo(null)
                         }
                     }
                 }
             }
             networkCallback = cb
             runCatching {
-                val req = NetworkRequest.Builder()
-                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                    .build()
-                cm.registerNetworkCallback(req, cb)
+                cm.registerDefaultNetworkCallback(cb)
+            }.onFailure {
+                LogStore.append("[core] registerDefaultNetworkCallback 异常: ${it.message}")
             }
         }
 
@@ -621,6 +602,7 @@ class CoreService : VpnService() {
             val baseInterval = SettingsStore.getCheckIntervalSec(this@CoreService).toLong().coerceAtLeast(5)
             val interval = baseInterval + failoverBackoffSec
             delay(interval * 1000)
+            if (currentPhysicalNetwork == null) continue
             if (!MirageNative.isRunning()) continue
             // 修复 M1: Fail-Closed (异常/JNI失败时视为不健康，防止假死与自愈失效)
             val healthy = runCatching { MirageNative.isHealthy() }.getOrDefault(false)
@@ -652,17 +634,16 @@ class CoreService : VpnService() {
     private suspend fun doFailover(): Boolean {
         val nodes = NodeStore.getNodes(this)
         if (nodes.size <= 1) {
-            // 单节点: 完整重启连接 (撤 TUN 后重建, 清 stale 隧道)
-            LogStore.append("[failover] 仅一个节点, 完整重启连接")
+            // 单节点: 完整重启连接 (清 stale 隧道, 保持 TUN 避免明文泄露)
+            LogStore.append("[failover] 仅一个节点, 重启连接 (保持 TUN)")
             runCatching { MirageNative.stop() }
-            runCatching { tunFd?.close() }; tunFd = null
-            // 修复 S2: 纳入 failoverRestartJob 统一管理, 支持手动停止时立即 cancel
+            // 修复 2.1: 不关闭 tunFd, 避免重启等待期间物理网络明文泄露
             failoverRestartJob?.cancel()
             failoverRestartJob = scope.launch {
                 delay(3000)
                 if (isActive && !MirageNative.isRunning()) startInternal()
             }
-            return true
+            return false // 修复 2.1: 单节点重连未能切换可用节点，返回 false 允许 failoverBackoffSec 递增退避
         }
         val mode = SettingsStore.getFailoverMode(this)
         LogStore.append("[failover] 触发节点切换 (mode=$mode, ${nodes.size} 个节点)")
@@ -700,19 +681,19 @@ class CoreService : VpnService() {
                 NodeStore.setSelected(this, newIdx)
                 broadcast { it.onNodeChanged(newIdx, best.first.uri) }
             }
+            return true
         } else {
-            // 最优还是当前 → 完整重启连接 (撤 TUN 后重建, 清 stale 隧道)
-            LogStore.append("[failover] 当前节点仍最优, 完整重启连接")
+            // 最优还是当前 → 重启连接 (清 stale 隧道, 保持 TUN 避免明文泄露)
+            LogStore.append("[failover] 当前节点仍最优, 重启连接 (保持 TUN)")
             runCatching { MirageNative.stop() }
-            runCatching { tunFd?.close() }; tunFd = null
-            // 修复 S2: 纳入 failoverRestartJob 统一管理
+            // 修复 2.1: 不关闭 tunFd
             failoverRestartJob?.cancel()
             failoverRestartJob = scope.launch {
                 delay(3000)
                 if (isActive && !MirageNative.isRunning()) startInternal()
             }
+            return false // 修复 2.1: 未能切换到不同可用节点，返回 false 允许退避
         }
-        return true
     }
 
     fun stopInternal(): Unit = synchronized(stateLock) {
