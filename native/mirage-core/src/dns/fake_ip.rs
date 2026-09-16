@@ -44,7 +44,11 @@ impl FakeIpMapper {
             ));
         }
 
-        let mask = if prefix == 0 { 0u32 } else { !0u32 << (32 - prefix) };
+        let mask = if prefix == 0 {
+            0u32
+        } else {
+            !0u32 << (32 - prefix)
+        };
         let network = u32::from(ip) & mask;
 
         let mapper = Self {
@@ -62,7 +66,11 @@ impl FakeIpMapper {
         if let Some(p) = &mapper.persist_path {
             if p.exists() {
                 if let Err(e) = mapper.load(p) {
-                    tracing::warn!("[FAKEIP] 加载持久化缓存 {} 失败 ({}), 空启动", p.display(), e);
+                    tracing::warn!(
+                        "[FAKEIP] 加载持久化缓存 {} 失败 ({}), 空启动",
+                        p.display(),
+                        e
+                    );
                 }
             }
         }
@@ -158,7 +166,11 @@ impl FakeIpMapper {
             self.dirty.store(true, Ordering::SeqCst);
             return;
         }
-        tracing::debug!("[FAKEIP] 持久化 {} 条映射 → {}", snapshot.len(), path.display());
+        tracing::debug!(
+            "[FAKEIP] 持久化 {} 条映射 → {}",
+            snapshot.len(),
+            path.display()
+        );
     }
 
     /// 启动周期落盘后台任务 (每 60s, 仅 dirty 才写)。持久化未启用则 no-op。
@@ -227,7 +239,13 @@ impl FakeIpMapper {
                 tracing::debug!("[FAKEIP] {} 槽位复用 → 淘汰旧域名 [{}]", ip, old_domain);
             }
         }
-        tracing::debug!("[FAKEIP] assign [{}] → {} (已用 {}/~{})", domain, ip, d2i.len() + 1, !self.mask);
+        tracing::debug!(
+            "[FAKEIP] assign [{}] → {} (已用 {}/~{})",
+            domain,
+            ip,
+            d2i.len() + 1,
+            !self.mask
+        );
         d2i.insert(domain, ip);
         self.dirty.store(true, Ordering::Relaxed); // 新分配 → 待落盘
 
@@ -235,7 +253,11 @@ impl FakeIpMapper {
     }
 
     pub fn lookup_domain(&self, ip: &Ipv4Addr) -> Option<String> {
-        self.ip_to_domain.read().unwrap_or_else(|e| e.into_inner()).get(ip).cloned()
+        self.ip_to_domain
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(ip)
+            .cloned()
     }
 
     pub fn is_fake_ip(&self, ip: &Ipv4Addr) -> bool {
@@ -264,7 +286,10 @@ mod bounded_tests {
     fn rejects_too_small_prefix() {
         // /30-/32 主机位不足 (会发出范围外 IP) → 构造即拒; /29 是最小可用
         for p in [30u8, 31, 32] {
-            assert!(FakeIpMapper::new(&format!("10.0.0.0/{p}")).is_err(), "/{p} 应被拒");
+            assert!(
+                FakeIpMapper::new(&format!("10.0.0.0/{p}")).is_err(),
+                "/{p} 应被拒"
+            );
         }
         assert!(FakeIpMapper::new("10.0.0.0/29").is_ok(), "/29 应可用");
         assert!(FakeIpMapper::new("198.18.0.0/16").is_ok());
@@ -280,15 +305,27 @@ mod bounded_tests {
         let d2i = m.domain_to_ip.read().unwrap().len();
         let i2d = m.ip_to_domain.read().unwrap().len();
         // 两 map 都封顶在 range 容量 (5), 绝不是 100
-        assert!(d2i <= 5, "domain_to_ip 必须有界 (round-robin 淘汰), 实际 {d2i}");
+        assert!(
+            d2i <= 5,
+            "domain_to_ip 必须有界 (round-robin 淘汰), 实际 {d2i}"
+        );
         assert_eq!(d2i, i2d, "两 map 一致 (无 stale 正向映射)");
         // 最老域名 d0 应已被淘汰
         assert!(
-            m.domain_to_ip.read().unwrap().get("d0.example.com").is_none(),
+            m.domain_to_ip
+                .read()
+                .unwrap()
+                .get("d0.example.com")
+                .is_none(),
             "最老域名 d0 应被 round-robin 淘汰"
         );
         // 最近域名 d99 应仍在, 且反查一致
-        let ip99 = *m.domain_to_ip.read().unwrap().get("d99.example.com").unwrap();
+        let ip99 = *m
+            .domain_to_ip
+            .read()
+            .unwrap()
+            .get("d99.example.com")
+            .unwrap();
         assert_eq!(
             m.lookup_domain(&ip99).as_deref(),
             Some("d99.example.com"),
@@ -332,7 +369,11 @@ mod persist_tests {
         // 新 mapper 从同路径恢复
         let m2 = FakeIpMapper::with_persist("198.18.0.0/16", Some(ps)).unwrap();
         assert_eq!(m2.lookup_or_assign("a.com"), ip_a, "恢复后 a.com 应同 IP");
-        assert_eq!(m2.lookup_domain(&ip_a).as_deref(), Some("a.com"), "反查恢复");
+        assert_eq!(
+            m2.lookup_domain(&ip_a).as_deref(),
+            Some("a.com"),
+            "反查恢复"
+        );
         // next_ip 恢复 → 新域名不撞已恢复的 IP
         let ip_c = m2.lookup_or_assign("c.com");
         assert_ne!(ip_c, ip_a);
@@ -344,10 +385,23 @@ mod persist_tests {
     fn out_of_range_entries_dropped_on_load() {
         let path = tmp_path("range");
         // 10.0.0.5 不在 198.18/16, 应丢弃; 198.18.0.9 保留
-        std::fs::write(&path, "# hdr\nnext_ip=999\n10.0.0.5 x.com\n198.18.0.9 y.com\n").unwrap();
-        let m = FakeIpMapper::with_persist("198.18.0.0/16", Some(path.to_str().unwrap().to_string())).unwrap();
-        assert_eq!(m.lookup_domain(&"198.18.0.9".parse().unwrap()).as_deref(), Some("y.com"), "range 内保留");
-        assert!(m.lookup_domain(&"10.0.0.5".parse().unwrap()).is_none(), "range 外丢弃");
+        std::fs::write(
+            &path,
+            "# hdr\nnext_ip=999\n10.0.0.5 x.com\n198.18.0.9 y.com\n",
+        )
+        .unwrap();
+        let m =
+            FakeIpMapper::with_persist("198.18.0.0/16", Some(path.to_str().unwrap().to_string()))
+                .unwrap();
+        assert_eq!(
+            m.lookup_domain(&"198.18.0.9".parse().unwrap()).as_deref(),
+            Some("y.com"),
+            "range 内保留"
+        );
+        assert!(
+            m.lookup_domain(&"10.0.0.5".parse().unwrap()).is_none(),
+            "range 外丢弃"
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -360,11 +414,27 @@ mod persist_tests {
             "198.18.0.0 net.com\n198.18.0.1 gw.com\n198.18.255.255 bc.com\n198.18.0.2 ok.com\n",
         )
         .unwrap();
-        let m = FakeIpMapper::with_persist("198.18.0.0/16", Some(path.to_str().unwrap().to_string())).unwrap();
-        assert!(m.lookup_domain(&"198.18.0.0".parse().unwrap()).is_none(), ".0 网络号应拒");
-        assert!(m.lookup_domain(&"198.18.0.1".parse().unwrap()).is_none(), ".1 网关应拒");
-        assert!(m.lookup_domain(&"198.18.255.255".parse().unwrap()).is_none(), "广播应拒");
-        assert_eq!(m.lookup_domain(&"198.18.0.2".parse().unwrap()).as_deref(), Some("ok.com"), ".2 正常保留");
+        let m =
+            FakeIpMapper::with_persist("198.18.0.0/16", Some(path.to_str().unwrap().to_string()))
+                .unwrap();
+        assert!(
+            m.lookup_domain(&"198.18.0.0".parse().unwrap()).is_none(),
+            ".0 网络号应拒"
+        );
+        assert!(
+            m.lookup_domain(&"198.18.0.1".parse().unwrap()).is_none(),
+            ".1 网关应拒"
+        );
+        assert!(
+            m.lookup_domain(&"198.18.255.255".parse().unwrap())
+                .is_none(),
+            "广播应拒"
+        );
+        assert_eq!(
+            m.lookup_domain(&"198.18.0.2".parse().unwrap()).as_deref(),
+            Some("ok.com"),
+            ".2 正常保留"
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -373,7 +443,8 @@ mod persist_tests {
         let path = tmp_path("corrupt");
         std::fs::write(&path, b"not\xffutf8 garbage\nnext_ip=abc\n\n").unwrap();
         // 损坏 (非法 UTF-8) → load Err → warn 但 with_persist 返回 Ok (空启动)
-        let m = FakeIpMapper::with_persist("198.18.0.0/16", Some(path.to_str().unwrap().to_string()));
+        let m =
+            FakeIpMapper::with_persist("198.18.0.0/16", Some(path.to_str().unwrap().to_string()));
         assert!(m.is_ok(), "损坏文件不应致 panic/失败");
         std::fs::remove_file(&path).ok();
     }

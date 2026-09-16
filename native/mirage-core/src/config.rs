@@ -40,8 +40,12 @@ pub enum OutboundConfig {
         #[serde(default)]
         underlying: Option<String>,
     },
-    Direct { tag: String },
-    Block { tag: String },
+    Direct {
+        tag: String,
+    },
+    Block {
+        tag: String,
+    },
     /// 手动选择组。
     Selector {
         tag: String,
@@ -80,11 +84,21 @@ pub enum OutboundConfig {
     },
 }
 
-fn d_camouflage_host() -> String { "www.apple.com".into() }
-fn d_pool_size() -> usize { 16 }
-fn d_test_type() -> String { "ping".into() }
-fn d_true() -> bool { true }
-fn d_udp_mux_tunnels() -> usize { 4 }
+fn d_camouflage_host() -> String {
+    "www.apple.com".into()
+}
+fn d_pool_size() -> usize {
+    16
+}
+fn d_test_type() -> String {
+    "ping".into()
+}
+fn d_true() -> bool {
+    true
+}
+fn d_udp_mux_tunnels() -> usize {
+    4
+}
 
 /// 最简 Config: 只有出站表。移动端 engine 直接用它构建 CoreState。
 #[derive(Debug, Clone, Deserialize)]
@@ -93,6 +107,7 @@ pub struct Config {
 }
 
 /// 从单节点信息构造一个"单 Mirage 出站"的 Config (轻量模式语义, 全部转发)。
+#[allow(clippy::too_many_arguments)]
 pub fn single_mirage_config(
     tag: &str,
     server: &str,
@@ -119,8 +134,12 @@ pub fn single_mirage_config(
                 udp_mux_tunnels: 4,
                 underlying: None,
             },
-            OutboundConfig::Direct { tag: "direct".to_string() },
-            OutboundConfig::Block { tag: "block".to_string() },
+            OutboundConfig::Direct {
+                tag: "direct".to_string(),
+            },
+            OutboundConfig::Block {
+                tag: "block".to_string(),
+            },
         ],
     }
 }

@@ -88,29 +88,41 @@ impl Sniffer {
         }
 
         let mut cur = 4; // 跳过 Handshake Header
-        if cur + 2 > data.len() { return None; }
+        if cur + 2 > data.len() {
+            return None;
+        }
         cur += 2; // 跳过 Client Version (2 字节)
 
-        if cur + 32 > data.len() { return None; }
+        if cur + 32 > data.len() {
+            return None;
+        }
         cur += 32; // 跳过 Random (32 字节)
 
         // Session ID
-        if cur >= data.len() { return None; }
+        if cur >= data.len() {
+            return None;
+        }
         let session_id_len = data[cur] as usize;
         cur += 1 + session_id_len;
 
         // Cipher Suites
-        if cur + 2 > data.len() { return None; }
+        if cur + 2 > data.len() {
+            return None;
+        }
         let cipher_suites_len = u16::from_be_bytes([data[cur], data[cur + 1]]) as usize;
         cur += 2 + cipher_suites_len;
 
         // Compression Methods
-        if cur >= data.len() { return None; }
+        if cur >= data.len() {
+            return None;
+        }
         let comp_methods_len = data[cur] as usize;
         cur += 1 + comp_methods_len;
 
         // Extensions
-        if cur + 2 > data.len() { return None; }
+        if cur + 2 > data.len() {
+            return None;
+        }
         let extensions_len = u16::from_be_bytes([data[cur], data[cur + 1]]) as usize;
         cur += 2;
 
@@ -131,7 +143,9 @@ impl Sniffer {
                     let mut sni_cur = 2; // 跳过 server_name_list 长度 (2 字节)
                     while sni_cur + 3 <= ext_data.len() {
                         let name_type = ext_data[sni_cur];
-                        let name_len = u16::from_be_bytes([ext_data[sni_cur + 1], ext_data[sni_cur + 2]]) as usize;
+                        let name_len =
+                            u16::from_be_bytes([ext_data[sni_cur + 1], ext_data[sni_cur + 2]])
+                                as usize;
                         sni_cur += 3;
 
                         if name_type == 0x00 && sni_cur + name_len <= ext_data.len() {
@@ -170,7 +184,16 @@ impl Sniffer {
     /// 解析 HTTP 1.1 请求提取 Host 头
     pub fn parse_http_host(buf: &[u8]) -> Option<String> {
         // 检查常见的 HTTP 方法
-        let methods: &[&[u8]] = &[b"GET ", b"POST ", b"HEAD ", b"PUT ", b"DELETE ", b"OPTIONS ", b"CONNECT ", b"PATCH "];
+        let methods: &[&[u8]] = &[
+            b"GET ",
+            b"POST ",
+            b"HEAD ",
+            b"PUT ",
+            b"DELETE ",
+            b"OPTIONS ",
+            b"CONNECT ",
+            b"PATCH ",
+        ];
         let is_http = methods.iter().any(|m| buf.starts_with(m));
         if !is_http {
             return None;
@@ -196,7 +219,9 @@ impl Sniffer {
                             host_val = &host_val[..port_idx];
                         }
                     }
-                    let cleaned = host_val.trim_matches(|c| c == '[' || c == ']').trim_end_matches('.');
+                    let cleaned = host_val
+                        .trim_matches(|c| c == '[' || c == ']')
+                        .trim_end_matches('.');
                     if !cleaned.is_empty() {
                         return Some(cleaned.to_ascii_lowercase());
                     }

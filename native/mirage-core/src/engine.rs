@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::config::{self, Config};
 use crate::dns::fake_ip::FakeIpMapper;
-use crate::proxy::outbound::{Address, OutboundManager, OutboundNode, OutStream};
+use crate::proxy::outbound::{Address, OutStream, OutboundManager, OutboundNode};
 
 /// fake-IP 网段。与上游透明网关默认一致 (RFC 1918 之外的保留段, Android 路由表会把它
 /// 指进 TUN)。**/16** 而非上游的 /15: 把 198.19.0.0/16 留给 TUN DNS 地址, 避免 DNS
@@ -66,8 +66,14 @@ impl Engine {
     pub fn new(node: &NodeInfo) -> Result<Arc<Self>> {
         crate::proxy::udp_mux::set_udp_mux(node.udp_mux, 4);
         let cfg = config::single_mirage_config(
-            &node.tag, &node.server, node.server_port, &node.password,
-            &node.sni, node.pool_size, node.pfs, node.udp_mux,
+            &node.tag,
+            &node.server,
+            node.server_port,
+            &node.password,
+            &node.sni,
+            node.pool_size,
+            node.pfs,
+            node.udp_mux,
         );
         let mgr = OutboundManager::new(&cfg).context("构建出站失败")?;
         let fake_ip = FakeIpMapper::new(FAKE_IP_CIDR).context("初始化 fake-IP 失败")?;
@@ -146,7 +152,10 @@ impl Engine {
             crate::monitor::tunnel_stall_secs(),
             TUNNEL_STALL_SEC,
         ) {
-            tracing::warn!("[Engine] 隧道疑似卡死: 有活跃连接但 {}s 无隧道流量", TUNNEL_STALL_SEC);
+            tracing::warn!(
+                "[Engine] 隧道疑似卡死: 有活跃连接但 {}s 无隧道流量",
+                TUNNEL_STALL_SEC
+            );
             return false;
         }
         true
@@ -154,7 +163,9 @@ impl Engine {
 
     /// RTT 毫秒 (App 状态栏显示)。
     pub fn latency_ms(&self) -> Option<u64> {
-        self.outbounds.get(&self.default_tag).and_then(|n| n.latency_rtt_ms())
+        self.outbounds
+            .get(&self.default_tag)
+            .and_then(|n| n.latency_rtt_ms())
     }
 
     /// 动态热更新连接池容量 (直接修改 WarmPool 运行时参数，无锁秒级生效)
@@ -201,13 +212,19 @@ mod stall_tests {
 
     #[test]
     fn no_conns_never_stalled() {
-        assert!(!tunnel_stalled(0, Some(999), 30), "无活跃连接 → 空闲, 不判卡死");
+        assert!(
+            !tunnel_stalled(0, Some(999), 30),
+            "无活跃连接 → 空闲, 不判卡死"
+        );
         assert!(!tunnel_stalled(0, None, 30));
     }
 
     #[test]
     fn fresh_session_not_stalled() {
-        assert!(!tunnel_stalled(3, None, 30), "从未有隧道流量 (刚启动) → 不判卡死");
+        assert!(
+            !tunnel_stalled(3, None, 30),
+            "从未有隧道流量 (刚启动) → 不判卡死"
+        );
     }
 
     #[test]

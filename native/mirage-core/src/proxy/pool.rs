@@ -1,14 +1,14 @@
 use crate::crypto::aead::{create_crypto_pair, create_crypto_pair_pfs, CryptoReader, CryptoWriter};
-use crate::proxy::tunnel::{Tunnel, TunnelRead, TunnelWrite};
 use crate::proxy::outbound::{Address, OutboundNode};
+use crate::proxy::tunnel::{Tunnel, TunnelRead, TunnelWrite};
 use anyhow::Result;
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use tokio::sync::{Mutex, Notify};
+use std::sync::Arc;
 use std::sync::RwLock;
-use tracing::{debug, error, info};
+use tokio::sync::{Mutex, Notify};
 use tokio::time::Instant;
+use tracing::{debug, error, info};
 
 pub struct PoolConfig {
     pub server_host: String,
@@ -159,10 +159,7 @@ pub(crate) fn decide_new_target(
     if wait_ratio > 0.2 && cur_target < max_size {
         let increment = (cur_target / 5).max(1);
         (cur_target + increment).min(max_size)
-    } else if wait_ratio == 0.0
-        && expired_unused >= total_gets / 2
-        && cur_target > floor
-    {
+    } else if wait_ratio == 0.0 && expired_unused >= total_gets / 2 && cur_target > floor {
         cur_target - 1
     } else {
         cur_target.max(floor).min(max_size)
@@ -244,9 +241,9 @@ mod feedback_tests {
     }
 }
 
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
-use std::time::Duration;
 
 /// 客户端伪装握手产物: 会话 salt + 可选 PFS ECDH 共享秘密。
 struct ClientHandshake {
@@ -259,7 +256,9 @@ struct ClientHandshake {
 ///
 /// PFS 下 server_random = 服务端临时 X25519 公钥 (见 crypto::pfs); 非 PFS 下调用方忽略之。
 /// 仍要求集齐 0x16+0x14+0x17 三型才成功 (见 handshake-template-completeness)。
-pub async fn read_server_handshake<R: tokio::io::AsyncRead + Unpin>(stream: &mut R) -> Result<[u8; 32]> {
+pub async fn read_server_handshake<R: tokio::io::AsyncRead + Unpin>(
+    stream: &mut R,
+) -> Result<[u8; 32]> {
     // v0.4.5-alpha.17: 放弃超时随机化, 消除固定 12s/1.5s 阈值的客户端时序指纹.
     // GFW 若主动操纵服务端响应时序 (拦截/延迟 ServerHello) 测客户端恒定放弃时间可
     // 识别 Mirage 客户端. 每连接各随机一次 (非每轮, 保持单次握手内一致), 围绕原值
@@ -274,13 +273,17 @@ pub async fn read_server_handshake<R: tokio::io::AsyncRead + Unpin>(stream: &mut
     let mut server_random = [0u8; 32];
 
     loop {
-        let t = if saw_ccs { post_ccs_timeout } else { pre_ccs_timeout };
+        let t = if saw_ccs {
+            post_ccs_timeout
+        } else {
+            pre_ccs_timeout
+        };
         let mut header = [0u8; 5];
         match timeout(t, stream.read_exact(&mut header)).await {
             Ok(Ok(_)) => {
                 let ct = header[0];
                 let length = u16::from_be_bytes([header[3], header[4]]) as usize;
-                
+
                 let mut body = vec![0u8; length];
                 match timeout(t, stream.read_exact(&mut body)).await {
                     Ok(Ok(_)) => {
@@ -325,7 +328,12 @@ pub async fn read_server_handshake<R: tokio::io::AsyncRead + Unpin>(stream: &mut
     }
 
     if !saw_sh || !saw_ccs || !saw_enc {
-        return Err(anyhow::anyhow!("Incomplete flight: sh={}, ccs={}, enc={}", saw_sh, saw_ccs, saw_enc));
+        return Err(anyhow::anyhow!(
+            "Incomplete flight: sh={}, ccs={}, enc={}",
+            saw_sh,
+            saw_ccs,
+            saw_enc
+        ));
     }
     Ok(server_random)
 }
@@ -334,21 +342,21 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// [弹性预热连接池 (WarmPool)]
 /// Mirage 的核心性能组件，用于零延迟转发。
-/// 
+///
 /// 工作原理：
 /// 1. 后台异步维护一个处于 TLS 握手完毕状态的空闲隧道队列。
 /// 2. 客户端请求到达时，直接从池中取出一个已经建好握手的 Tunnel。
 /// 3. 并发不足时弹性扩容，支持高并发无缝爆发。
 pub struct WarmPool {
-    queue: Arc<Mutex<VecDeque<Tunnel>>>,      // 空闲可用的隧道队列
-    notify: Arc<Notify>,                      // 阻塞唤醒器（当没有连接时挂起请求）
-    pub stats: Arc<RwLock<PoolStats>>,        // 连接池的延迟统计和健康检查
-    pub brutal_state: Arc<BrutalState>,       // 该连接池绑定的拥塞控制状态
-    metrics: Arc<PoolMetrics>,                // 反馈式弹性算法的运行时指标
-    target_size: Arc<AtomicUsize>,            // 动态目标容量 (支持热重载)
-    max_size: Arc<AtomicUsize>,               // 动态最大容量 (支持热重载)
-    cfg: Arc<PoolConfig>,                     // 节点配置 (支持饥饿时 On-Demand 即时并发拨号)
-    pub shutdown: Arc<AtomicBool>,            // 安全关闭标志 (节点切换/引擎替换时终止后台协程与建连)
+    queue: Arc<Mutex<VecDeque<Tunnel>>>, // 空闲可用的隧道队列
+    notify: Arc<Notify>,                 // 阻塞唤醒器（当没有连接时挂起请求）
+    pub stats: Arc<RwLock<PoolStats>>,   // 连接池的延迟统计和健康检查
+    pub brutal_state: Arc<BrutalState>,  // 该连接池绑定的拥塞控制状态
+    metrics: Arc<PoolMetrics>,           // 反馈式弹性算法的运行时指标
+    target_size: Arc<AtomicUsize>,       // 动态目标容量 (支持热重载)
+    max_size: Arc<AtomicUsize>,          // 动态最大容量 (支持热重载)
+    cfg: Arc<PoolConfig>,                // 节点配置 (支持饥饿时 On-Demand 即时并发拨号)
+    pub shutdown: Arc<AtomicBool>,       // 安全关闭标志 (节点切换/引擎替换时终止后台协程与建连)
     /// On-Demand 并发拨号限流信号量: 防止瞬时突发 (如 20 张图片) 同时发起 20 条 TLS
     /// 握手 (thundering herd)。上限取 clamp(pool_size, 4, 16), 兼顾图片秒开与平滑。
     on_demand_sem: Arc<tokio::sync::Semaphore>,
@@ -368,7 +376,7 @@ impl WarmPool {
         // 并发拨号上限: 至少 16 (图片秒开), 至多 32 (防 thundering herd)。
         // 平滑靠回流 + notify (见 refill_or_take), 而非压低并发 —— 太低的并发
         // (如 4/8) 会让 20 张图片排队成渐进延迟 (实测 1.6~8s), 违背"秒开"初衷。
-        let on_demand_limit = initial_size.max(16).min(32);
+        let on_demand_limit = initial_size.clamp(16, 32);
         let pool = Self {
             queue: queue.clone(),
             notify: notify.clone(),
@@ -420,16 +428,21 @@ impl WarmPool {
                 }
                 *q = alive;
                 let expired_now = to_drop.len() as u64;
-                metrics_clone.expired_unused.fetch_add(expired_now, Ordering::Relaxed);
+                metrics_clone
+                    .expired_unused
+                    .fetch_add(expired_now, Ordering::Relaxed);
                 let expired_total = metrics_clone.expired_unused.swap(0, Ordering::Relaxed);
 
                 const EXPIRING_THRESHOLD_SEC: u64 = 10;
                 let idle_count = q.len();
-                let expiring_soon = q.iter().filter(|t| {
-                    let elapsed = t.created_at.elapsed().as_secs();
-                    let remaining = t.max_age_sec.saturating_sub(elapsed);
-                    remaining < EXPIRING_THRESHOLD_SEC
-                }).count();
+                let expiring_soon = q
+                    .iter()
+                    .filter(|t| {
+                        let elapsed = t.created_at.elapsed().as_secs();
+                        let remaining = t.max_age_sec.saturating_sub(elapsed);
+                        remaining < EXPIRING_THRESHOLD_SEC
+                    })
+                    .count();
                 drop(q);
                 let in_flight_now = in_flight_clone_mgr.load(Ordering::Relaxed);
 
@@ -441,11 +454,16 @@ impl WarmPool {
                 }
 
                 // 反馈式 target 决策 (纯函数)
-                let new_target = decide_new_target(cur_target, wait, gets, expired_total, current_max);
+                let new_target =
+                    decide_new_target(cur_target, wait, gets, expired_total, current_max);
                 if new_target != cur_target {
                     target_clone.store(new_target, Ordering::Relaxed);
                 }
-                let wait_ratio = if gets == 0 { 0.0 } else { wait as f64 / gets as f64 };
+                let wait_ratio = if gets == 0 {
+                    0.0
+                } else {
+                    wait as f64 / gets as f64
+                };
                 let target_display = if new_target != cur_target {
                     format!("{}→{}", cur_target, new_target)
                 } else {
@@ -476,7 +494,7 @@ impl WarmPool {
         let stats_builder = stats.clone();
         let brutal_state_builder = brutal_state.clone();
         let shutdown_builder = shutdown.clone();
-        
+
         tokio::spawn(async move {
             info!("WarmPool (Elastic) initialized. Capacity: {}", initial_size);
             let mut next_build_at = Instant::now();
@@ -492,14 +510,19 @@ impl WarmPool {
                 let current_in_flight = in_flight_clone.load(Ordering::Relaxed);
 
                 // 判断是否需要补充连接：闲置 + 正在建连的 < 目标，且没有触碰动态上限
-                if current_idle + current_in_flight >= current_target || current_idle + current_in_flight >= current_max {
+                if current_idle + current_in_flight >= current_target
+                    || current_idle + current_in_flight >= current_max
+                {
                     // 等待消费者拿走连接，或者Manager提升目标值
                     tokio::time::sleep(Duration::from_millis(50)).await;
                     continue;
                 }
 
                 // 失败自适应退避: 若近期发生网络中断或握手连续失败，主循环主动退避，防止高频空转耗尽 FD 与 CPU
-                let failures = stats_builder.read().unwrap_or_else(|e| e.into_inner()).consecutive_failures;
+                let failures = stats_builder
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .consecutive_failures;
                 if failures > 0 {
                     let backoff = Duration::from_millis((failures as u64 * 300).min(3000));
                     tokio::time::sleep(backoff).await;
@@ -510,13 +533,14 @@ impl WarmPool {
                 // 若池子处于平稳补货期 (current_idle > 0)，施加 150ms 阶梯延迟平滑 SYN 抖动。
                 let burst_count = if current_idle == 0 {
                     let needed = current_target.saturating_sub(current_idle + current_in_flight);
-                    needed.min(8).max(1)
+                    needed.clamp(1, 8)
                 } else {
                     let now = Instant::now();
                     if next_build_at > now {
                         tokio::time::sleep_until(next_build_at).await;
                     }
-                    next_build_at = Instant::now() + Duration::from_millis(150 + fastrand::u64(0..=150));
+                    next_build_at =
+                        Instant::now() + Duration::from_millis(150 + fastrand::u64(0..=150));
                     1
                 };
 
@@ -540,8 +564,11 @@ impl WarmPool {
                         match Self::connect_upstream(&cfg_task, &brutal_state_builder).await {
                             Ok(tunnel) => {
                                 let elapsed = start.elapsed().as_millis() as u64;
-                                stats_task.write().unwrap_or_else(|e| e.into_inner()).record_latency(elapsed);
-                                
+                                stats_task
+                                    .write()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .record_latency(elapsed);
+
                                 if shutdown_task.load(Ordering::Relaxed) {
                                     in_flight_task.fetch_sub(1, Ordering::Relaxed);
                                     return;
@@ -552,7 +579,10 @@ impl WarmPool {
                                 tracing::trace!("WarmPool: 预热连接就绪 ({}ms)", elapsed);
                             }
                             Err(e) => {
-                                stats_task.write().unwrap_or_else(|e| e.into_inner()).record_failure();
+                                stats_task
+                                    .write()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .record_failure();
                                 in_flight_task.fetch_sub(1, Ordering::Relaxed);
                                 error!("WarmPool: 上游连接失败: {:?}", e);
                                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -604,13 +634,14 @@ impl WarmPool {
         //    失败/超时降级: 用 local time 继续 (不阻塞连接), 仅 INFO 一次.
         // proto_ver 0x02 = 服务端开了 cipher agility, 需在下方协商。
         let mut server_agility = false;
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            crypto_reader.recv_data()
-        ).await {
-            Ok(Ok(data)) if data.len() == 10 && data[0] == 0x01
-                && (data[1] == crate::crypto::cipher::PROTO_VER_LEGACY
-                    || data[1] == crate::crypto::cipher::PROTO_VER_AGILITY) =>
+        match tokio::time::timeout(std::time::Duration::from_secs(3), crypto_reader.recv_data())
+            .await
+        {
+            Ok(Ok(data))
+                if data.len() == 10
+                    && data[0] == 0x01
+                    && (data[1] == crate::crypto::cipher::PROTO_VER_LEGACY
+                        || data[1] == crate::crypto::cipher::PROTO_VER_AGILITY) =>
             {
                 server_agility = data[1] == crate::crypto::cipher::PROTO_VER_AGILITY;
                 let server_time = u64::from_be_bytes(data[2..10].try_into().unwrap());
@@ -619,14 +650,16 @@ impl WarmPool {
             Ok(Ok(data)) => {
                 tracing::warn!(
                     "TIME_SYNC: unexpected frame (len={}, type={:?}), proceeding without sync",
-                    data.len(), data.first()
+                    data.len(),
+                    data.first()
                 );
             }
             Ok(Err(e)) => {
                 // 解密失败 = 服务端很可能拒了本次认证、把连接转发到了伪装站, 我们却在用
                 // 密码派生的会话密钥去解伪装站的 TLS 流量 → 解不开。这是"认证没过"的信号。
                 // 池子每次补货都会撞到, 故只详细提示一次 (避免刷屏)。两大常见原因见下。
-                static HINTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                static HINTED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
                 if !HINTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     tracing::warn!(
                         "隧道认证疑似失败 (TIME_SYNC 解密失败: {:?})。排查: ①密码与服务端是否一致; \
@@ -647,9 +680,16 @@ impl WarmPool {
         //    两端 rekey 到协商 cipher。协商在加密 ChaCha20 信道内完成, ClientHello 未动 (指纹不变)。
         //    任何失败 → 保持 ChaCha20 (fail-safe, 不影响连接可用性)。
         if server_agility {
-            let nego = crate::crypto::cipher::build_cipher_nego(crate::crypto::cipher::local_supports_aes());
+            let nego = crate::crypto::cipher::build_cipher_nego(
+                crate::crypto::cipher::local_supports_aes(),
+            );
             if crypto_writer.send_data(&nego).await.is_ok() {
-                match tokio::time::timeout(std::time::Duration::from_secs(3), crypto_reader.recv_data()).await {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    crypto_reader.recv_data(),
+                )
+                .await
+                {
                     Ok(Ok(ack)) => {
                         if let Some(final_cipher) = crate::crypto::cipher::parse_cipher_ack(&ack) {
                             crypto_writer.rekey(final_cipher);
@@ -677,8 +717,8 @@ impl WarmPool {
         brutal_state: &BrutalState,
     ) -> Result<(CryptoReader<TunnelRead>, CryptoWriter<TunnelWrite>)> {
         let addr = crate::net_util::join_host_port(&cfg.server_host, cfg.server_port);
-        use std::os::unix::io::AsRawFd;
         use std::net::SocketAddr;
+        use std::os::unix::io::AsRawFd;
 
         // 解析服务器地址 (v4 优先, 与上游 connect_smart 一致的策略)。
         let mut addrs: Vec<SocketAddr> = tokio::net::lookup_host(&addr).await?.collect();
@@ -697,18 +737,37 @@ impl WarmPool {
             #[cfg(unix)]
             unsafe {
                 let idle: libc::c_int = 15;
-                libc::setsockopt(raw_fd, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, &idle as *const _ as *const libc::c_void, std::mem::size_of_val(&idle) as libc::socklen_t);
+                libc::setsockopt(
+                    raw_fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_KEEPIDLE,
+                    &idle as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&idle) as libc::socklen_t,
+                );
                 let intvl: libc::c_int = 5;
-                libc::setsockopt(raw_fd, libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, &intvl as *const _ as *const libc::c_void, std::mem::size_of_val(&intvl) as libc::socklen_t);
+                libc::setsockopt(
+                    raw_fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_KEEPINTVL,
+                    &intvl as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&intvl) as libc::socklen_t,
+                );
                 let cnt: libc::c_int = 3;
-                libc::setsockopt(raw_fd, libc::IPPROTO_TCP, libc::TCP_KEEPCNT, &cnt as *const _ as *const libc::c_void, std::mem::size_of_val(&cnt) as libc::socklen_t);
+                libc::setsockopt(
+                    raw_fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_KEEPCNT,
+                    &cnt as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&cnt) as libc::socklen_t,
+                );
             }
             // ⚠️ protect 必须在 connect 之前 (SO_MARK 影响路由选择)
             crate::protect::protect(raw_fd);
             // Brutal 拥塞控制 (仅 config 配了 brutal_rate_mbps 时): 直接对裸 fd 设置。
             if brutal_state.configured_rate.is_some() {
-                let current_rate =
-                    brutal_state.current_rate.load(std::sync::atomic::Ordering::Relaxed);
+                let current_rate = brutal_state
+                    .current_rate
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 crate::proxy::brutal::apply_brutal(sock.as_raw_fd(), current_rate);
             }
             // 8s 超时: 黑洞路由 (丢 SYN 不回 RST) 下 connect 会挂到内核 tcp_syn_retries (~127s)。
@@ -722,7 +781,9 @@ impl WarmPool {
                     continue;
                 }
                 Err(_) => {
-                    last_err = Some(anyhow::anyhow!("connect to {addr} timed out (8s, 黑洞路由?)"));
+                    last_err = Some(anyhow::anyhow!(
+                        "connect to {addr} timed out (8s, 黑洞路由?)"
+                    ));
                     continue;
                 }
             }
@@ -764,7 +825,11 @@ impl WarmPool {
         let out = timeout(Duration::from_secs(15), underlying.connect(&target))
             .await
             .map_err(|_| {
-                anyhow::anyhow!("经 underlying 连 {}:{} 超时 (15s)", cfg.server_host, cfg.server_port)
+                anyhow::anyhow!(
+                    "经 underlying 连 {}:{} 超时 (15s)",
+                    cfg.server_host,
+                    cfg.server_port
+                )
             })??;
         let (mut read_half, mut write_half) = tokio::io::split(out);
         let hs = Self::do_fake_tls(&mut read_half, &mut write_half, cfg).await?;
@@ -790,7 +855,11 @@ impl WarmPool {
     /// 伪装 TLS 握手 (发带 token 的 ClientHello / 读 server flight / 发假 Finished tail)。
     /// 返回 client_random (会话密钥派生的 salt) + 可选 ecdh (PFS 开时)。
     /// 对任意字节流生效 (物理 TCP / underlying 流)。
-    async fn do_fake_tls<Rd, Wr>(rh: &mut Rd, wh: &mut Wr, cfg: &PoolConfig) -> Result<ClientHandshake>
+    async fn do_fake_tls<Rd, Wr>(
+        rh: &mut Rd,
+        wh: &mut Wr,
+        cfg: &PoolConfig,
+    ) -> Result<ClientHandshake>
     where
         Rd: tokio::io::AsyncRead + Unpin,
         Wr: tokio::io::AsyncWrite + Unpin,
@@ -836,7 +905,10 @@ impl WarmPool {
             }
             None => None,
         };
-        Ok(ClientHandshake { client_random, ecdh })
+        Ok(ClientHandshake {
+            client_random,
+            ecdh,
+        })
     }
 
     /// O(1) 复杂度提取连接.
@@ -849,7 +921,7 @@ impl WarmPool {
     /// 10s 还拿不到就报错让调用方放弃这次请求, 不堆积.
     ///
     /// 反馈式弹性 (v0.4.2+) 仪表化: 入口记录开始时间, 拿到 tunnel 后若总耗时
-    /// > 50ms 计一次 wait_event. Manager task 用此比率决定下周期 target 调整.
+    /// \> 50ms 计一次 wait_event. Manager task 用此比率决定下周期 target 调整.
     /// 从空闲队列中弹出一个未过期且健康的隧道 (0 延迟)。
     async fn pop_valid_tunnel(&self) -> Option<Tunnel> {
         let mut q = self.queue.lock().await;
@@ -928,7 +1000,10 @@ impl WarmPool {
                 let res = Box::pin(Self::connect_upstream(&cfg, &brutal)).await;
                 if let Ok(ref _t) = res {
                     let elapsed = start.elapsed().as_millis() as u64;
-                    stats.write().unwrap_or_else(|e| e.into_inner()).record_latency(elapsed);
+                    stats
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .record_latency(elapsed);
                     debug!("WarmPool: On-Demand 即时建连就绪 ({}ms)", elapsed);
                 }
                 res
@@ -958,7 +1033,8 @@ impl WarmPool {
                     res_pool
                 }
             }
-        }).await;
+        })
+        .await;
 
         match result {
             Ok(Ok(tunnel)) => Ok(tunnel),
@@ -1003,7 +1079,9 @@ impl WarmPool {
     }
 
     pub async fn update_brutal_rate(&self, new_rate: u64) {
-        self.brutal_state.current_rate.store(new_rate, std::sync::atomic::Ordering::Relaxed);
+        self.brutal_state
+            .current_rate
+            .store(new_rate, std::sync::atomic::Ordering::Relaxed);
 
         // ⚠️ 修 F2 (fd 复用竞态): 旧实现先把裸 fd 收集进 Vec、出锁后再 spawn_blocking
         // setsockopt。快照与 syscall 之间, idle tunnel 可能被 get() 弹出并 Drop(关 fd)、
@@ -1033,7 +1111,11 @@ impl WarmPool {
                 total += 1;
             }
         }
-        tracing::debug!("Updated Brutal rate to {} bps for {} tunnels (idle + active)", new_rate, total);
+        tracing::debug!(
+            "Updated Brutal rate to {} bps for {} tunnels (idle + active)",
+            new_rate,
+            total
+        );
     }
 
     pub fn active_fd_guard(&self, fd: i32) -> ActiveFdGuard {

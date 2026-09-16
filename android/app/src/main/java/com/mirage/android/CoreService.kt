@@ -900,11 +900,19 @@ class CoreService : VpnService() {
                 try {
                     startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
                 } catch (e2: Throwable) {
-                    startForeground(1, notif)
+                    try {
+                        startForeground(1, notif)
+                    } catch (e3: Throwable) {
+                        log("[core] startForeground 兜底失败: ${e3.message}")
+                    }
                 }
             }
         } else {
-            startForeground(1, notif)
+            try {
+                startForeground(1, notif)
+            } catch (e: Throwable) {
+                log("[core] startForeground 失败: ${e.message}")
+            }
         }
     }
 

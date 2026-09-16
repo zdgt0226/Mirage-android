@@ -1,5 +1,5 @@
 use hmac::{Hmac, Mac};
-use poly1305::{Poly1305, universal_hash::KeyInit};
+use poly1305::{universal_hash::KeyInit, Poly1305};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
@@ -33,18 +33,18 @@ fn poly1305_tag(password_bytes: &[u8], ts_bytes: &[u8; 8], random_prefix: &[u8; 
 pub fn make_session_token(password: &str) -> [u8; 32] {
     let mut random_prefix = [0u8; 8];
     rand::fill(&mut random_prefix);
-    
+
     let ts = crate::time_sync::now_sec();
     let ts_bytes = ts.to_be_bytes();
-    
+
     let mask = ts_mask(password, &random_prefix);
     let mut hidden_ts = [0u8; 8];
     for i in 0..8 {
         hidden_ts[i] = ts_bytes[i] ^ mask[i];
     }
-    
+
     let tag = poly1305_tag(password.as_bytes(), &ts_bytes, &random_prefix);
-    
+
     let mut token = [0u8; 32];
     token[0..8].copy_from_slice(&random_prefix);
     token[8..16].copy_from_slice(&hidden_ts);
@@ -109,7 +109,10 @@ impl TokenReplayCache {
             // 也会被误判重放, 但同时攻击者的重放也被拦, 保守安全大于可用性.
             // 100k 桶 = 60 秒内 10 万个不同 token, 正常业务达不到这个量级,
             // 只有 DDoS 才可能触发, 拒绝是对的.
-            tracing::warn!("ReplayCache bucket saturated at {} entries, denying (fail-closed)", bucket.len());
+            tracing::warn!(
+                "ReplayCache bucket saturated at {} entries, denying (fail-closed)",
+                bucket.len()
+            );
             return false;
         }
 
@@ -127,16 +130,16 @@ static REPLAY_CACHE: OnceLock<TokenReplayCache> = OnceLock::new();
 pub fn verify_session_token(password: &str, token: &[u8; 32], tolerance_secs: u64) -> bool {
     let mut random_prefix = [0u8; 8];
     random_prefix.copy_from_slice(&token[0..8]);
-    
+
     let mut hidden_ts = [0u8; 8];
     hidden_ts.copy_from_slice(&token[8..16]);
-    
+
     let mask = ts_mask(password, &random_prefix);
     let mut ts_bytes = [0u8; 8];
     for i in 0..8 {
         ts_bytes[i] = hidden_ts[i] ^ mask[i];
     }
-    
+
     let expected_tag = poly1305_tag(password.as_bytes(), &ts_bytes, &random_prefix);
     // 常量时间比 16B tag (握手 token 校验是真正的网络侧信道面)。用 subtle 而非手写累加器,
     // 带优化屏障, 与全仓 ct 比较统一。
@@ -144,7 +147,7 @@ pub fn verify_session_token(password: &str, token: &[u8; 32], tolerance_secs: u6
     if !bool::from(expected_tag[..].ct_eq(&token[16..32])) {
         return false;
     }
-    
+
     let ts = u64::from_be_bytes(ts_bytes);
     let now = crate::time_sync::now_sec();
 
@@ -182,12 +185,24 @@ mod tolerance_tests {
         let tol = 60;
         // 窗口内 (含边界)
         assert!(ts_within_tolerance(now, now, tol), "ts==now");
-        assert!(ts_within_tolerance(now - 60, now, tol), "客户端慢 60s (边界)");
-        assert!(ts_within_tolerance(now + 60, now, tol), "客户端快 60s (边界)");
+        assert!(
+            ts_within_tolerance(now - 60, now, tol),
+            "客户端慢 60s (边界)"
+        );
+        assert!(
+            ts_within_tolerance(now + 60, now, tol),
+            "客户端快 60s (边界)"
+        );
         assert!(ts_within_tolerance(now - 59, now, tol));
         // 窗口外, 两个方向都要拒
-        assert!(!ts_within_tolerance(now - 61, now, tol), "客户端慢 61s 应拒");
-        assert!(!ts_within_tolerance(now + 61, now, tol), "客户端快 61s 应拒");
+        assert!(
+            !ts_within_tolerance(now - 61, now, tol),
+            "客户端慢 61s 应拒"
+        );
+        assert!(
+            !ts_within_tolerance(now + 61, now, tol),
+            "客户端快 61s 应拒"
+        );
         // 更小的容差更严
         assert!(!ts_within_tolerance(now - 11, now, 10), "±10s: 慢 11s 应拒");
         assert!(ts_within_tolerance(now - 9, now, 10), "±10s: 慢 9s 应过");
@@ -202,7 +217,10 @@ mod replay_tests {
     fn first_seen_ok_replay_denied() {
         let c = TokenReplayCache::new();
         assert!(c.check_and_insert(1000, b"tok-a", 2), "首见应放行");
-        assert!(!c.check_and_insert(1000, b"tok-a", 2), "重放同 token 应拒绝");
+        assert!(
+            !c.check_and_insert(1000, b"tok-a", 2),
+            "重放同 token 应拒绝"
+        );
         // 不同 token 同桶各自独立
         assert!(c.check_and_insert(1000, b"tok-b", 2));
     }
@@ -228,7 +246,7 @@ mod replay_tests {
         // 淘汰后即便"重放"也无所谓 (ts 校验在 check_and_insert 之前已挡下)。
         let c = TokenReplayCache::new();
         assert!(c.check_and_insert(1000, b"ancient", 2)); // 桶 100
-        // hwm 推到 130 (桶 130), 桶 100 早已 < hwm-2 被淘汰
+                                                          // hwm 推到 130 (桶 130), 桶 100 早已 < hwm-2 被淘汰
         assert!(c.check_and_insert(1300, b"now", 2));
         // 桶 100 已淘汰, 这里返回 true 只是证明桶确实被清 (内存有界); 真实场景 ts 校验已挡
         assert!(c.check_and_insert(1000, b"ancient", 2));

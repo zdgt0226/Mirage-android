@@ -1,9 +1,9 @@
-use crate::proxy::pool::{WarmPool, PoolConfig};
-use std::sync::RwLock;
+use crate::config::{Config, OutboundConfig};
+use crate::proxy::pool::{PoolConfig, WarmPool};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::RwLock;
 use tracing::info;
-use crate::config::{Config, OutboundConfig};
 
 pub enum OutboundNode {
     Mirage {
@@ -66,11 +66,16 @@ impl OutboundNode {
 
     pub fn is_healthy(self: &Arc<Self>) -> bool {
         match &**self {
-            Self::Mirage { pool, .. } => pool.stats.read().unwrap_or_else(|e| e.into_inner()).is_healthy(),
+            Self::Mirage { pool, .. } => pool
+                .stats
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_healthy(),
             Self::Direct { .. } | Self::Block { .. } => true,
-            Self::Urltest { children, .. } | Self::Fallback { children, .. } | Self::Selector { children, .. } | Self::LoadBalance { children, .. } => {
-                children.iter().any(|c| c.is_healthy())
-            }
+            Self::Urltest { children, .. }
+            | Self::Fallback { children, .. }
+            | Self::Selector { children, .. }
+            | Self::LoadBalance { children, .. } => children.iter().any(|c| c.is_healthy()),
         }
     }
 
@@ -78,23 +83,45 @@ impl OutboundNode {
         match &**self {
             Self::Mirage { rtt_ms, .. } => {
                 let rtt = rtt_ms.load(std::sync::atomic::Ordering::Relaxed);
-                if rtt > 0 && rtt != u64::MAX { Some(rtt) } else { None }
-            },
+                if rtt > 0 && rtt != u64::MAX {
+                    Some(rtt)
+                } else {
+                    None
+                }
+            }
             Self::Direct { .. } | Self::Block { .. } => None,
-            Self::Urltest { .. } | Self::Fallback { .. } | Self::Selector { .. } | Self::LoadBalance { .. } => {
+            Self::Urltest { .. }
+            | Self::Fallback { .. }
+            | Self::Selector { .. }
+            | Self::LoadBalance { .. } => {
                 let leaf = self.resolve_leaf();
-                if std::ptr::eq(&*leaf, &**self) { None } else { leaf.latency_rtt_ms() }
+                if std::ptr::eq(&*leaf, &**self) {
+                    None
+                } else {
+                    leaf.latency_rtt_ms()
+                }
             }
         }
     }
 
     pub fn latency_http_ms(self: &Arc<Self>) -> Option<u64> {
         match &**self {
-            Self::Mirage { pool, .. } => pool.stats.read().unwrap_or_else(|e| e.into_inner()).latency_ms(),
+            Self::Mirage { pool, .. } => pool
+                .stats
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .latency_ms(),
             Self::Direct { .. } | Self::Block { .. } => None,
-            Self::Urltest { .. } | Self::Fallback { .. } | Self::Selector { .. } | Self::LoadBalance { .. } => {
+            Self::Urltest { .. }
+            | Self::Fallback { .. }
+            | Self::Selector { .. }
+            | Self::LoadBalance { .. } => {
                 let leaf = self.resolve_leaf();
-                if std::ptr::eq(&*leaf, &**self) { None } else { leaf.latency_http_ms() }
+                if std::ptr::eq(&*leaf, &**self) {
+                    None
+                } else {
+                    leaf.latency_http_ms()
+                }
             }
         }
     }
@@ -127,7 +154,7 @@ impl OutboundNode {
     pub fn purge_idle(&self) {
         match self {
             Self::Mirage { pool, .. } => pool.purge_idle(),
-            Self::Direct { .. } | Self::Block { .. } => {},
+            Self::Direct { .. } | Self::Block { .. } => {}
             Self::Urltest { children, .. }
             | Self::Fallback { children, .. }
             | Self::Selector { children, .. }
@@ -143,7 +170,7 @@ impl OutboundNode {
     pub fn shutdown(&self) {
         match self {
             Self::Mirage { pool, .. } => pool.shutdown(),
-            Self::Direct { .. } | Self::Block { .. } => {},
+            Self::Direct { .. } | Self::Block { .. } => {}
             Self::Urltest { children, .. }
             | Self::Fallback { children, .. }
             | Self::Selector { children, .. }
@@ -157,13 +184,20 @@ impl OutboundNode {
 
     pub fn resolve_leaf(self: &Arc<Self>) -> Arc<OutboundNode> {
         match &**self {
-            Self::Urltest { tag, children, tolerance_ms, test_type, current } => {
+            Self::Urltest {
+                tag,
+                children,
+                tolerance_ms,
+                test_type,
+                current,
+            } => {
                 let candidates: Vec<_> = children.iter().filter(|c| c.is_healthy()).collect();
                 if candidates.is_empty() {
                     return self.clone();
                 }
 
-                let with_lat: Vec<_> = candidates.iter()
+                let with_lat: Vec<_> = candidates
+                    .iter()
                     .filter_map(|c| c.latency_ms(test_type).map(|lat| (c, lat)))
                     .collect();
 
@@ -178,9 +212,7 @@ impl OutboundNode {
                     return candidates[0].resolve_leaf();
                 }
 
-                let best = with_lat.into_iter()
-                    .min_by_key(|&(_, lat)| lat)
-                    .unwrap();
+                let best = with_lat.into_iter().min_by_key(|&(_, lat)| lat).unwrap();
 
                 let mut curr_guard = current.write().unwrap_or_else(|e| e.into_inner());
                 if let Some(curr) = curr_guard.as_ref() {
@@ -207,7 +239,9 @@ impl OutboundNode {
                     self.clone()
                 }
             }
-            Self::Selector { children, current, .. } => {
+            Self::Selector {
+                children, current, ..
+            } => {
                 let curr_guard = current.read().unwrap_or_else(|e| e.into_inner());
                 if let Some(c) = curr_guard.as_ref() {
                     return c.resolve_leaf();
@@ -222,9 +256,13 @@ impl OutboundNode {
                 let healthy: Vec<_> = children.iter().filter(|c| c.is_healthy()).collect();
                 if healthy.is_empty() {
                     // 无健康成员: 退回首个 child 去试 (别 self.clone 成死路)。
-                    return children.first().map(|c| c.resolve_leaf()).unwrap_or_else(|| self.clone());
+                    return children
+                        .first()
+                        .map(|c| c.resolve_leaf())
+                        .unwrap_or_else(|| self.clone());
                 }
-                let i = (next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % healthy.len() as u64) as usize;
+                let i = (next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    % healthy.len() as u64) as usize;
                 healthy[i].resolve_leaf()
             }
             _ => self.clone(),
@@ -244,7 +282,9 @@ impl OutboundNode {
                 // Socket 直连 (免解析); Domain 交给 tokio 解析。
                 let s = match target {
                     Address::Socket(sa) => tokio::net::TcpStream::connect(sa).await?,
-                    Address::Domain(h, p) => tokio::net::TcpStream::connect((h.as_str(), *p)).await?,
+                    Address::Domain(h, p) => {
+                        tokio::net::TcpStream::connect((h.as_str(), *p)).await?
+                    }
                 };
                 let _ = s.set_nodelay(true);
                 Ok(OutStream::Direct(s))
@@ -274,10 +314,14 @@ impl OutboundNode {
                         }
                     };
                     match tunnel.writer.send_data(&hdr).await {
-                        Ok(()) => return Ok(OutStream::Mirage(crate::proxy::mirage_stream::MirageStream::from_tunnel(tunnel))),
+                        Ok(()) => {
+                            return Ok(OutStream::Mirage(
+                                crate::proxy::mirage_stream::MirageStream::from_tunnel(tunnel),
+                            ))
+                        }
                         Err(e) => {
                             tracing::warn!("[Outbound] 隧道发送目标头失败 (attempt={attempt}): {e}, 自动丢弃半死连接并获取新隧道重试");
-                            last_err = Some(e.into());
+                            last_err = Some(e);
                         }
                     }
                 }
@@ -285,7 +329,10 @@ impl OutboundNode {
             }
             // 移动端裁剪: WG / Shadowsocks 出站已移除 (见 OutboundNode 枚举注释)。
             // resolve_leaf 已把组解到叶子; 仍是组 = 无健康成员可用。
-            other => anyhow::bail!("outbound `{}` 无可用叶子出站, 无法连接 {target}", other.tag()),
+            other => anyhow::bail!(
+                "outbound `{}` 无可用叶子出站, 无法连接 {target}",
+                other.tag()
+            ),
         }
     }
 }
@@ -344,6 +391,7 @@ impl std::fmt::Display for Address {
 }
 
 /// 统一出站字节流。闭集枚举 (无 vtable); 各变体都 Unpin, poll 委托直接 `Pin::new`。
+#[allow(clippy::large_enum_variant)]
 pub enum OutStream {
     Direct(tokio::net::TcpStream),
     Mirage(crate::proxy::mirage_stream::MirageStream),
@@ -406,11 +454,25 @@ impl OutboundManager {
     }
     /// 建一个 Mirage 出站节点 (含 WarmPool)。`underlying` 为链式代理 (Mirage-over-X) 的底层出站,
     /// None = 直连。抽出以便 Pass 1 (无 underlying) 与 Pass 2 (依赖 underlying 已建) 复用。
-    fn build_mirage(oc: &OutboundConfig, underlying: Option<Arc<OutboundNode>>) -> Arc<OutboundNode> {
+    fn build_mirage(
+        oc: &OutboundConfig,
+        underlying: Option<Arc<OutboundNode>>,
+    ) -> Arc<OutboundNode> {
         let OutboundConfig::Mirage {
-            tag, server, server_port, password, camouflage_host, pool_size,
-            brutal_rate_mbps, brutal_base_rtt_ms, pfs, ..
-        } = oc else { unreachable!("build_mirage 只接受 Mirage 配置") };
+            tag,
+            server,
+            server_port,
+            password,
+            camouflage_host,
+            pool_size,
+            brutal_rate_mbps,
+            brutal_base_rtt_ms,
+            pfs,
+            ..
+        } = oc
+        else {
+            unreachable!("build_mirage 只接受 Mirage 配置")
+        };
         let pool_cfg = Arc::new(PoolConfig {
             server_host: server.clone(),
             server_port: *server_port,
@@ -423,7 +485,9 @@ impl OutboundManager {
         let bytes_per_sec = brutal_rate_mbps.map(|m| m * 125_000);
         let brutal_state = Arc::new(crate::proxy::pool::BrutalState {
             configured_rate: bytes_per_sec,
-            current_rate: Arc::new(std::sync::atomic::AtomicU64::new(bytes_per_sec.unwrap_or(8_000_000))),
+            current_rate: Arc::new(std::sync::atomic::AtomicU64::new(
+                bytes_per_sec.unwrap_or(8_000_000),
+            )),
             base_rtt: *brutal_base_rtt_ms,
             active_fds: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         });
@@ -448,7 +512,9 @@ impl OutboundManager {
         // Pass 1: Leaf nodes
         for oc in &cfg.outbounds {
             match oc {
-                OutboundConfig::Mirage { tag, underlying, .. } => {
+                OutboundConfig::Mirage {
+                    tag, underlying, ..
+                } => {
                     // 无 underlying → 直连 Mirage, Pass 1 立即建。有 underlying → 依赖另一出站,
                     // 延后到 Pass 2 (等 underlying 建好再注入)。
                     if underlying.is_some() {
@@ -458,10 +524,16 @@ impl OutboundManager {
                     }
                 }
                 OutboundConfig::Direct { tag } => {
-                    outbounds.insert(tag.clone(), Arc::new(OutboundNode::Direct { tag: tag.clone() }));
+                    outbounds.insert(
+                        tag.clone(),
+                        Arc::new(OutboundNode::Direct { tag: tag.clone() }),
+                    );
                 }
                 OutboundConfig::Block { tag } => {
-                    outbounds.insert(tag.clone(), Arc::new(OutboundNode::Block { tag: tag.clone() }));
+                    outbounds.insert(
+                        tag.clone(),
+                        Arc::new(OutboundNode::Block { tag: tag.clone() }),
+                    );
                 }
                 _ => {
                     deferred.push(oc);
@@ -471,10 +543,20 @@ impl OutboundManager {
 
         // Auto-add implicit direct and block if not present
         if !outbounds.contains_key("direct") {
-            outbounds.insert("direct".to_string(), Arc::new(OutboundNode::Direct { tag: "direct".to_string() }));
+            outbounds.insert(
+                "direct".to_string(),
+                Arc::new(OutboundNode::Direct {
+                    tag: "direct".to_string(),
+                }),
+            );
         }
         if !outbounds.contains_key("block") {
-            outbounds.insert("block".to_string(), Arc::new(OutboundNode::Block { tag: "block".to_string() }));
+            outbounds.insert(
+                "block".to_string(),
+                Arc::new(OutboundNode::Block {
+                    tag: "block".to_string(),
+                }),
+            );
         }
 
         // Pass 2: Group nodes (Urltest, Fallback) - simplified fixpoint resolution
@@ -485,7 +567,12 @@ impl OutboundManager {
 
             for oc in pending {
                 // Mirage-over-X: 依赖 underlying 出站已建, 建好则注入并建本节点, 否则下一轮再试。
-                if let OutboundConfig::Mirage { tag, underlying: Some(utag), .. } = oc {
+                if let OutboundConfig::Mirage {
+                    tag,
+                    underlying: Some(utag),
+                    ..
+                } = oc
+                {
                     match outbounds.get(utag) {
                         Some(u) => {
                             let u = u.clone();
@@ -499,19 +586,37 @@ impl OutboundManager {
 
                 let mut hc_test_type = "ping".to_string();
                 let (tag, child_tags, otype, _interval, tolerance) = match oc {
-                    OutboundConfig::Urltest { tag, outbounds, interval, tolerance, url, test_type } => {
+                    OutboundConfig::Urltest {
+                        tag,
+                        outbounds,
+                        interval,
+                        tolerance,
+                        url,
+                        test_type,
+                    } => {
                         hc_test_type = test_type.clone();
                         let _ = (url, interval);
                         (tag, outbounds, "urltest", *interval, *tolerance)
                     }
-                    OutboundConfig::Fallback { tag, outbounds, interval, url } => {
+                    OutboundConfig::Fallback {
+                        tag,
+                        outbounds,
+                        interval,
+                        url,
+                    } => {
                         let _ = (url, interval);
                         (tag, outbounds, "fallback", *interval, 0)
                     }
                     OutboundConfig::Selector { tag, outbounds } => {
                         (tag, outbounds, "selector", 0, 0)
                     }
-                    OutboundConfig::LoadBalance { tag, outbounds, url, interval, .. } => {
+                    OutboundConfig::LoadBalance {
+                        tag,
+                        outbounds,
+                        url,
+                        interval,
+                        ..
+                    } => {
                         let _ = (url, interval);
                         (tag, outbounds, "load_balance", *interval, 0)
                     }
@@ -601,4 +706,3 @@ impl Drop for OutboundManager {
         self.shutdown();
     }
 }
-

@@ -23,8 +23,8 @@
 use rand::RngExt;
 
 const GREASE_VALUES: &[u16] = &[
-    0x0A0A, 0x1A1A, 0x2A2A, 0x3A3A, 0x4A4A, 0x5A5A, 0x6A6A, 0x7A7A,
-    0x8A8A, 0x9A9A, 0xAAAA, 0xBABA, 0xCACA, 0xDADA, 0xEAEA, 0xFAFA,
+    0x0A0A, 0x1A1A, 0x2A2A, 0x3A3A, 0x4A4A, 0x5A5A, 0x6A6A, 0x7A7A, 0x8A8A, 0x9A9A, 0xAAAA, 0xBABA,
+    0xCACA, 0xDADA, 0xEAEA, 0xFAFA,
 ];
 
 fn get_grease() -> u16 {
@@ -36,8 +36,8 @@ fn get_grease() -> u16 {
 
 /// 15 个 cipher suite (GREASE 在运行时前置). 顺序即真实 Chromium 广播顺序.
 const CHROMIUM_CIPHERS: [u16; 15] = [
-    0x1301, 0x1302, 0x1303, 0xC02B, 0xC02F, 0xC02C, 0xC030, 0xCCA9, 0xCCA8,
-    0xC013, 0xC014, 0x009C, 0x009D, 0x002F, 0x0035,
+    0x1301, 0x1302, 0x1303, 0xC02B, 0xC02F, 0xC02C, 0xC030, 0xCCA9, 0xCCA8, 0xC013, 0xC014, 0x009C,
+    0x009D, 0x002F, 0x0035,
 ];
 
 /// supported_groups (0x000a) GREASE 之后的曲线: X25519MLKEM768, X25519, P256, P384.
@@ -45,8 +45,8 @@ const CHROMIUM_GROUPS: [u16; 4] = [0x11EC, 0x001D, 0x0017, 0x0018];
 
 /// signature_algorithms (0x000d) 完整内容 (含 2B 列表长度前缀), 11 个算法.
 const SIGALGS: &[u8] = &[
-    0x00, 0x16, 0x09, 0x04, 0x09, 0x05, 0x09, 0x06, 0x04, 0x03, 0x08, 0x04,
-    0x04, 0x01, 0x05, 0x03, 0x08, 0x05, 0x05, 0x01, 0x08, 0x06, 0x06, 0x01,
+    0x00, 0x16, 0x09, 0x04, 0x09, 0x05, 0x09, 0x06, 0x04, 0x03, 0x08, 0x04, 0x04, 0x01, 0x05, 0x03,
+    0x08, 0x05, 0x05, 0x01, 0x08, 0x06, 0x06, 0x01,
 ];
 
 /// ALPN (0x0010): h2, http/1.1.
@@ -203,7 +203,12 @@ fn ech_grease_ext() -> Vec<u8> {
     ext(0xfe0d, &c)
 }
 
-fn assemble(session_id: &[u8], client_random: &[u8], cipher_suites: &[u8], extensions: &[u8]) -> Vec<u8> {
+fn assemble(
+    session_id: &[u8],
+    client_random: &[u8],
+    cipher_suites: &[u8],
+    extensions: &[u8],
+) -> Vec<u8> {
     let mut hello_body = Vec::new();
     hello_body.extend_from_slice(b"\x03\x03");
     hello_body.extend_from_slice(client_random);
@@ -249,14 +254,14 @@ pub fn build_chromium(sni_bytes: &[u8], session_id: &[u8], client_random: &[u8])
         supported_versions_ext(g_sv),
         ech_grease_ext(),
         ext(0x000b, EC_POINT_FORMATS),
-        ext(0x0017, b""),                 // extended_master_secret
+        ext(0x0017, b""), // extended_master_secret
         supported_groups_ext(g_groups),
         ext(0x002d, PSK_MODES),
-        ext(0x0023, b""),                 // session_ticket
-        ext(0xff01, b"\x00"),             // renegotiation_info
+        ext(0x0023, b""),     // session_ticket
+        ext(0xff01, b"\x00"), // renegotiation_info
         ext(0x0010, ALPN),
         ext(0x0005, STATUS_REQUEST),
-        ext(0x0012, b""),                 // signed_certificate_timestamp
+        ext(0x0012, b""), // signed_certificate_timestamp
         sni_ext(sni_bytes),
         ext(0x44cd, ALPS),
         ext(0x000d, SIGALGS),
@@ -361,7 +366,11 @@ fn ff_ech_ext() -> Vec<u8> {
     let mut c = Vec::with_capacity(281);
     c.push(0x00); // outer
     c.extend_from_slice(&0x0001u16.to_be_bytes()); // kdf HKDF-SHA256
-    let aead = if rand::rng().random_bool(0.5) { 0x0001u16 } else { 0x0003u16 };
+    let aead = if rand::rng().random_bool(0.5) {
+        0x0001u16
+    } else {
+        0x0003u16
+    };
     c.extend_from_slice(&aead.to_be_bytes());
     let mut cid = [0u8; 1];
     rand::fill(&mut cid);
@@ -388,21 +397,21 @@ pub fn build_firefox(sni_bytes: &[u8], session_id: &[u8], client_random: &[u8]) 
     // 17 个扩展, 固定顺序 (跨 4 样本一致)
     let exts_list: Vec<Vec<u8>> = vec![
         sni_ext(sni_bytes),
-        ext(0x0017, b""),                    // extended_master_secret
-        ext(0xff01, b"\x00"),                // renegotiation_info
+        ext(0x0017, b""),     // extended_master_secret
+        ext(0xff01, b"\x00"), // renegotiation_info
         ff_supported_groups_ext(),
         ext(0x000b, EC_POINT_FORMATS),
-        ext(0x0023, b""),                    // session_ticket
+        ext(0x0023, b""), // session_ticket
         ext(0x0010, ALPN),
         ext(0x0005, STATUS_REQUEST),
-        ext(0x0022, FIREFOX_DELEG_CREDS),    // delegated_credentials
-        ext(0x0012, b""),                    // signed_certificate_timestamp
+        ext(0x0022, FIREFOX_DELEG_CREDS), // delegated_credentials
+        ext(0x0012, b""),                 // signed_certificate_timestamp
         ff_key_share_ext(),
         ff_supported_versions_ext(),
         ext(0x000d, FIREFOX_SIGALGS),
-        ext(0x002d, PSK_MODES),              // psk_key_exchange_modes
-        ext(0x001c, b"\x40\x01"),            // record_size_limit
-        ext(0x001b, FIREFOX_CERT_COMPRESS),  // compress_certificate
+        ext(0x002d, PSK_MODES),             // psk_key_exchange_modes
+        ext(0x001c, b"\x40\x01"),           // record_size_limit
+        ext(0x001b, FIREFOX_CERT_COMPRESS), // compress_certificate
         ff_ech_ext(),
     ];
     let mut exts = Vec::new();
@@ -540,7 +549,10 @@ fn pick_profile() -> Profile {
 pub fn build_client_hello(server_name: &str, session_id: &[u8; 32]) -> (Vec<u8>, [u8; 32]) {
     let mut client_random = [0u8; 32];
     rand::fill(&mut client_random);
-    (build_client_hello_with_random(server_name, session_id, &client_random), client_random)
+    (
+        build_client_hello_with_random(server_name, session_id, &client_random),
+        client_random,
+    )
 }
 
 /// 同 [`build_client_hello`], 但 client_random 由调用方指定。
@@ -560,7 +572,11 @@ pub fn build_client_hello_with_random(
 }
 
 /// 指定 profile 构造 (供 dump/测试用, 不轮换)。
-pub fn build_with_profile(profile: Profile, server_name: &str, session_id: &[u8; 32]) -> (Vec<u8>, [u8; 32]) {
+pub fn build_with_profile(
+    profile: Profile,
+    server_name: &str,
+    session_id: &[u8; 32],
+) -> (Vec<u8>, [u8; 32]) {
     let mut client_random = [0u8; 32];
     rand::fill(&mut client_random);
     let record = match profile {
@@ -616,34 +632,31 @@ pub fn ja4(ch: &[u8]) -> String {
         exts.push(et);
         match et {
             0x0000 => sni = true,
-            0x0010
-                if data.len() >= 3 => {
-                    let pl = data[2] as usize;
-                    if data.len() >= 3 + pl {
-                        alpn = Some(String::from_utf8_lossy(&data[3..3 + pl]).to_string());
-                    }
+            0x0010 if data.len() >= 3 => {
+                let pl = data[2] as usize;
+                if data.len() >= 3 + pl {
+                    alpn = Some(String::from_utf8_lossy(&data[3..3 + pl]).to_string());
                 }
-            0x002b
-                if !data.is_empty() => {
-                    let vl = data[0] as usize;
-                    let mut k = 1;
-                    while k + 1 < 1 + vl && k + 1 < data.len() {
-                        let v = u16::from_be_bytes([data[k], data[k + 1]]);
-                        if !is_grease_val(v) && v > max_ver {
-                            max_ver = v;
-                        }
-                        k += 2;
+            }
+            0x002b if !data.is_empty() => {
+                let vl = data[0] as usize;
+                let mut k = 1;
+                while k + 1 < 1 + vl && k + 1 < data.len() {
+                    let v = u16::from_be_bytes([data[k], data[k + 1]]);
+                    if !is_grease_val(v) && v > max_ver {
+                        max_ver = v;
                     }
+                    k += 2;
                 }
-            0x000d
-                if data.len() >= 2 => {
-                    let sl = u16::from_be_bytes([data[0], data[1]]) as usize;
-                    let mut k = 2;
-                    while k + 1 < 2 + sl && k + 1 < data.len() {
-                        sigalgs.push(u16::from_be_bytes([data[k], data[k + 1]]));
-                        k += 2;
-                    }
+            }
+            0x000d if data.len() >= 2 => {
+                let sl = u16::from_be_bytes([data[0], data[1]]) as usize;
+                let mut k = 2;
+                while k + 1 < 2 + sl && k + 1 < data.len() {
+                    sigalgs.push(u16::from_be_bytes([data[k], data[k + 1]]));
+                    k += 2;
                 }
+            }
             _ => {}
         }
     }
@@ -676,14 +689,30 @@ pub fn ja4(ch: &[u8]) -> String {
     // JA4_b: 排序 cipher (去 GREASE) 的哈希
     let mut cs = ciphers.clone();
     cs.sort();
-    let cs_str = cs.iter().map(|c| format!("{:04x}", c)).collect::<Vec<_>>().join(",");
+    let cs_str = cs
+        .iter()
+        .map(|c| format!("{:04x}", c))
+        .collect::<Vec<_>>()
+        .join(",");
     let b = h12(&cs_str);
 
     // JA4_c: 排序扩展 (去 GREASE/SNI(0000)/ALPN(0010)) + "_" + sigalgs (原序) 的哈希
-    let mut es: Vec<u16> = exts.iter().copied().filter(|e| *e != 0x0000 && *e != 0x0010).collect();
+    let mut es: Vec<u16> = exts
+        .iter()
+        .copied()
+        .filter(|e| *e != 0x0000 && *e != 0x0010)
+        .collect();
     es.sort();
-    let es_str = es.iter().map(|e| format!("{:04x}", e)).collect::<Vec<_>>().join(",");
-    let sa_str = sigalgs.iter().map(|s| format!("{:04x}", s)).collect::<Vec<_>>().join(",");
+    let es_str = es
+        .iter()
+        .map(|e| format!("{:04x}", e))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sa_str = sigalgs
+        .iter()
+        .map(|s| format!("{:04x}", s))
+        .collect::<Vec<_>>()
+        .join(",");
     let c = h12(&format!("{}_{}", es_str, sa_str));
 
     format!("{}_{}_{}", a, b, c)

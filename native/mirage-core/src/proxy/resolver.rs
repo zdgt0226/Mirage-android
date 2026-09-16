@@ -162,7 +162,10 @@ pub async fn connect_smart(target: &str) -> io::Result<TcpStream> {
             Ok(r) => r,
             Err(_) => Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                format!("connect {addr} timed out after {}s", PER_ATTEMPT_TIMEOUT.as_secs()),
+                format!(
+                    "connect {addr} timed out after {}s",
+                    PER_ATTEMPT_TIMEOUT.as_secs()
+                ),
             )),
         };
     }
@@ -178,13 +181,19 @@ pub async fn connect_smart(target: &str) -> io::Result<TcpStream> {
             Err(_) => {
                 last_err = Some(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    format!("connect {addr} timed out after {}s", PER_ATTEMPT_TIMEOUT.as_secs()),
+                    format!(
+                        "connect {addr} timed out after {}s",
+                        PER_ATTEMPT_TIMEOUT.as_secs()
+                    ),
                 ))
             }
         }
     }
     Err(last_err.unwrap_or_else(|| {
-        io::Error::new(io::ErrorKind::AddrNotAvailable, format!("all addresses failed for {host}"))
+        io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            format!("all addresses failed for {host}"),
+        )
     }))
 }
 
@@ -194,8 +203,8 @@ pub async fn connect_smart(target: &str) -> io::Result<TcpStream> {
 /// (后续 resolve_cached 会 IPv4 优先排序)。两族并发查, 任一有结果即可用。
 async fn resolve_via_tcp(host: &str, upstream: SocketAddr) -> io::Result<Vec<IpAddr>> {
     let (ra, raaaa) = tokio::join!(
-        query_one(host, 1, upstream),   // A
-        query_one(host, 28, upstream),  // AAAA
+        query_one(host, 1, upstream),  // A
+        query_one(host, 28, upstream), // AAAA
     );
     let mut ips = Vec::new();
     // 保留真实错误: 两族都失败时 (超时/连不上/域名非法) 把最后一个真错误抛出, 便于诊断
@@ -240,7 +249,12 @@ async fn query_one(host: &str, qtype: u16, upstream: SocketAddr) -> io::Result<V
     };
     tokio::time::timeout(DNS_TCP_TIMEOUT, fut)
         .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, format!("DNS-over-TCP {upstream} 超时")))?
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("DNS-over-TCP {upstream} 超时"),
+            )
+        })?
 }
 
 /// 构造一个标准 DNS 查询报文 (RD=1, QDCOUNT=1, 单问题)。域名 label 空或 >63 → None。
@@ -262,8 +276,8 @@ fn build_dns_query(host: &str, qtype: u16) -> Option<Vec<u8>> {
     q.push(0); // root label
     q.extend_from_slice(&qtype.to_be_bytes());
     q.extend_from_slice(&[0x00, 0x01]); // QCLASS=IN
-    // TCP DNS 长度前缀是 u16: 报文超 65535 则前缀会截断、与实际字节错位。真实域名远不及此,
-    // 但畸形超长 host 得拦住, 否则帧错位。
+                                        // TCP DNS 长度前缀是 u16: 报文超 65535 则前缀会截断、与实际字节错位。真实域名远不及此,
+                                        // 但畸形超长 host 得拦住, 否则帧错位。
     if q.len() > u16::MAX as usize {
         return None;
     }
@@ -305,7 +319,10 @@ fn parse_answer_ips(resp: &[u8], expect_tx: u16) -> Vec<IpAddr> {
         }
         match (rtype, rdlen) {
             (1, 4) => ips.push(IpAddr::V4(Ipv4Addr::new(
-                resp[pos], resp[pos + 1], resp[pos + 2], resp[pos + 3],
+                resp[pos],
+                resp[pos + 1],
+                resp[pos + 2],
+                resp[pos + 3],
             ))),
             (28, 16) => {
                 let mut o = [0u8; 16];
@@ -361,10 +378,16 @@ mod dns_tcp_tests {
         // header: tx=0x1234, QR=1, QD=1, AN=2
         let mut r = vec![0x12, 0x34, 0x81, 0x80, 0, 1, 0, 2, 0, 0, 0, 0];
         // question: 1"a" 3"com" 0 A IN
-        r.push(1); r.push(b'a'); r.push(3); r.extend_from_slice(b"com"); r.push(0);
+        r.push(1);
+        r.push(b'a');
+        r.push(3);
+        r.extend_from_slice(b"com");
+        r.push(0);
         r.extend_from_slice(&[0, 1, 0, 1]);
         // answer 1: name ptr(0xC00C) A IN ttl rdlen=4 1.2.3.4
-        r.extend_from_slice(&[0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0, 0, 1, 44, 0, 4, 1, 2, 3, 4]);
+        r.extend_from_slice(&[
+            0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0, 0, 1, 44, 0, 4, 1, 2, 3, 4,
+        ]);
         // answer 2: name ptr AAAA rdlen=16 ::1
         r.extend_from_slice(&[0xC0, 0x0C, 0x00, 0x1C, 0x00, 0x01, 0, 0, 1, 44, 0, 16]);
         r.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
@@ -378,9 +401,15 @@ mod dns_tcp_tests {
     fn parse_rejects_txid_mismatch() {
         // 与上同报文 (tx=0x1234, 含合法 A/AAAA), 但期望 tx=0x9999 → 视为注入/串号, 返回空。
         let mut r = vec![0x12, 0x34, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0];
-        r.push(1); r.push(b'a'); r.push(3); r.extend_from_slice(b"com"); r.push(0);
+        r.push(1);
+        r.push(b'a');
+        r.push(3);
+        r.extend_from_slice(b"com");
+        r.push(0);
         r.extend_from_slice(&[0, 1, 0, 1]);
-        r.extend_from_slice(&[0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0, 0, 1, 44, 0, 4, 1, 2, 3, 4]);
+        r.extend_from_slice(&[
+            0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0, 0, 1, 44, 0, 4, 1, 2, 3, 4,
+        ]);
         assert!(parse_answer_ips(&r, 0x9999).is_empty()); // ID 不匹配
         assert_eq!(parse_answer_ips(&r, 0x1234).len(), 1); // ID 匹配则正常解出
     }
@@ -389,9 +418,15 @@ mod dns_tcp_tests {
     fn parse_rejects_non_response_qr() {
         // tx 匹配但 QR=0 (查询而非响应, flags 高位 0) → 拒。
         let mut r = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 1, 0, 0, 0, 0];
-        r.push(1); r.push(b'a'); r.push(3); r.extend_from_slice(b"com"); r.push(0);
+        r.push(1);
+        r.push(b'a');
+        r.push(3);
+        r.extend_from_slice(b"com");
+        r.push(0);
         r.extend_from_slice(&[0, 1, 0, 1]);
-        r.extend_from_slice(&[0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0, 0, 1, 44, 0, 4, 1, 2, 3, 4]);
+        r.extend_from_slice(&[
+            0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0, 0, 1, 44, 0, 4, 1, 2, 3, 4,
+        ]);
         assert!(parse_answer_ips(&r, 0x1234).is_empty());
     }
 
@@ -414,4 +449,3 @@ mod dns_tcp_tests {
         assert!(ips.iter().any(|ip| ip.is_ipv4()), "至少一个 A 记录");
     }
 }
-

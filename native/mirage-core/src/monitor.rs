@@ -1,7 +1,7 @@
+use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::collections::VecDeque;
 
 pub static GLOBAL_UP: AtomicU64 = AtomicU64::new(0);
 pub static GLOBAL_DOWN: AtomicU64 = AtomicU64::new(0);
@@ -63,12 +63,15 @@ static RATE_SAMPLES: std::sync::Mutex<VecDeque<(std::time::Instant, u64, u64)>> 
 /// 速率 = 最近两个样本的字节差 / 时间差。
 pub fn sample() -> (u64, u64, f64, f64) {
     let now = std::time::Instant::now();
-    let (up, down) = (GLOBAL_UP.load(Ordering::Relaxed), GLOBAL_DOWN.load(Ordering::Relaxed));
+    let (up, down) = (
+        GLOBAL_UP.load(Ordering::Relaxed),
+        GLOBAL_DOWN.load(Ordering::Relaxed),
+    );
     let mut q = RATE_SAMPLES.lock().unwrap_or_else(|e| e.into_inner());
     let (mut up_rate, mut down_rate) = (0f64, 0f64);
     if let Some((prev_t, prev_up, prev_dn)) = q.back() {
         let dt = now.duration_since(*prev_t).as_secs_f64();
-        if dt >= 0.8 && dt > 0.0 {
+        if dt >= 0.8 {
             up_rate = (up - prev_up) as f64 / dt;
             down_rate = (down - prev_dn) as f64 / dt;
             q.push_back((now, up, down));
@@ -101,7 +104,7 @@ impl MemoryWriter {
         let (tx, rx) = std::sync::mpsc::sync_channel(2000);
         let buffer = Arc::new(Mutex::new(VecDeque::with_capacity(LOG_CAP)));
         let bg_buf = buffer.clone();
-        
+
         std::thread::spawn(move || {
             while let Ok(s) = rx.recv() {
                 let mut q = bg_buf.lock().unwrap_or_else(|e| e.into_inner());
@@ -111,11 +114,8 @@ impl MemoryWriter {
                 q.push_back(s);
             }
         });
-        
-        Self {
-            tx,
-            buffer,
-        }
+
+        Self { tx, buffer }
     }
 
     /// 追加一行到环形日志。
@@ -130,6 +130,10 @@ impl MemoryWriter {
     pub fn len(&self) -> usize {
         let q = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
         q.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn get_logs(&self) -> Vec<String> {
@@ -164,7 +168,7 @@ impl Write for MemoryWriter {
         if s.trim().is_empty() {
             return Ok(buf.len());
         }
-        
+
         if self.tx.try_send(s).is_err() {
             DROPPED_LOGS.fetch_add(1, Ordering::Relaxed);
         }
@@ -270,12 +274,12 @@ pub struct ConnectionRecord {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RecentRequestRecord {
     pub id: u64,
-    pub protocol: String,       // "TCP", "UDP", "DNS"
-    pub target: String,         // "api.github.com:443"
-    pub resolved_ip: String,    // "140.82.112.4" or "198.18.0.2 (Fake-IP)"
-    pub matched_rule: String,   // "Rule: DOMAIN-SUFFIX (github.com)" or "GEOIP: CN"
-    pub outbound: String,       // "PROXY" / "DIRECT" / "BLOCK"
-    pub status: String,         // "Active", "Closed (200 OK)", "Closed (Timeout)"
+    pub protocol: String,     // "TCP", "UDP", "DNS"
+    pub target: String,       // "api.github.com:443"
+    pub resolved_ip: String,  // "140.82.112.4" or "198.18.0.2 (Fake-IP)"
+    pub matched_rule: String, // "Rule: DOMAIN-SUFFIX (github.com)" or "GEOIP: CN"
+    pub outbound: String,     // "PROXY" / "DIRECT" / "BLOCK"
+    pub status: String,       // "Active", "Closed (200 OK)", "Closed (Timeout)"
     pub up_bytes: u64,
     pub down_bytes: u64,
     pub start_time: u64,
@@ -306,7 +310,8 @@ pub struct LiveConnection {
 
 const RECENT_REQUESTS_CAP: usize = 300;
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
-static ACTIVE_CONNECTIONS: Mutex<Option<std::collections::HashMap<u64, LiveConnection>>> = Mutex::new(None);
+static ACTIVE_CONNECTIONS: Mutex<Option<std::collections::HashMap<u64, LiveConnection>>> =
+    Mutex::new(None);
 static RECENT_REQUESTS: Mutex<Option<VecDeque<RecentRequestRecord>>> = Mutex::new(None);
 
 /// 注册新连接 (兼容旧调用，无 source_app)
@@ -316,7 +321,12 @@ pub fn record_conn_start(
     resolved_ip: &str,
     matched_rule: &str,
     outbound: &str,
-) -> (u64, Arc<AtomicU64>, Arc<AtomicU64>, Arc<tokio::sync::Notify>) {
+) -> (
+    u64,
+    Arc<AtomicU64>,
+    Arc<AtomicU64>,
+    Arc<tokio::sync::Notify>,
+) {
     record_conn_start_with_app(protocol, target, resolved_ip, matched_rule, outbound, None)
 }
 
@@ -328,7 +338,12 @@ pub fn record_conn_start_with_app(
     matched_rule: &str,
     outbound: &str,
     source_app: Option<String>,
-) -> (u64, Arc<AtomicU64>, Arc<AtomicU64>, Arc<tokio::sync::Notify>) {
+) -> (
+    u64,
+    Arc<AtomicU64>,
+    Arc<AtomicU64>,
+    Arc<tokio::sync::Notify>,
+) {
     let id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
     let start_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -392,10 +407,18 @@ pub fn record_conn_timings(id: u64, dns_ms: u32, connect_ms: u32, tls_ms: u32, t
     let mut q_lock = RECENT_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(q) = q_lock.as_mut() {
         if let Some(item) = q.iter_mut().find(|r| r.id == id) {
-            if dns_ms > 0 { item.dns_ms = dns_ms; }
-            if connect_ms > 0 { item.connect_ms = connect_ms; }
-            if tls_ms > 0 { item.tls_ms = tls_ms; }
-            if ttfb_ms > 0 { item.ttfb_ms = ttfb_ms; }
+            if dns_ms > 0 {
+                item.dns_ms = dns_ms;
+            }
+            if connect_ms > 0 {
+                item.connect_ms = connect_ms;
+            }
+            if tls_ms > 0 {
+                item.tls_ms = tls_ms;
+            }
+            if ttfb_ms > 0 {
+                item.ttfb_ms = ttfb_ms;
+            }
         }
     }
 }
@@ -447,7 +470,13 @@ pub fn close_all_connections() -> usize {
 }
 
 /// 关闭连接：从活跃连接列表中彻底移除，并在 Recent Requests 队列中标记完成状态与精准耗时。
-pub fn record_conn_close_with_duration(id: u64, up: u64, down: u64, status: &str, duration_ms: u64) {
+pub fn record_conn_close_with_duration(
+    id: u64,
+    up: u64,
+    down: u64,
+    status: &str,
+    duration_ms: u64,
+) {
     {
         let mut lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(map) = lock.as_mut() {
@@ -512,7 +541,7 @@ pub fn get_connections_json() -> String {
     if let Some(map) = lock.as_ref() {
         let mut refs: Vec<&LiveConnection> = map.values().collect();
         // 按照最新的连接排在前面
-        refs.sort_by(|a, b| b.id.cmp(&a.id));
+        refs.sort_by_key(|a| std::cmp::Reverse(a.id));
         let count = refs.len().min(100);
         let list: Vec<ConnectionRecordRef<'_>> = refs[..count]
             .iter()

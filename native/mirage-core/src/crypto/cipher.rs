@@ -119,12 +119,19 @@ pub const CIPHER_ACK_TYPE: u8 = 0x03;
 
 /// 构造 CIPHER_NEGO 帧。
 pub fn build_cipher_nego(client_supports_aes: bool) -> [u8; 3] {
-    [CIPHER_NEGO_SENTINEL[0], CIPHER_NEGO_SENTINEL[1], client_supports_aes as u8]
+    [
+        CIPHER_NEGO_SENTINEL[0],
+        CIPHER_NEGO_SENTINEL[1],
+        client_supports_aes as u8,
+    ]
 }
 
 /// 一帧是否 CIPHER_NEGO (服务端识别客户端首帧)。是则返回 client_supports_aes。
 pub fn parse_cipher_nego(frame: &[u8]) -> Option<bool> {
-    if frame.len() == 3 && frame[0] == CIPHER_NEGO_SENTINEL[0] && frame[1] == CIPHER_NEGO_SENTINEL[1] {
+    if frame.len() == 3
+        && frame[0] == CIPHER_NEGO_SENTINEL[0]
+        && frame[1] == CIPHER_NEGO_SENTINEL[1]
+    {
         Some(frame[2] != 0)
     } else {
         None
@@ -163,7 +170,11 @@ mod tests {
         for c in [Cipher::ChaCha20Poly1305, Cipher::Aes256Gcm] {
             assert_eq!(Cipher::from_wire(c.to_wire()), Some(c));
         }
-        assert_eq!(Cipher::ChaCha20Poly1305.to_wire(), 0x01, "ChaCha20=0x01 (兼容值)");
+        assert_eq!(
+            Cipher::ChaCha20Poly1305.to_wire(),
+            0x01,
+            "ChaCha20=0x01 (兼容值)"
+        );
         assert_eq!(Cipher::Aes256Gcm.to_wire(), 0x02);
         assert_eq!(Cipher::from_wire(0x00), None);
         assert_eq!(Cipher::from_wire(0xFF), None);
@@ -180,7 +191,11 @@ mod tests {
     fn negotiate_only_aes_when_both() {
         use Cipher::*;
         assert_eq!(negotiate(true, true), Aes256Gcm, "两端都 AES → AES");
-        assert_eq!(negotiate(true, false), ChaCha20Poly1305, "一端无 AES → ChaCha20");
+        assert_eq!(
+            negotiate(true, false),
+            ChaCha20Poly1305,
+            "一端无 AES → ChaCha20"
+        );
         assert_eq!(negotiate(false, true), ChaCha20Poly1305);
         assert_eq!(negotiate(false, false), ChaCha20Poly1305);
     }

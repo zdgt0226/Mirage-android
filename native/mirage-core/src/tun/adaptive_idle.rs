@@ -16,10 +16,10 @@
 //! 4. **原子持久化 (Crash-Safe Disk Persistence - Phase 3)**：
 //!    - 支持原子保存/恢复用户专属历史画像字典。
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 /// 流量分类枚举
@@ -211,7 +211,9 @@ pub fn is_im_or_push_port(port: u16) -> bool {
 /// 检查 IP 是否属于腾讯/微信等常用国内 IM 网段 (包含腾讯云与微信接入机)
 #[inline]
 pub fn is_tencent_or_im_ip(ip: std::net::IpAddr) -> bool {
-    let std::net::IpAddr::V4(v4) = ip else { return false };
+    let std::net::IpAddr::V4(v4) = ip else {
+        return false;
+    };
     let u = u32::from(v4);
     // 腾讯公网典型地址段 (覆盖微信 Mars / 腾讯云接入机):
     // 183.2.0.0/15 (0xB7020000 / 0xFFFE0000)
@@ -249,13 +251,17 @@ pub fn is_tencent_or_im_ip(ip: std::net::IpAddr) -> bool {
 #[inline]
 pub fn is_image_or_media_cdn(host: &str) -> bool {
     let h = host.trim_end_matches('.');
-    CDN_SUFFIXES.iter().any(|&suffix| h == suffix || h.ends_with(&format!(".{suffix}")))
+    CDN_SUFFIXES
+        .iter()
+        .any(|&suffix| h == suffix || h.ends_with(&format!(".{suffix}")))
 }
 
 #[inline]
 pub fn is_push_or_im_service(host: &str) -> bool {
     let h = host.trim_end_matches('.');
-    IM_SUFFIXES.iter().any(|&suffix| h == suffix || h.ends_with(&format!(".{suffix}")))
+    IM_SUFFIXES
+        .iter()
+        .any(|&suffix| h == suffix || h.ends_with(&format!(".{suffix}")))
 }
 
 /// 全局域名自学习画像存储器
@@ -366,14 +372,21 @@ pub fn classify_connection(
         }
     }
 
-    (TrafficCategory::GeneralApi, Duration::from_secs(TrafficCategory::GeneralApi.default_idle_secs()))
+    (
+        TrafficCategory::GeneralApi,
+        Duration::from_secs(TrafficCategory::GeneralApi.default_idle_secs()),
+    )
 }
 
 fn record_initial_profile(domain: String, category: TrafficCategory, is_static: bool) {
     with_profiles_write(|map| {
         if map.len() >= MAX_PROFILES_CAPACITY && !map.contains_key(&domain) {
             // LRU: 清理最早未访问的一个条目
-            if let Some(oldest_key) = map.iter().min_by_key(|(_, p)| p.last_seen_secs).map(|(k, _)| k.clone()) {
+            if let Some(oldest_key) = map
+                .iter()
+                .min_by_key(|(_, p)| p.last_seen_secs)
+                .map(|(k, _)| k.clone())
+            {
                 map.remove(&oldest_key);
             }
         }
@@ -439,14 +452,20 @@ pub fn record_conn_metrics(
     is_reused: bool,
 ) {
     let Some(dom) = domain else { return };
-    if dom.is_empty() { return; }
+    if dom.is_empty() {
+        return;
+    }
     let dom_lower = dom.to_lowercase();
     let now = unix_now_secs();
 
     with_profiles_write(|map| {
         if map.len() >= MAX_PROFILES_CAPACITY && !map.contains_key(&dom_lower) {
             // LRU 淘汰最久未见条目
-            if let Some(oldest_key) = map.iter().min_by_key(|(_, p)| p.last_seen_secs).map(|(k, _)| k.clone()) {
+            if let Some(oldest_key) = map
+                .iter()
+                .min_by_key(|(_, p)| p.last_seen_secs)
+                .map(|(k, _)| k.clone())
+            {
                 map.remove(&oldest_key);
             }
         }
@@ -492,17 +511,19 @@ pub fn record_conn_metrics(
 
         // --- Phase 2: 闭环强化逻辑 (仅对非静态规则的 GeneralApi 生效) ---
         // 静态规则 (MediaCdn/PushIm/Interactive) 超时绝对锁定，不参与衰减
-        if !profile.is_static_rule && profile.category == TrafficCategory::GeneralApi {
-            if close_reason == CloseReason::IdleTimeout && !is_reused {
-                // 僵尸空闲衰减: 达到超时但全程无多请求复用，向下收敛 20% (下限 20s，防止移动端连接池抖动)
-                let old_timeout = profile.assigned_idle_secs;
-                profile.assigned_idle_secs = (profile.assigned_idle_secs * 8 / 10).max(20);
-                profile.zombie_decays += 1;
-                debug!(
-                    "[AdaptiveProfile] 域名 [{}] 触发僵尸空闲衰减 (超时未复用): {}s -> {}s (累计衰减 {} 次)",
-                    dom_lower, old_timeout, profile.assigned_idle_secs, profile.zombie_decays
-                );
-            }
+        if !profile.is_static_rule
+            && profile.category == TrafficCategory::GeneralApi
+            && close_reason == CloseReason::IdleTimeout
+            && !is_reused
+        {
+            // 僵尸空闲衰减: 达到超时但全程无多请求复用，向下收敛 20% (下限 20s，防止移动端连接池抖动)
+            let old_timeout = profile.assigned_idle_secs;
+            profile.assigned_idle_secs = (profile.assigned_idle_secs * 8 / 10).max(20);
+            profile.zombie_decays += 1;
+            debug!(
+                "[AdaptiveProfile] 域名 [{}] 触发僵尸空闲衰减 (超时未复用): {}s -> {}s (累计衰减 {} 次)",
+                dom_lower, old_timeout, profile.assigned_idle_secs, profile.zombie_decays
+            );
         }
 
         // 如果不是静态锁定的规则且样本数 >= 2，进行基础分类自适应演进
@@ -543,7 +564,7 @@ pub fn get_learned_profiles_json() -> String {
     with_profiles_read(|map| {
         let mut list: Vec<&DomainProfile> = map.values().collect();
         // 按采样次数由大到小排序
-        list.sort_by(|a, b| b.sample_count.cmp(&a.sample_count));
+        list.sort_by_key(|b| std::cmp::Reverse(b.sample_count));
         serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
     })
 }
@@ -572,7 +593,10 @@ pub fn load_profiles_from_disk(file_path: &str) -> std::io::Result<usize> {
             map.insert(p.domain.clone(), p);
         }
     });
-    debug!("[AdaptiveProfile] 成功从 {} 恢复加载 {} 条历史流量画像", file_path, count);
+    debug!(
+        "[AdaptiveProfile] 成功从 {} 恢复加载 {} 条历史流量画像",
+        file_path, count
+    );
     Ok(count)
 }
 
@@ -582,34 +606,79 @@ mod tests {
 
     #[test]
     fn test_static_classification() {
-        assert_eq!(classify_connection(None, 22, None, None).0, TrafficCategory::Interactive);
-        assert_eq!(classify_connection(None, 443, Some("pbs.twimg.com"), None).0, TrafficCategory::MediaCdn);
-        assert_eq!(classify_connection(None, 443, Some("mtalk.google.com"), None).0, TrafficCategory::PushIm);
-        assert_eq!(classify_connection(None, 443, Some("img.alicdn.com"), None).0, TrafficCategory::MediaCdn);
-        assert_eq!(classify_connection(None, 443, Some("i0.hdslb.com"), None).0, TrafficCategory::MediaCdn);
-        assert_eq!(classify_connection(None, 443, Some("weixin.qq.com"), None).0, TrafficCategory::PushIm);
-        assert_eq!(classify_connection(None, 443, Some("push.aliyun.com"), None).0, TrafficCategory::PushIm);
-        assert_eq!(classify_connection(None, 443, Some("api.unknown-service.org"), None).0, TrafficCategory::GeneralApi);
+        assert_eq!(
+            classify_connection(None, 22, None, None).0,
+            TrafficCategory::Interactive
+        );
+        assert_eq!(
+            classify_connection(None, 443, Some("pbs.twimg.com"), None).0,
+            TrafficCategory::MediaCdn
+        );
+        assert_eq!(
+            classify_connection(None, 443, Some("mtalk.google.com"), None).0,
+            TrafficCategory::PushIm
+        );
+        assert_eq!(
+            classify_connection(None, 443, Some("img.alicdn.com"), None).0,
+            TrafficCategory::MediaCdn
+        );
+        assert_eq!(
+            classify_connection(None, 443, Some("i0.hdslb.com"), None).0,
+            TrafficCategory::MediaCdn
+        );
+        assert_eq!(
+            classify_connection(None, 443, Some("weixin.qq.com"), None).0,
+            TrafficCategory::PushIm
+        );
+        assert_eq!(
+            classify_connection(None, 443, Some("push.aliyun.com"), None).0,
+            TrafficCategory::PushIm
+        );
+        assert_eq!(
+            classify_connection(None, 443, Some("api.unknown-service.org"), None).0,
+            TrafficCategory::GeneralApi
+        );
 
         // 验证微信专用端口与腾讯网段识别
-        assert_eq!(classify_connection(None, 14000, None, None).0, TrafficCategory::PushIm);
+        assert_eq!(
+            classify_connection(None, 14000, None, None).0,
+            TrafficCategory::PushIm
+        );
         let tencent_ip: std::net::IpAddr = "183.3.226.35".parse().unwrap();
-        assert_eq!(classify_connection(Some(tencent_ip), 8080, None, None).0, TrafficCategory::PushIm);
-        assert_eq!(classify_connection(Some(tencent_ip), 8080, None, None).1.as_secs(), 900);
+        assert_eq!(
+            classify_connection(Some(tencent_ip), 8080, None, None).0,
+            TrafficCategory::PushIm
+        );
+        assert_eq!(
+            classify_connection(Some(tencent_ip), 8080, None, None)
+                .1
+                .as_secs(),
+            900
+        );
     }
 
     #[test]
     fn test_app_attribution_push_im() {
         // 任意非标端口或未知域名，只要包名识别为 IM/推送，均判定为 PushIm (900s)
-        let (cat, timeout) = classify_connection(None, 12345, Some("custom.example.org"), Some("com.tencent.mm"));
+        let (cat, timeout) = classify_connection(
+            None,
+            12345,
+            Some("custom.example.org"),
+            Some("com.tencent.mm"),
+        );
         assert_eq!(cat, TrafficCategory::PushIm);
         assert_eq!(timeout.as_secs(), 900);
 
-        let (cat2, timeout2) = classify_connection(None, 8888, None, Some("org.telegram.messenger"));
+        let (cat2, timeout2) =
+            classify_connection(None, 8888, None, Some("org.telegram.messenger"));
         assert_eq!(cat2, TrafficCategory::PushIm);
         assert_eq!(timeout2.as_secs(), 900);
 
-        assert_eq!(compute_adaptive_timeout(None, 8888, None, true, Some("com.tencent.mobileqq")).as_secs(), 900);
+        assert_eq!(
+            compute_adaptive_timeout(None, 8888, None, true, Some("com.tencent.mobileqq"))
+                .as_secs(),
+            900
+        );
     }
 
     #[test]
@@ -620,12 +689,22 @@ mod tests {
 
         // 模拟 3 次大下行图片流 (上行 500B, 下行 64KB)
         for _ in 0..3 {
-            record_conn_metrics(Some(domain), 500, 65536, 1500, CloseReason::ServerClosed, false);
+            record_conn_metrics(
+                Some(domain),
+                500,
+                65536,
+                1500,
+                CloseReason::ServerClosed,
+                false,
+            );
         }
 
         let (cat_learned, _) = classify_connection(None, 443, Some(domain), None);
         assert_eq!(cat_learned, TrafficCategory::MediaCdn);
-        assert_eq!(compute_adaptive_timeout(None, 443, Some(domain), true, None).as_secs(), 10);
+        assert_eq!(
+            compute_adaptive_timeout(None, 443, Some(domain), true, None).as_secs(),
+            10
+        );
     }
 
     #[test]
@@ -636,12 +715,22 @@ mod tests {
 
         // 模拟 3 次心跳小包 (上行 120B, 下行 180B, 持续 10 秒)
         for _ in 0..3 {
-            record_conn_metrics(Some(domain), 120, 180, 10000, CloseReason::ClientClosed, true);
+            record_conn_metrics(
+                Some(domain),
+                120,
+                180,
+                10000,
+                CloseReason::ClientClosed,
+                true,
+            );
         }
 
         let (cat_learned, _) = classify_connection(None, 443, Some(domain), None);
         assert_eq!(cat_learned, TrafficCategory::PushIm);
-        assert_eq!(compute_adaptive_timeout(None, 443, Some(domain), true, None).as_secs(), 900);
+        assert_eq!(
+            compute_adaptive_timeout(None, 443, Some(domain), true, None).as_secs(),
+            900
+        );
     }
 
     #[test]
@@ -650,7 +739,14 @@ mod tests {
         let _ = classify_connection(None, 443, Some(domain), None);
 
         // 1. 连接正常交互后由于短超时关闭 (上行 4KB, 下行 6KB, 持续 2s)
-        record_conn_metrics(Some(domain), 4096, 6144, 2000, CloseReason::IdleTimeout, true);
+        record_conn_metrics(
+            Some(domain),
+            4096,
+            6144,
+            2000,
+            CloseReason::IdleTimeout,
+            true,
+        );
 
         // 2. 模拟 App 立即发生重连 (由于刚刚被 IdleTimeout 掐断, 触发 1.5x 惩罚)
         let (_, timeout_after_churn) = classify_connection(None, 443, Some(domain), None);
@@ -664,7 +760,14 @@ mod tests {
         let _ = classify_connection(None, 443, Some(domain), None);
 
         // 连接被 IdleTimeout 关闭且全程未被复用 (is_reused = false) -> 触发 0.8x 僵尸衰减
-        record_conn_metrics(Some(domain), 4096, 6144, 2000, CloseReason::IdleTimeout, false);
+        record_conn_metrics(
+            Some(domain),
+            4096,
+            6144,
+            2000,
+            CloseReason::IdleTimeout,
+            false,
+        );
 
         // 验证画像内 assigned_idle_secs 已缩减: 30 * 0.8 = 24s
         let profile = with_profiles_read(|map| map.get(domain).cloned()).unwrap();
@@ -680,7 +783,14 @@ mod tests {
         assert_eq!(timeout.as_secs(), 10);
 
         // 1. 模拟 IdleTimeout 且无复用 -> 静态规则不应被 Zombie 衰减
-        record_conn_metrics(Some(static_cdn), 500, 20000, 1000, CloseReason::IdleTimeout, false);
+        record_conn_metrics(
+            Some(static_cdn),
+            500,
+            20000,
+            1000,
+            CloseReason::IdleTimeout,
+            false,
+        );
         let (_, timeout_after_idle) = classify_connection(None, 443, Some(static_cdn), None);
         assert_eq!(timeout_after_idle.as_secs(), 10);
 
@@ -697,7 +807,14 @@ mod tests {
     #[test]
     fn test_disk_persistence() {
         let test_file = "/tmp/test_traffic_profiles.json";
-        record_conn_metrics(Some("persist.example.com"), 1234, 5678, 2000, CloseReason::ServerClosed, true);
+        record_conn_metrics(
+            Some("persist.example.com"),
+            1234,
+            5678,
+            2000,
+            CloseReason::ServerClosed,
+            true,
+        );
         save_profiles_to_disk(test_file).expect("Save to disk should succeed");
 
         assert!(std::path::Path::new(test_file).exists());
@@ -706,4 +823,3 @@ mod tests {
         let _ = std::fs::remove_file(test_file);
     }
 }
-

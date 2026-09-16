@@ -31,6 +31,7 @@ impl RuleAction {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
             "direct" => RuleAction::Direct,
@@ -49,6 +50,7 @@ pub enum MatchLogic {
 }
 
 impl MatchLogic {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s.trim().to_ascii_uppercase().as_str() {
             "AND" => MatchLogic::And,
@@ -72,7 +74,13 @@ pub enum ConditionKind {
 }
 
 impl ConditionKind {
-    pub fn matches(&self, domain: Option<&str>, ip: Option<IpAddr>, port: Option<u16>, protocol: Option<&str>) -> bool {
+    pub fn matches(
+        &self,
+        domain: Option<&str>,
+        ip: Option<IpAddr>,
+        port: Option<u16>,
+        protocol: Option<&str>,
+    ) -> bool {
         match self {
             ConditionKind::GeoSite(tag) => {
                 if let Some(d) = domain {
@@ -170,7 +178,13 @@ pub struct CompositeRule {
 }
 
 impl CompositeRule {
-    pub fn matches(&self, domain: Option<&str>, ip: Option<IpAddr>, port: Option<u16>, protocol: Option<&str>) -> bool {
+    pub fn matches(
+        &self,
+        domain: Option<&str>,
+        ip: Option<IpAddr>,
+        port: Option<u16>,
+        protocol: Option<&str>,
+    ) -> bool {
         if !self.enabled || self.conditions.is_empty() {
             return false;
         }
@@ -321,7 +335,10 @@ const LAN_DOMAIN_SUFFIXES: &[&str] = &[
 /// 判断域名是否属于局域网主机名、mDNS 或主流路由器后台管理域名
 pub fn is_lan_or_router_domain(domain: &str) -> bool {
     let d = domain.trim_end_matches('.').to_ascii_lowercase();
-    if LAN_ROUTER_EXACT_DOMAINS.iter().any(|&r| d == r || d.ends_with(&format!(".{r}"))) {
+    if LAN_ROUTER_EXACT_DOMAINS
+        .iter()
+        .any(|&r| d == r || d.ends_with(&format!(".{r}")))
+    {
         return true;
     }
     for &s in LAN_DOMAIN_SUFFIXES {
@@ -344,9 +361,15 @@ pub fn default_router_ip_for_domain(domain: &str) -> Option<IpAddr> {
         Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 2, 1)))
     } else if matches("fritz.box") {
         Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 178, 1)))
-    } else if matches("router.asus.com") || matches("asusrouter.com") || matches("tplogin.cn")
-        || matches("tplinkwifi.net") || matches("melogin.cn") || matches("falogin.cn")
-        || matches("hiwifi.com") || matches("netcore.cc") || matches("leike.cc")
+    } else if matches("router.asus.com")
+        || matches("asusrouter.com")
+        || matches("tplogin.cn")
+        || matches("tplinkwifi.net")
+        || matches("melogin.cn")
+        || matches("falogin.cn")
+        || matches("hiwifi.com")
+        || matches("netcore.cc")
+        || matches("leike.cc")
     {
         Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1)))
     } else {
@@ -375,7 +398,11 @@ pub fn is_cn_ip(ip: IpAddr) -> bool {
             let mut ranges: Vec<(u32, u32)> = crate::direct_cn_ipv4::CN_IPV4
                 .iter()
                 .map(|&(net, prefix)| {
-                    let mask = if prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
+                    let mask = if prefix == 0 {
+                        0
+                    } else {
+                        !0u32 << (32 - prefix)
+                    };
                     let start = net & mask;
                     let end = start | !mask;
                     (start, end)
@@ -387,7 +414,9 @@ pub fn is_cn_ip(ip: IpAddr) -> bool {
             for (s, e) in ranges {
                 if let Some(last) = merged.last_mut() {
                     if s <= last.1.saturating_add(1) {
-                        if e > last.1 { last.1 = e; }
+                        if e > last.1 {
+                            last.1 = e;
+                        }
                         continue;
                     }
                 }
@@ -426,7 +455,7 @@ pub fn is_cn_ip(ip: IpAddr) -> bool {
         // - 2001:da8::/32 (CERNET2 中国教育网)
         // - 2001:250::/32 (CSTNET 中国科技网)
         // - 2001:cc0::/32 (CERNET)
-        if (top >= 0x2408 && top <= 0x240f)
+        if (0x2408..=0x240f).contains(&top)
             || (top == 0x2400 && (segs[1] == 0x3200 || segs[1] == 0xda00))
             || (top == 0x2001 && (segs[1] == 0xda8 || segs[1] == 0x250 || segs[1] == 0xcc0))
         {
@@ -447,41 +476,139 @@ pub fn is_known_non_cn_domain(domain: &str) -> bool {
     let d = domain.trim_end_matches('.').to_ascii_lowercase();
     const NON_CN_ROOTS: &[&str] = &[
         // Google 生态
-        "google.com", "googleapis.com", "googlevideo.com", "gstatic.com", "ggpht.com",
-        "gvt1.com", "gvt2.com", "1e100.net", "googleusercontent.com",
-        "googleadservices.com", "googlesyndication.com", "google-analytics.com", "doubleclick.net",
-        "youtube.com", "youtu.be", "ytimg.com", "yt.be",
-        "android.com", "g.co", "goo.gl",
+        "google.com",
+        "googleapis.com",
+        "googlevideo.com",
+        "gstatic.com",
+        "ggpht.com",
+        "gvt1.com",
+        "gvt2.com",
+        "1e100.net",
+        "googleusercontent.com",
+        "googleadservices.com",
+        "googlesyndication.com",
+        "google-analytics.com",
+        "doubleclick.net",
+        "youtube.com",
+        "youtu.be",
+        "ytimg.com",
+        "yt.be",
+        "android.com",
+        "g.co",
+        "goo.gl",
         // Telegram
-        "telegram.org", "t.me", "telesco.pe", "tdesktop.com", "telegra.ph", "telegram.me",
+        "telegram.org",
+        "t.me",
+        "telesco.pe",
+        "tdesktop.com",
+        "telegra.ph",
+        "telegram.me",
         // Twitter / X
-        "twitter.com", "x.com", "twimg.com", "t.co",
+        "twitter.com",
+        "x.com",
+        "twimg.com",
+        "t.co",
         // Meta (Facebook, Instagram, WhatsApp, Threads)
-        "facebook.com", "fbcdn.net", "instagram.com", "cdninstagram.com", "whatsapp.com", "threads.net",
+        "facebook.com",
+        "fbcdn.net",
+        "instagram.com",
+        "cdninstagram.com",
+        "whatsapp.com",
+        "threads.net",
         // 国际流媒体
-        "netflix.com", "nflxvideo.net", "nflximg.net", "nflxext.com",
-        "spotify.com", "scdn.co", "spotifycdn.com",
-        "disneyplus.com", "disney.com", "hbo.com", "max.com", "paramountplus.com", "ted.com", "tedcdn.com",
+        "netflix.com",
+        "nflxvideo.net",
+        "nflximg.net",
+        "nflxext.com",
+        "spotify.com",
+        "scdn.co",
+        "spotifycdn.com",
+        "disneyplus.com",
+        "disney.com",
+        "hbo.com",
+        "max.com",
+        "paramountplus.com",
+        "ted.com",
+        "tedcdn.com",
         // 开发者平台与代码托管
-        "github.com", "githubusercontent.com", "github.io", "git.io",
-        "gitlab.com", "bitbucket.org", "docker.com", "docker.io", "npmjs.org", "npmjs.com", "pypi.org", "crates.io",
+        "github.com",
+        "githubusercontent.com",
+        "github.io",
+        "git.io",
+        "gitlab.com",
+        "bitbucket.org",
+        "docker.com",
+        "docker.io",
+        "npmjs.org",
+        "npmjs.com",
+        "pypi.org",
+        "crates.io",
         // AI 专区
-        "openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com",
-        "anthropic.com", "claude.ai", "x.ai", "grok.com", "midjourney.com",
-        "huggingface.co", "perplexity.ai", "cursor.com", "cursor.sh", "groq.com", "mistral.ai", "cohere.com",
+        "openai.com",
+        "chatgpt.com",
+        "oaistatic.com",
+        "oaiusercontent.com",
+        "anthropic.com",
+        "claude.ai",
+        "x.ai",
+        "grok.com",
+        "midjourney.com",
+        "huggingface.co",
+        "perplexity.ai",
+        "cursor.com",
+        "cursor.sh",
+        "groq.com",
+        "mistral.ai",
+        "cohere.com",
         // 国际社交与媒体
-        "tiktok.com", "tiktokv.com", "byteoversea.com", "ibytedtos.com", "musical.ly",
-        "wikipedia.org", "wikimedia.org", "reddit.com", "redd.it", "medium.com", "pinterest.com", "quora.com",
-        "discord.com", "discordapp.com", "discord.gg", "line.me", "kakao.com",
+        "tiktok.com",
+        "tiktokv.com",
+        "byteoversea.com",
+        "ibytedtos.com",
+        "musical.ly",
+        "wikipedia.org",
+        "wikimedia.org",
+        "reddit.com",
+        "redd.it",
+        "medium.com",
+        "pinterest.com",
+        "quora.com",
+        "discord.com",
+        "discordapp.com",
+        "discord.gg",
+        "line.me",
+        "kakao.com",
         // 云基础设施与企业服务
-        "cloudflare.com", "cloudflare-dns.com",
-        "apple.com", "icloud.com", "aaplimg.com", "mzstatic.com",
-        "microsoft.com", "live.com", "office.com", "azure.com", "bing.com", "windows.com", "msn.com",
-        "amazon.com", "amazonaws.com",
-        "steamcommunity.com", "steampowered.com", "epicgames.com", "playstation.com", "nintendo.com", "nintendo.net",
-        "notion.so", "figma.com", "slack.com",
+        "cloudflare.com",
+        "cloudflare-dns.com",
+        "apple.com",
+        "icloud.com",
+        "aaplimg.com",
+        "mzstatic.com",
+        "microsoft.com",
+        "live.com",
+        "office.com",
+        "azure.com",
+        "bing.com",
+        "windows.com",
+        "msn.com",
+        "amazon.com",
+        "amazonaws.com",
+        "steamcommunity.com",
+        "steampowered.com",
+        "epicgames.com",
+        "playstation.com",
+        "nintendo.com",
+        "nintendo.net",
+        "notion.so",
+        "figma.com",
+        "slack.com",
         // 国际支付与金融
-        "paypal.com", "stripe.com", "binance.com", "coinbase.com", "okx.com",
+        "paypal.com",
+        "stripe.com",
+        "binance.com",
+        "coinbase.com",
+        "okx.com",
     ];
     for &root in NON_CN_ROOTS {
         if d == root || d.ends_with(&format!(".{root}")) {
@@ -528,7 +655,10 @@ pub fn is_cn_domain(domain: &str) -> bool {
 }
 
 pub fn builtin_domains() -> Vec<String> {
-    crate::direct_cn_domains::CN_DOMAINS.iter().map(|s| s.to_string()).collect()
+    crate::direct_cn_domains::CN_DOMAINS
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 pub fn builtin_ip_count() -> usize {
@@ -536,16 +666,20 @@ pub fn builtin_ip_count() -> usize {
 }
 
 /// 规则命中统计: key = "rule_id|name|action", 值 = 命中次数
-fn rule_hits() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::atomic::AtomicU64>> {
-    static H: OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::atomic::AtomicU64>>> =
-        OnceLock::new();
+fn rule_hits(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::atomic::AtomicU64>> {
+    static H: OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::atomic::AtomicU64>>,
+    > = OnceLock::new();
     H.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
 fn record_rule_hit(id: &str, name: &str, action: &str) {
     let key = format!("{id}|{name}|{action}");
     let mut map = rule_hits().lock().unwrap_or_else(|e| e.into_inner());
-    map.entry(key).or_default().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    map.entry(key)
+        .or_default()
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn get_rule_hits() -> String {
@@ -553,9 +687,7 @@ pub fn get_rule_hits() -> String {
     let mut list: Vec<serde_json::Value> = Vec::new();
     for (key, hits) in map.iter() {
         let mut parts = key.splitn(3, '|');
-        if let (Some(id), Some(name), Some(action)) =
-            (parts.next(), parts.next(), parts.next())
-        {
+        if let (Some(id), Some(name), Some(action)) = (parts.next(), parts.next(), parts.next()) {
             list.push(serde_json::json!({
                 "kind": id,
                 "pattern": name,
@@ -568,7 +700,10 @@ pub fn get_rule_hits() -> String {
 }
 
 pub fn reset_rule_hits() {
-    rule_hits().lock().unwrap_or_else(|e| e.into_inner()).clear();
+    rule_hits()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 }
 
 /// 出站模式 (Outbound Mode)
@@ -579,11 +714,14 @@ static OUTBOUND_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8:
 
 pub fn set_outbound_mode(mode: u8) {
     OUTBOUND_MODE.store(mode, std::sync::atomic::Ordering::Relaxed);
-    tracing::info!("[ROUTER] 出站模式已切换为: {}", match mode {
-        1 => "全局代理 (GlobalProxy)",
-        2 => "直接连接 (Direct)",
-        _ => "规则分流 (Rule)",
-    });
+    tracing::info!(
+        "[ROUTER] 出站模式已切换为: {}",
+        match mode {
+            1 => "全局代理 (GlobalProxy)",
+            2 => "直接连接 (Direct)",
+            _ => "规则分流 (Rule)",
+        }
+    );
 }
 
 pub fn get_outbound_mode() -> u8 {
@@ -624,24 +762,44 @@ pub fn route_decision_sourced(
         // 拦截发往 Mirage 本地 DNS 虚拟地址 (198.19.0.53) 的 TCP 请求 (如 Android 14/15/16 DoT 853 端口探测)
         // 立即 Block 触发 RST，使 Android 系统 DnsResolver 0ms 快速回退到标准 UDP 53，杜绝 15 秒挂起
         if ip_addr == IpAddr::V4(std::net::Ipv4Addr::new(198, 19, 0, 53)) {
-            return (RuleAction::Block, DecisionSource::Lan, "Block: Local DNS Virtual IP TCP".to_string());
+            return (
+                RuleAction::Block,
+                DecisionSource::Lan,
+                "Block: Local DNS Virtual IP TCP".to_string(),
+            );
         }
         if is_private_ip(ip_addr) {
-            return (RuleAction::Direct, DecisionSource::Lan, "Private IP (LAN)".to_string());
+            return (
+                RuleAction::Direct,
+                DecisionSource::Lan,
+                "Private IP (LAN)".to_string(),
+            );
         }
     }
     if let Some(dom) = domain {
         if is_lan_or_router_domain(dom) {
-            return (RuleAction::Direct, DecisionSource::Lan, "Router / LAN Domain".to_string());
+            return (
+                RuleAction::Direct,
+                DecisionSource::Lan,
+                "Router / LAN Domain".to_string(),
+            );
         }
     }
 
     // 1. 全局模式判断 (Global Proxy / Direct Override)
     let mode = get_outbound_mode();
     if mode == 1 {
-        return (RuleAction::Proxy, DecisionSource::GlobalMode, "Global Proxy Override".to_string());
+        return (
+            RuleAction::Proxy,
+            DecisionSource::GlobalMode,
+            "Global Proxy Override".to_string(),
+        );
     } else if mode == 2 {
-        return (RuleAction::Direct, DecisionSource::GlobalMode, "Global Direct Override".to_string());
+        return (
+            RuleAction::Direct,
+            DecisionSource::GlobalMode,
+            "Global Direct Override".to_string(),
+        );
     }
 
     let r = router_store().read().unwrap_or_else(|e| e.into_inner());
@@ -653,23 +811,38 @@ pub fn route_decision_sourced(
             if rule.action == RuleAction::Direct {
                 if let Some(d) = domain {
                     if is_known_non_cn_domain(d) {
-                        tracing::debug!("[ROUTER] 域名 [{d}] 属于已知境外服务，忽略直连规则: {}", rule.name);
+                        tracing::debug!(
+                            "[ROUTER] 域名 [{d}] 属于已知境外服务，忽略直连规则: {}",
+                            rule.name
+                        );
                         continue;
                     }
                 }
             }
             record_rule_hit(&rule.id, &rule.name, rule.action.as_str());
-            return (rule.action, DecisionSource::Rule, format!("Rule: {}", rule.name));
+            return (
+                rule.action,
+                DecisionSource::Rule,
+                format!("Rule: {}", rule.name),
+            );
         }
     }
 
     // 3. 国内域名智能直连判定 (静态白名单 + DNS 动态学习缓存)
     if let Some(dom) = domain {
         if is_cn_domain(dom) {
-            return (RuleAction::Direct, DecisionSource::CnDomain, "CN Domain (Direct)".to_string());
+            return (
+                RuleAction::Direct,
+                DecisionSource::CnDomain,
+                "CN Domain (Direct)".to_string(),
+            );
         }
         if let Some(true) = crate::tun::dns::is_dynamic_direct_domain(dom) {
-            return (RuleAction::Direct, DecisionSource::DynamicLearned, "Dynamic CN Domain (Learned)".to_string());
+            return (
+                RuleAction::Direct,
+                DecisionSource::DynamicLearned,
+                "Dynamic CN Domain (Learned)".to_string(),
+            );
         }
         // 注意: 若动态学习为 Some(false) 或 None，不在此短路阻断，平滑落入第 4 步 CN IP 强证据判定
     }
@@ -677,13 +850,21 @@ pub fn route_decision_sourced(
     // 4. 国内裸 IP 智能直连兜底 (GeoIP / CIDR 二分查找)
     if let Some(ip_addr) = ip {
         if is_cn_ip(ip_addr) {
-            return (RuleAction::Direct, DecisionSource::CnIp, "CN IP (Direct)".to_string());
+            return (
+                RuleAction::Direct,
+                DecisionSource::CnIp,
+                "CN IP (Direct)".to_string(),
+            );
         }
     }
 
     // 5. 回退至默认动作 (境外未命中规则默认走 proxy)
     let action = r.default_action;
-    (action, DecisionSource::Default, format!("Default {:?}", action))
+    (
+        action,
+        DecisionSource::Default,
+        format!("Default {:?}", action),
+    )
 }
 
 /// 综合决策请求的目标动作 (支持传入 域名、IP、端口、协议)
@@ -749,7 +930,8 @@ pub fn strip_and_inject_rules(raw_rules_json: &str) -> String {
         }),
     };
 
-    let default_action = parsed.get("default_action")
+    let default_action = parsed
+        .get("default_action")
         .and_then(|x| x.as_str())
         .unwrap_or("proxy");
 
@@ -775,37 +957,58 @@ pub fn strip_and_inject_rules(raw_rules_json: &str) -> String {
             if id.starts_with("sys_") {
                 continue; // 避免重复注入
             }
-            let enabled = item.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
-            let action = item.get("action").and_then(|x| x.as_str()).unwrap_or("proxy");
+            let enabled = item
+                .get("enabled")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(true);
+            let action = item
+                .get("action")
+                .and_then(|x| x.as_str())
+                .unwrap_or("proxy");
             let logic = item.get("logic").and_then(|x| x.as_str()).unwrap_or("OR");
-            let name = item.get("name").and_then(|x| x.as_str()).unwrap_or("自定义规则");
+            let name = item
+                .get("name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("自定义规则");
 
             let mut valid_conditions = Vec::new();
 
             if let Some(cond_arr) = item.get("conditions").and_then(|c| c.as_array()) {
                 for cond in cond_arr {
-                    let ctype = cond.get("type").and_then(|x| x.as_str()).unwrap_or("").trim();
-                    let cpat = cond.get("pattern").and_then(|x| x.as_str()).unwrap_or("").trim();
-                    if !ctype.is_empty() && !cpat.is_empty() {
-                        if parse_condition_kind(ctype, cpat).is_some() {
-                            valid_conditions.push(serde_json::json!({
-                                "type": ctype,
-                                "pattern": cpat
-                            }));
-                        }
+                    let ctype = cond
+                        .get("type")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .trim();
+                    let cpat = cond
+                        .get("pattern")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .trim();
+                    if !ctype.is_empty()
+                        && !cpat.is_empty()
+                        && parse_condition_kind(ctype, cpat).is_some()
+                    {
+                        valid_conditions.push(serde_json::json!({
+                            "type": ctype,
+                            "pattern": cpat
+                        }));
                     }
                 }
             } else if let (Some(kind), Some(pattern)) = (
-                item.get("kind").or_else(|| item.get("type")).and_then(|x| x.as_str()),
-                item.get("pattern").and_then(|x| x.as_str())
+                item.get("kind")
+                    .or_else(|| item.get("type"))
+                    .and_then(|x| x.as_str()),
+                item.get("pattern").and_then(|x| x.as_str()),
             ) {
-                if !kind.trim().is_empty() && !pattern.trim().is_empty() {
-                    if parse_condition_kind(kind, pattern).is_some() {
-                        valid_conditions.push(serde_json::json!({
-                            "type": kind.trim(),
-                            "pattern": pattern.trim()
-                        }));
-                    }
+                if !kind.trim().is_empty()
+                    && !pattern.trim().is_empty()
+                    && parse_condition_kind(kind, pattern).is_some()
+                {
+                    valid_conditions.push(serde_json::json!({
+                        "type": kind.trim(),
+                        "pattern": pattern.trim()
+                    }));
                 }
             }
 
@@ -849,20 +1052,38 @@ pub fn set_custom_rules(json: &str) -> bool {
     let Ok(v) = parsed else { return false };
     let mut new_rules = Vec::new();
 
-    let default_action = v.get("default_action")
+    let default_action = v
+        .get("default_action")
         .and_then(|x| x.as_str())
         .map(RuleAction::from_str)
         .unwrap_or(RuleAction::Proxy);
 
     if let Some(arr) = v.get("rules").and_then(|a| a.as_array()) {
         for (idx, item) in arr.iter().enumerate() {
-            let enabled = item.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
-            let action_str = item.get("action").and_then(|x| x.as_str()).unwrap_or("proxy");
+            let enabled = item
+                .get("enabled")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(true);
+            let action_str = item
+                .get("action")
+                .and_then(|x| x.as_str())
+                .unwrap_or("proxy");
             let action = RuleAction::from_str(action_str);
-            let id = item.get("id").and_then(|x| x.as_str()).map(|s| s.to_string()).unwrap_or_else(|| format!("rule_{idx}"));
-            let name = item.get("name").and_then(|x| x.as_str()).map(|s| s.to_string()).unwrap_or_else(|| {
-                item.get("pattern").and_then(|x| x.as_str()).unwrap_or("自定义规则").to_string()
-            });
+            let id = item
+                .get("id")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("rule_{idx}"));
+            let name = item
+                .get("name")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    item.get("pattern")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("自定义规则")
+                        .to_string()
+                });
             let logic_str = item.get("logic").and_then(|x| x.as_str()).unwrap_or("OR");
             let logic = MatchLogic::from_str(logic_str);
 
@@ -873,16 +1094,20 @@ pub fn set_custom_rules(json: &str) -> bool {
                 for cond in cond_arr {
                     let (Some(ctype), Some(cpat)) = (
                         cond.get("type").and_then(|x| x.as_str()),
-                        cond.get("pattern").and_then(|x| x.as_str())
-                    ) else { continue };
+                        cond.get("pattern").and_then(|x| x.as_str()),
+                    ) else {
+                        continue;
+                    };
 
                     if let Some(k) = parse_condition_kind(ctype, cpat) {
                         conditions.push(k);
                     }
                 }
             } else if let (Some(kind), Some(pattern)) = (
-                item.get("kind").or_else(|| item.get("type")).and_then(|x| x.as_str()),
-                item.get("pattern").and_then(|x| x.as_str())
+                item.get("kind")
+                    .or_else(|| item.get("type"))
+                    .and_then(|x| x.as_str()),
+                item.get("pattern").and_then(|x| x.as_str()),
             ) {
                 // 模式 B: 传统单条件规则兼容
                 if let Some(k) = parse_condition_kind(kind, pattern) {
@@ -904,7 +1129,8 @@ pub fn set_custom_rules(json: &str) -> bool {
     }
 
     // 清理已删除/已变更旧规则的命中统计，防止 HashMap 无界内存增长
-    let valid_ids: std::collections::HashSet<String> = new_rules.iter().map(|r| r.id.clone()).collect();
+    let valid_ids: std::collections::HashSet<String> =
+        new_rules.iter().map(|r| r.id.clone()).collect();
     let mut hits = rule_hits().lock().unwrap_or_else(|e| e.into_inner());
     hits.retain(|k, _| {
         let id = k.split('|').next().unwrap_or("");
@@ -915,7 +1141,11 @@ pub fn set_custom_rules(json: &str) -> bool {
     let mut store = router_store().write().unwrap_or_else(|e| e.into_inner());
     store.rules = new_rules;
     store.default_action = default_action;
-    debug!("[ROUTER] 路由规则已更新 (共 {} 条规则, 默认动作: {:?})", store.rules.len(), store.default_action);
+    debug!(
+        "[ROUTER] 路由规则已更新 (共 {} 条规则, 默认动作: {:?})",
+        store.rules.len(),
+        store.default_action
+    );
     true
 }
 
@@ -934,9 +1164,16 @@ fn parse_condition_kind(kind: &str, pattern: &str) -> Option<ConditionKind> {
             let cidr = if let Some(slash) = pattern.find('/') {
                 let ip_str = &pattern[..slash].trim();
                 let prefix = pattern[slash + 1..].trim().parse::<u8>().unwrap_or(32);
-                ip_str.parse::<std::net::Ipv4Addr>().ok().map(|ip| Ipv4Cidr::new(ip, prefix))
+                ip_str
+                    .parse::<std::net::Ipv4Addr>()
+                    .ok()
+                    .map(|ip| Ipv4Cidr::new(ip, prefix))
             } else {
-                pattern.trim().parse::<std::net::Ipv4Addr>().ok().map(|ip| Ipv4Cidr::new(ip, 32))
+                pattern
+                    .trim()
+                    .parse::<std::net::Ipv4Addr>()
+                    .ok()
+                    .map(|ip| Ipv4Cidr::new(ip, 32))
             };
             Some(ConditionKind::IpCidr(pattern.to_string(), cidr))
         }
@@ -1087,19 +1324,36 @@ mod tests {
     fn test_cold_boot_domestic_fallback() {
         let _guard = acquire_test_guard();
         // 清空所有用户自定义规则，设默认动作为 proxy
-        assert!(set_custom_rules(r#"{"rules":[], "default_action":"proxy"}"#));
+        assert!(set_custom_rules(
+            r#"{"rules":[], "default_action":"proxy"}"#
+        ));
 
         // 1. 国内常见域名 (如 baidu.com, qq.com, .cn) 应直接命中内置兜底 -> Direct
-        assert_eq!(route_decision(Some("www.baidu.com"), None, Some(443), Some("tcp")), RuleAction::Direct);
-        assert_eq!(route_decision(Some("api.bilibili.com"), None, Some(443), Some("tcp")), RuleAction::Direct);
-        assert_eq!(route_decision(Some("gov.cn"), None, Some(80), Some("tcp")), RuleAction::Direct);
+        assert_eq!(
+            route_decision(Some("www.baidu.com"), None, Some(443), Some("tcp")),
+            RuleAction::Direct
+        );
+        assert_eq!(
+            route_decision(Some("api.bilibili.com"), None, Some(443), Some("tcp")),
+            RuleAction::Direct
+        );
+        assert_eq!(
+            route_decision(Some("gov.cn"), None, Some(80), Some("tcp")),
+            RuleAction::Direct
+        );
 
         // 2. 国内公网 IP (如 223.5.5.5, 114.114.114.114) 应命中内置 IP 兜底 -> Direct
         let ali_dns: IpAddr = "223.5.5.5".parse().unwrap();
-        assert_eq!(route_decision(None, Some(ali_dns), Some(53), Some("udp")), RuleAction::Direct);
+        assert_eq!(
+            route_decision(None, Some(ali_dns), Some(53), Some("udp")),
+            RuleAction::Direct
+        );
 
         // 3. 境外域名 (如 google.com) 无规则时回退至 default_action (Proxy)
-        assert_eq!(route_decision(Some("google.com"), None, Some(443), Some("tcp")), RuleAction::Proxy);
+        assert_eq!(
+            route_decision(Some("google.com"), None, Some(443), Some("tcp")),
+            RuleAction::Proxy
+        );
     }
 
     #[test]
@@ -1152,8 +1406,17 @@ mod tests {
         assert!(is_fake_ip(fake_ip));
 
         // 1. Google connection through Fake-IP MUST NOT match geoip:private -> must be Proxy!
-        let dec1 = route_decision(Some("www.google.com"), Some(fake_ip), Some(443), Some("tcp"));
-        assert_eq!(dec1, RuleAction::Proxy, "Google over Fake-IP must be Proxy, not hijacked by geoip:private");
+        let dec1 = route_decision(
+            Some("www.google.com"),
+            Some(fake_ip),
+            Some(443),
+            Some("tcp"),
+        );
+        assert_eq!(
+            dec1,
+            RuleAction::Proxy,
+            "Google over Fake-IP must be Proxy, not hijacked by geoip:private"
+        );
 
         // 2. Real private LAN IP (192.168.1.1) MUST match geoip:private / LAN rule -> Direct
         let lan_ip: IpAddr = "192.168.1.1".parse().unwrap();
@@ -1172,9 +1435,9 @@ mod tests {
     #[test]
     fn geosite_cn_direct_does_not_hijack_foreign_domains() {
         let _guard = acquire_test_guard(); // 与其余测试串行, 免并发 set_custom_rules 踩全局 router_store
-        // 复现 Play 更新慢根因: geosite:cn 数据误含 googleapis.com 等境外域名,
-        // 若 cn→direct 直接生效会把 Google 服务直连到 DNS 污染的国内假 IP。
-        // 规则: geosite:cn→direct (排前), geosite:google→proxy (排后)。
+                                           // 复现 Play 更新慢根因: geosite:cn 数据误含 googleapis.com 等境外域名,
+                                           // 若 cn→direct 直接生效会把 Google 服务直连到 DNS 污染的国内假 IP。
+                                           // 规则: geosite:cn→direct (排前), geosite:google→proxy (排后)。
         set_custom_rules(&format!(
             r#"{{"default_action":"proxy","rules":[
                 {{"id":"r1","name":"cn-direct","action":"direct","logic":"OR","conditions":[{{"type":"geosite","pattern":"cn"}}]}},
@@ -1203,16 +1466,37 @@ mod tests {
     #[test]
     fn test_is_cn_ip_accuracy_and_boundary_cases() {
         let _guard = acquire_test_guard(); // 恢复模块不变量: 每个测试都持 TEST_LOCK
-        // 1. 经典国内公共 DNS 与真实国内 IP 必中 (包括旧版线性遍历曾漏判的 114.114.114.114)
-        assert!(is_cn_ip("114.114.114.114".parse().unwrap()), "114.114.114.114 必须命中 CN IP");
-        assert!(is_cn_ip("223.5.5.5".parse().unwrap()), "223.5.5.5 必须命中 CN IP");
-        assert!(is_cn_ip("180.76.76.76".parse().unwrap()), "180.76.76.76 必须命中 CN IP");
-        assert!(is_cn_ip("110.242.74.102".parse().unwrap()), "Baidu IP 必须命中 CN IP");
+                                           // 1. 经典国内公共 DNS 与真实国内 IP 必中 (包括旧版线性遍历曾漏判的 114.114.114.114)
+        assert!(
+            is_cn_ip("114.114.114.114".parse().unwrap()),
+            "114.114.114.114 必须命中 CN IP"
+        );
+        assert!(
+            is_cn_ip("223.5.5.5".parse().unwrap()),
+            "223.5.5.5 必须命中 CN IP"
+        );
+        assert!(
+            is_cn_ip("180.76.76.76".parse().unwrap()),
+            "180.76.76.76 必须命中 CN IP"
+        );
+        assert!(
+            is_cn_ip("110.242.74.102".parse().unwrap()),
+            "Baidu IP 必须命中 CN IP"
+        );
 
         // 2. 境外公共 IP 绝不命中
-        assert!(!is_cn_ip("8.8.8.8".parse().unwrap()), "Google 8.8.8.8 绝不能误判为 CN");
-        assert!(!is_cn_ip("1.1.1.1".parse().unwrap()), "Cloudflare 1.1.1.1 绝不能误判为 CN");
-        assert!(!is_cn_ip("142.250.190.46".parse().unwrap()), "Google Web IP 绝不能误判为 CN");
+        assert!(
+            !is_cn_ip("8.8.8.8".parse().unwrap()),
+            "Google 8.8.8.8 绝不能误判为 CN"
+        );
+        assert!(
+            !is_cn_ip("1.1.1.1".parse().unwrap()),
+            "Cloudflare 1.1.1.1 绝不能误判为 CN"
+        );
+        assert!(
+            !is_cn_ip("142.250.190.46".parse().unwrap()),
+            "Google Web IP 绝不能误判为 CN"
+        );
 
         // 3. Fake-IP (198.18.0.0/15) 必须在入口短路拦截为 false，防止代理流量倒灌
         assert!(!is_cn_ip("198.18.0.1".parse().unwrap()));
@@ -1224,24 +1508,72 @@ mod tests {
         assert!(!is_cn_ip("255.255.255.255".parse().unwrap()));
 
         // 5. IPv6 中国运营商与科研网地址段
-        assert!(is_cn_ip("2408:8000::1".parse().unwrap()), "联通 IPv6 必须命中 CN");
-        assert!(is_cn_ip("2409:8000::1".parse().unwrap()), "移动 IPv6 必须命中 CN");
-        assert!(is_cn_ip("240e:8000::1".parse().unwrap()), "电信 IPv6 必须命中 CN");
-        assert!(is_cn_ip("2400:3200::1".parse().unwrap()), "阿里 DNS IPv6 必须命中 CN");
-        assert!(is_cn_ip("2001:da8::1".parse().unwrap()), "教育网 CERNET2 必须命中 CN");
-        assert!(is_cn_ip("2001:250::1".parse().unwrap()), "科技网 CSTNET 必须命中 CN");
+        assert!(
+            is_cn_ip("2408:8000::1".parse().unwrap()),
+            "联通 IPv6 必须命中 CN"
+        );
+        assert!(
+            is_cn_ip("2409:8000::1".parse().unwrap()),
+            "移动 IPv6 必须命中 CN"
+        );
+        assert!(
+            is_cn_ip("240e:8000::1".parse().unwrap()),
+            "电信 IPv6 必须命中 CN"
+        );
+        assert!(
+            is_cn_ip("2400:3200::1".parse().unwrap()),
+            "阿里 DNS IPv6 必须命中 CN"
+        );
+        assert!(
+            is_cn_ip("2001:da8::1".parse().unwrap()),
+            "教育网 CERNET2 必须命中 CN"
+        );
+        assert!(
+            is_cn_ip("2001:250::1".parse().unwrap()),
+            "科技网 CSTNET 必须命中 CN"
+        );
 
         // 6. IPv6 境外公共 IP 与亚太非中国 IP 绝不命中 (防止 2400::/12 粗范围误伤)
-        assert!(!is_cn_ip("2001:4860:4860::8888".parse().unwrap()), "Google DNS IPv6 绝不能误判为 CN");
-        assert!(!is_cn_ip("2606:4700:4700::1111".parse().unwrap()), "Cloudflare DNS IPv6 绝不能误判为 CN");
-        assert!(!is_cn_ip("2400:8500::1".parse().unwrap()), "日本 NTT 2400:8500 绝不能误判为 CN");
-        assert!(!is_cn_ip("2400:2e00::1".parse().unwrap()), "韩国 2400:2e00 绝不能误判为 CN");
-        assert!(!is_cn_ip("2400:1f00::1".parse().unwrap()), "日本 IIJ 2400:1f00 绝不能误判为 CN");
-        assert!(!is_cn_ip("2400:cb00::1".parse().unwrap()), "台湾 2400:cb00 绝不能误判为 CN");
-        assert!(!is_cn_ip("2400:7800::1".parse().unwrap()), "印度 2400:7800 绝不能误判为 CN");
-        assert!(!is_cn_ip("2401:1800::1".parse().unwrap()), "印尼 2401:1800 绝不能误判为 CN");
-        assert!(!is_cn_ip("2402:4e00::1".parse().unwrap()), "新加坡 2402:4e00 绝不能误判为 CN");
-        assert!(!is_cn_ip("2407:4000::1".parse().unwrap()), "日本 2407:4000 绝不能误判为 CN");
+        assert!(
+            !is_cn_ip("2001:4860:4860::8888".parse().unwrap()),
+            "Google DNS IPv6 绝不能误判为 CN"
+        );
+        assert!(
+            !is_cn_ip("2606:4700:4700::1111".parse().unwrap()),
+            "Cloudflare DNS IPv6 绝不能误判为 CN"
+        );
+        assert!(
+            !is_cn_ip("2400:8500::1".parse().unwrap()),
+            "日本 NTT 2400:8500 绝不能误判为 CN"
+        );
+        assert!(
+            !is_cn_ip("2400:2e00::1".parse().unwrap()),
+            "韩国 2400:2e00 绝不能误判为 CN"
+        );
+        assert!(
+            !is_cn_ip("2400:1f00::1".parse().unwrap()),
+            "日本 IIJ 2400:1f00 绝不能误判为 CN"
+        );
+        assert!(
+            !is_cn_ip("2400:cb00::1".parse().unwrap()),
+            "台湾 2400:cb00 绝不能误判为 CN"
+        );
+        assert!(
+            !is_cn_ip("2400:7800::1".parse().unwrap()),
+            "印度 2400:7800 绝不能误判为 CN"
+        );
+        assert!(
+            !is_cn_ip("2401:1800::1".parse().unwrap()),
+            "印尼 2401:1800 绝不能误判为 CN"
+        );
+        assert!(
+            !is_cn_ip("2402:4e00::1".parse().unwrap()),
+            "新加坡 2402:4e00 绝不能误判为 CN"
+        );
+        assert!(
+            !is_cn_ip("2407:4000::1".parse().unwrap()),
+            "日本 2407:4000 绝不能误判为 CN"
+        );
     }
 
     #[test]
@@ -1260,9 +1592,18 @@ mod tests {
         assert!(is_private_ip("127.0.0.1".parse().unwrap()));
         assert!(is_private_ip("169.254.1.1".parse().unwrap()));
         assert!(is_private_ip("100.64.0.1".parse().unwrap()));
-        assert!(is_private_ip("224.0.0.251".parse().unwrap()), "mDNS 组播必须为 private");
-        assert!(is_private_ip("239.255.255.250".parse().unwrap()), "SSDP 组播必须为 private");
-        assert!(is_private_ip("255.255.255.255".parse().unwrap()), "广播必须为 private");
+        assert!(
+            is_private_ip("224.0.0.251".parse().unwrap()),
+            "mDNS 组播必须为 private"
+        );
+        assert!(
+            is_private_ip("239.255.255.250".parse().unwrap()),
+            "SSDP 组播必须为 private"
+        );
+        assert!(
+            is_private_ip("255.255.255.255".parse().unwrap()),
+            "广播必须为 private"
+        );
 
         // 2. 公网 IP 绝不能为 private
         assert!(!is_private_ip("1.1.1.1".parse().unwrap()));
@@ -1294,7 +1635,12 @@ mod tests {
 
         // 6. route_decision 强制直连决策验证
         assert_eq!(
-            route_decision(None, Some("192.168.1.1".parse().unwrap()), Some(80), Some("tcp")),
+            route_decision(
+                None,
+                Some("192.168.1.1".parse().unwrap()),
+                Some(80),
+                Some("tcp")
+            ),
             RuleAction::Direct,
             "局域网 IP 必须返回 Direct"
         );
@@ -1304,7 +1650,12 @@ mod tests {
             "路由器域名必须返回 Direct"
         );
         assert_eq!(
-            route_decision(None, Some("224.0.0.251".parse().unwrap()), Some(5353), Some("udp")),
+            route_decision(
+                None,
+                Some("224.0.0.251".parse().unwrap()),
+                Some(5353),
+                Some("udp")
+            ),
             RuleAction::Direct,
             "mDNS 组播必须返回 Direct"
         );
@@ -1327,27 +1678,45 @@ mod tests {
         assert_eq!(get_outbound_mode(), 0);
 
         // 1.1 局域网 IP / 路由器域名 -> DIRECT
-        let (action, _, rule) = route_decision_sourced(Some("router.asus.com"), None, Some(80), Some("tcp"));
+        let (action, _, rule) =
+            route_decision_sourced(Some("router.asus.com"), None, Some(80), Some("tcp"));
         assert_eq!(action, RuleAction::Direct);
         assert!(rule.contains("Router"));
 
-        let (action, _, rule) = route_decision_sourced(None, Some("192.168.1.1".parse().unwrap()), Some(80), Some("tcp"));
+        let (action, _, rule) = route_decision_sourced(
+            None,
+            Some("192.168.1.1".parse().unwrap()),
+            Some(80),
+            Some("tcp"),
+        );
         assert_eq!(action, RuleAction::Direct);
         assert!(rule.contains("Private IP"));
 
         // 1.2 境外域名 / 境外 IP -> PROXY (默认回退)
-        let (action, _, _) = route_decision_sourced(Some("www.google.com"), None, Some(443), Some("tcp"));
+        let (action, _, _) =
+            route_decision_sourced(Some("www.google.com"), None, Some(443), Some("tcp"));
         assert_eq!(action, RuleAction::Proxy);
 
-        let (action, _, _) = route_decision_sourced(None, Some("8.8.8.8".parse().unwrap()), Some(53), Some("udp"));
+        let (action, _, _) = route_decision_sourced(
+            None,
+            Some("8.8.8.8".parse().unwrap()),
+            Some(53),
+            Some("udp"),
+        );
         assert_eq!(action, RuleAction::Proxy);
 
         // 1.3 国内域名 / 国内 IP -> DIRECT (内置兜底)
-        let (action, _, rule) = route_decision_sourced(Some("www.bilibili.com"), None, Some(443), Some("tcp"));
+        let (action, _, rule) =
+            route_decision_sourced(Some("www.bilibili.com"), None, Some(443), Some("tcp"));
         assert_eq!(action, RuleAction::Direct);
         assert!(rule.contains("CN Domain"));
 
-        let (action, _, rule) = route_decision_sourced(None, Some("114.114.114.114".parse().unwrap()), Some(53), Some("udp"));
+        let (action, _, rule) = route_decision_sourced(
+            None,
+            Some("114.114.114.114".parse().unwrap()),
+            Some(53),
+            Some("udp"),
+        );
         assert_eq!(action, RuleAction::Direct);
         assert!(rule.contains("CN IP"));
 
@@ -1356,22 +1725,43 @@ mod tests {
         assert_eq!(get_outbound_mode(), 1);
 
         // 2.1 局域网保护依然有效 -> DIRECT
-        let (action, _, _) = route_decision_sourced(Some("tplogin.cn"), None, Some(80), Some("tcp"));
-        assert_eq!(action, RuleAction::Direct, "全局代理下局域网路由器管理域名必须直连保护");
+        let (action, _, _) =
+            route_decision_sourced(Some("tplogin.cn"), None, Some(80), Some("tcp"));
+        assert_eq!(
+            action,
+            RuleAction::Direct,
+            "全局代理下局域网路由器管理域名必须直连保护"
+        );
 
-        let (action, _, _) = route_decision_sourced(None, Some("10.0.0.1".parse().unwrap()), Some(80), Some("tcp"));
-        assert_eq!(action, RuleAction::Direct, "全局代理下局域网私有 IP 必须直连保护");
+        let (action, _, _) = route_decision_sourced(
+            None,
+            Some("10.0.0.1".parse().unwrap()),
+            Some(80),
+            Some("tcp"),
+        );
+        assert_eq!(
+            action,
+            RuleAction::Direct,
+            "全局代理下局域网私有 IP 必须直连保护"
+        );
 
         // 2.2 境外域名与国内域名全部无差别走代理 -> PROXY
-        let (action, _, rule) = route_decision_sourced(Some("www.google.com"), None, Some(443), Some("tcp"));
+        let (action, _, rule) =
+            route_decision_sourced(Some("www.google.com"), None, Some(443), Some("tcp"));
         assert_eq!(action, RuleAction::Proxy);
         assert!(rule.contains("Global Proxy Override"));
 
-        let (action, _, rule) = route_decision_sourced(Some("www.bilibili.com"), None, Some(443), Some("tcp"));
+        let (action, _, rule) =
+            route_decision_sourced(Some("www.bilibili.com"), None, Some(443), Some("tcp"));
         assert_eq!(action, RuleAction::Proxy);
         assert!(rule.contains("Global Proxy Override"));
 
-        let (action, _, rule) = route_decision_sourced(None, Some("114.114.114.114".parse().unwrap()), Some(53), Some("udp"));
+        let (action, _, rule) = route_decision_sourced(
+            None,
+            Some("114.114.114.114".parse().unwrap()),
+            Some(53),
+            Some("udp"),
+        );
         assert_eq!(action, RuleAction::Proxy);
         assert!(rule.contains("Global Proxy Override"));
 
@@ -1380,19 +1770,31 @@ mod tests {
         assert_eq!(get_outbound_mode(), 2);
 
         // 3.1 局域网 -> DIRECT
-        let (action, _, _) = route_decision_sourced(None, Some("192.168.1.1".parse().unwrap()), Some(80), Some("tcp"));
+        let (action, _, _) = route_decision_sourced(
+            None,
+            Some("192.168.1.1".parse().unwrap()),
+            Some(80),
+            Some("tcp"),
+        );
         assert_eq!(action, RuleAction::Direct);
 
         // 3.2 境外域名与国内域名全部走直连 -> DIRECT
-        let (action, _, rule) = route_decision_sourced(Some("www.google.com"), None, Some(443), Some("tcp"));
+        let (action, _, rule) =
+            route_decision_sourced(Some("www.google.com"), None, Some(443), Some("tcp"));
         assert_eq!(action, RuleAction::Direct);
         assert!(rule.contains("Global Direct Override"));
 
-        let (action, _, rule) = route_decision_sourced(Some("www.bilibili.com"), None, Some(443), Some("tcp"));
+        let (action, _, rule) =
+            route_decision_sourced(Some("www.bilibili.com"), None, Some(443), Some("tcp"));
         assert_eq!(action, RuleAction::Direct);
         assert!(rule.contains("Global Direct Override"));
 
-        let (action, _, rule) = route_decision_sourced(None, Some("8.8.8.8".parse().unwrap()), Some(53), Some("udp"));
+        let (action, _, rule) = route_decision_sourced(
+            None,
+            Some("8.8.8.8".parse().unwrap()),
+            Some(53),
+            Some("udp"),
+        );
         assert_eq!(action, RuleAction::Direct);
         assert!(rule.contains("Global Direct Override"));
 
@@ -1449,7 +1851,8 @@ mod tests {
     fn test_dual_verification_routing_scheme_d() {
         let _guard = acquire_test_guard();
         // 设置规则: geosite:cn -> direct, 默认 proxy
-        set_custom_rules(r#"{
+        set_custom_rules(
+            r#"{
             "rules": [
                 {
                     "id": "cn_direct",
@@ -1463,22 +1866,33 @@ mod tests {
                 }
             ],
             "default_action": "proxy"
-        }"#);
+        }"#,
+        );
         set_outbound_mode(0);
 
         // 1. 国内顶级 .com 域名: 经 is_cn_domain / geosite:cn 判定，必须走 DIRECT (不要求 .cn 后缀)
-        assert!(is_cn_domain("bilibili.com") || is_cn_domain("qq.com") || is_cn_domain("baidu.com"));
-        let (action_bili, _, _) = route_decision_sourced(Some("api.bilibili.com"), None, Some(443), Some("tcp"));
+        assert!(
+            is_cn_domain("bilibili.com") || is_cn_domain("qq.com") || is_cn_domain("baidu.com")
+        );
+        let (action_bili, _, _) =
+            route_decision_sourced(Some("api.bilibili.com"), None, Some(443), Some("tcp"));
         assert_eq!(action_bili, RuleAction::Direct);
 
         // 2. 境外 Google / YouTube / Telegram: 即使在 geosite:cn 规则存在的情况下，依然被 NON_CN_ROOTS 防污染守卫拦截，走 PROXY
-        let (action_google, _, _) = route_decision_sourced(Some("play.googleapis.com"), None, Some(443), Some("tcp"));
+        let (action_google, _, _) =
+            route_decision_sourced(Some("play.googleapis.com"), None, Some(443), Some("tcp"));
         assert_eq!(action_google, RuleAction::Proxy);
 
-        let (action_yt, _, _) = route_decision_sourced(Some("rr1---sn-xxx.googlevideo.com"), None, Some(443), Some("tcp"));
+        let (action_yt, _, _) = route_decision_sourced(
+            Some("rr1---sn-xxx.googlevideo.com"),
+            None,
+            Some(443),
+            Some("tcp"),
+        );
         assert_eq!(action_yt, RuleAction::Proxy);
 
-        let (action_cf, _, _) = route_decision_sourced(Some("dash.cloudflare.com"), None, Some(443), Some("tcp"));
+        let (action_cf, _, _) =
+            route_decision_sourced(Some("dash.cloudflare.com"), None, Some(443), Some("tcp"));
         assert_eq!(action_cf, RuleAction::Proxy);
     }
 
@@ -1493,7 +1907,8 @@ mod tests {
         let unlisted_foreign_dom = "obscure-foreign-site-888.org";
 
         // 1. 初始状态: 未在缓存中的未知域名默认走 Proxy
-        let (act_before, _, _) = route_decision_sourced(Some(unlisted_cn_dom), None, Some(443), Some("tcp"));
+        let (act_before, _, _) =
+            route_decision_sourced(Some(unlisted_cn_dom), None, Some(443), Some("tcp"));
         assert_eq!(act_before, RuleAction::Proxy);
 
         // 2. 模拟 DNS 异步自学习成功: 写入国内真实 IP 并标记为 is_direct = true
@@ -1502,7 +1917,8 @@ mod tests {
         crate::tun::dns::insert_direct_cache(unlisted_cn_dom.to_string(), cn_ip, true);
 
         // 学习生效: 再次裁决，立即升格为 Direct
-        let (act_after, _, reason) = route_decision_sourced(Some(unlisted_cn_dom), None, Some(443), Some("tcp"));
+        let (act_after, _, reason) =
+            route_decision_sourced(Some(unlisted_cn_dom), None, Some(443), Some("tcp"));
         assert_eq!(act_after, RuleAction::Direct);
         assert_eq!(reason, "Dynamic CN Domain (Learned)");
 
@@ -1510,26 +1926,36 @@ mod tests {
         let foreign_ip = std::net::Ipv4Addr::new(8, 8, 8, 8);
         crate::tun::dns::insert_direct_cache(unlisted_foreign_dom.to_string(), foreign_ip, false);
 
-        let (act_foreign, _, reason_foreign) = route_decision_sourced(Some(unlisted_foreign_dom), None, Some(443), Some("tcp"));
+        let (act_foreign, _, reason_foreign) =
+            route_decision_sourced(Some(unlisted_foreign_dom), None, Some(443), Some("tcp"));
         assert_eq!(act_foreign, RuleAction::Proxy);
         assert_eq!(reason_foreign, "Default Proxy");
 
         // 4. 验证强证据优先: 即使域名动态学习为负向 (Some(false))，若实际目标 IP 是中国大陆公网 IP (强证据)，依然放行直连
         let real_cn_target = std::net::IpAddr::V4(std::net::Ipv4Addr::new(223, 5, 5, 5));
-        let (act_override, _, reason_override) = route_decision_sourced(Some(unlisted_foreign_dom), Some(real_cn_target), Some(443), Some("tcp"));
+        let (act_override, _, reason_override) = route_decision_sourced(
+            Some(unlisted_foreign_dom),
+            Some(real_cn_target),
+            Some(443),
+            Some("tcp"),
+        );
         assert_eq!(act_override, RuleAction::Direct);
         assert_eq!(reason_override, "CN IP (Direct)");
 
         // 5. 裸境外 Anycast IP (如 104.16.1.1 Cloudflare): 绝不直连，走 Proxy (零 IP 毒化)
         let cf_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(104, 16, 1, 1));
         let (act_ip, _, _) = route_decision_sourced(None, Some(cf_ip), Some(443), Some("tcp"));
-        assert_eq!(act_ip, RuleAction::Proxy, "境外 Anycast IP 绝不被误判为直连");
+        assert_eq!(
+            act_ip,
+            RuleAction::Proxy,
+            "境外 Anycast IP 绝不被误判为直连"
+        );
     }
 
     #[test]
     fn test_default_router_ip_substring_immunity() {
         let _guard = acquire_test_guard(); // 恢复模块不变量: 每个测试都持 TEST_LOCK
-        // 1. 精确匹配与子域名匹配应正常返回对应路由器 IP
+                                           // 1. 精确匹配与子域名匹配应正常返回对应路由器 IP
         assert_eq!(
             default_router_ip_for_domain("tplogin.cn"),
             Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1)))
@@ -1548,10 +1974,19 @@ mod tests {
         );
 
         // 2. 恶意攻击者构造的前缀子串域名，绝不可被误判劫持 (杜绝 contains 漏洞)
-        assert_eq!(default_router_ip_for_domain("tplogin.cn.attacker.com"), None);
-        assert_eq!(default_router_ip_for_domain("miwifi.com.attacker.com"), None);
+        assert_eq!(
+            default_router_ip_for_domain("tplogin.cn.attacker.com"),
+            None
+        );
+        assert_eq!(
+            default_router_ip_for_domain("miwifi.com.attacker.com"),
+            None
+        );
         assert_eq!(default_router_ip_for_domain("shanleike.cc"), None);
-        assert_eq!(default_router_ip_for_domain("www.releike.cc.example.com"), None);
+        assert_eq!(
+            default_router_ip_for_domain("www.releike.cc.example.com"),
+            None
+        );
         assert_eq!(default_router_ip_for_domain("notmiwifi.com"), None);
 
         // 3. 同时验证 is_lan_or_router_domain 前置守卫同样免疫
@@ -1565,7 +2000,8 @@ mod tests {
     fn test_route_decision_sourced_variants() {
         let _guard = acquire_test_guard();
         set_outbound_mode(0);
-        assert!(set_custom_rules(r#"{
+        assert!(set_custom_rules(
+            r#"{
             "rules": [
                 {
                     "id": "corp_rule",
@@ -1580,29 +2016,33 @@ mod tests {
                 }
             ],
             "default_action": "proxy"
-        }"#));
+        }"#
+        ));
 
         // 1. 命中复合规则 (Rule)
-        let (action, source, rule_name) = route_decision_sourced(Some("api.mycorp.example"), None, Some(8080), Some("tcp"));
+        let (action, source, rule_name) =
+            route_decision_sourced(Some("api.mycorp.example"), None, Some(8080), Some("tcp"));
         assert_eq!(action, RuleAction::Direct);
         assert_eq!(source, DecisionSource::Rule);
         assert_eq!(rule_name, "Rule: Corp App");
 
         // 端口不匹配未命中规则，回退 Default
-        let (action_def, source_def, _) = route_decision_sourced(Some("api.mycorp.example"), None, Some(80), Some("tcp"));
+        let (action_def, source_def, _) =
+            route_decision_sourced(Some("api.mycorp.example"), None, Some(80), Some("tcp"));
         assert_eq!(action_def, RuleAction::Proxy);
         assert_eq!(source_def, DecisionSource::Default);
 
         // 2. 局域网主机 / 路由器域名 (Lan)
-        let (action_lan, source_lan, _) = route_decision_sourced(Some("tplogin.cn"), None, Some(80), Some("tcp"));
+        let (action_lan, source_lan, _) =
+            route_decision_sourced(Some("tplogin.cn"), None, Some(80), Some("tcp"));
         assert_eq!(action_lan, RuleAction::Direct);
         assert_eq!(source_lan, DecisionSource::Lan);
 
         // 3. 全局模式覆盖 (GlobalMode)
         set_outbound_mode(1);
-        let (action_mode, source_mode, _) = route_decision_sourced(Some("bilibili.com"), None, Some(443), Some("tcp"));
+        let (action_mode, source_mode, _) =
+            route_decision_sourced(Some("bilibili.com"), None, Some(443), Some("tcp"));
         assert_eq!(action_mode, RuleAction::Proxy);
         assert_eq!(source_mode, DecisionSource::GlobalMode);
     }
 }
-

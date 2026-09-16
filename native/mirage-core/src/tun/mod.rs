@@ -33,8 +33,8 @@
 
 pub mod adaptive_idle;
 pub mod buffer_pool;
-pub mod dns;
 pub mod device;
+pub mod dns;
 pub mod sniffer;
 pub mod tcp;
 pub mod udp;
@@ -48,7 +48,7 @@ use std::time::{Duration, Instant};
 use smoltcp::iface::{Config as IfConfig, Interface, SocketHandle, SocketSet};
 use smoltcp::socket::tcp as stcp;
 use smoltcp::time::Instant as SmolInstant;
-use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address, IpProtocol};
+use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpProtocol, Ipv4Address};
 use tokio::sync::Notify;
 use tracing::{debug, info};
 
@@ -134,7 +134,11 @@ impl TunStack {
     }
 
     /// 启动 TUN 引擎: dup fd → 读线程 + 泵任务。返回后引擎即在工作。
-    pub async fn start(engine: Arc<Engine>, cfg: TunConfig, tun_fd: RawFd) -> std::io::Result<Arc<Self>> {
+    pub async fn start(
+        engine: Arc<Engine>,
+        cfg: TunConfig,
+        tun_fd: RawFd,
+    ) -> std::io::Result<Arc<Self>> {
         let fd = unsafe { libc::dup(tun_fd) };
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
@@ -152,7 +156,10 @@ impl TunStack {
         iface.update_ip_addrs(|addrs| {
             let _ = addrs.push(IpCidr::new(IpAddress::Ipv4(cfg.local_addr), 32));
         });
-        iface.routes_mut().add_default_ipv4_route(cfg.peer_addr).ok();
+        iface
+            .routes_mut()
+            .add_default_ipv4_route(cfg.peer_addr)
+            .ok();
         // 透明代理关键开关: 接受发往**任意地址**的包 (TUN 里目的地址是真实目标, 非本机
         // 地址), 并允许以任意源地址发出应答 (SYN-ACK 源 = 客户端连接的目的地址)。
         // 没有它, smoltcp 只认自己接口地址的包, SYN 进不来、SYN-ACK 也发不出。
@@ -248,7 +255,11 @@ impl TunStack {
                     let mut batch = 0;
                     while batch < 32 {
                         let n = unsafe {
-                            libc::read(rfd, scratch.as_mut_ptr() as *mut libc::c_void, scratch.len())
+                            libc::read(
+                                rfd,
+                                scratch.as_mut_ptr() as *mut libc::c_void,
+                                scratch.len(),
+                            )
                         };
                         if n > 0 {
                             let pbuf = PooledBuf::from_slice(&scratch[..n as usize]);
@@ -316,7 +327,12 @@ impl TunStack {
     pub fn poll_now(&self) {
         {
             let mut g = lock_inner(&self.inner);
-            let TunInner { iface, device, sockets, .. } = &mut *g;
+            let TunInner {
+                iface,
+                device,
+                sockets,
+                ..
+            } = &mut *g;
             iface.poll(smol_now(Instant::now()), device, sockets);
         }
         self.wake.notify_one();
@@ -327,10 +343,7 @@ impl TunStack {
     #[allow(dead_code)]
     pub(crate) fn is_established(&self, handle: SocketHandle) -> bool {
         let g = lock_inner(&self.inner);
-        g.sockets
-            .get::<stcp::Socket>(handle)
-            .state()
-            == stcp::State::Established
+        g.sockets.get::<stcp::Socket>(handle).state() == stcp::State::Established
     }
 }
 
@@ -384,7 +397,7 @@ impl TunStack {
         if let Some((src, dst, payload)) = crate::tun::udp::parse_udp_datagram(&pkt) {
             if dst.port() == 53 {
                 // Anycast DNS 劫持: 拦截发往任何目标 IP 的 53 端口 UDP DNS 查询，伪源原路应答，彻底消除 DNS 泄漏
-                crate::tun::dns::handle_dns_query(Arc::clone(self), src, dst, &payload);
+                crate::tun::dns::handle_dns_query(Arc::clone(self), src, dst, payload);
                 return;
             }
             self.udp.feed(Arc::clone(self), src, dst, payload, &pkt);
@@ -401,14 +414,19 @@ impl TunStack {
         self.prescan(&pkt);
 
         let mut g = lock_inner(&self.inner);
-        let TunInner { iface, device, sockets, .. } = &mut *g;
+        let TunInner {
+            iface,
+            device,
+            sockets,
+            ..
+        } = &mut *g;
         device.push_rx(pkt);
         iface.poll(smol_now(Instant::now()), device, sockets);
     }
 
     /// DNS 地址 (std 类型, 供应答构包)。
     pub fn dns_addr_std(&self) -> std::net::Ipv4Addr {
-        self.cfg.dns_addr.into()
+        self.cfg.dns_addr
     }
 
     /// 直接把一个 IP 包写回 TUN fd (UDP 回程/DNS 应答用)。无锁内核直写 (带 EAGAIN 重试)。
@@ -419,9 +437,8 @@ impl TunStack {
         }
         let mut retries = 0;
         loop {
-            let written = unsafe {
-                libc::write(fd, pkt.as_ptr() as *const libc::c_void, pkt.len())
-            };
+            let written =
+                unsafe { libc::write(fd, pkt.as_ptr() as *const libc::c_void, pkt.len()) };
             if written >= 0 {
                 break;
             }
@@ -454,9 +471,8 @@ impl TunStack {
         for p in &out {
             let mut retries = 0;
             loop {
-                let written = unsafe {
-                    libc::write(fd, p.as_ptr() as *const libc::c_void, p.len())
-                };
+                let written =
+                    unsafe { libc::write(fd, p.as_ptr() as *const libc::c_void, p.len()) };
                 if written >= 0 {
                     break;
                 }
@@ -521,7 +537,9 @@ impl TunStack {
 
     fn prescan_ipv4(self: &Arc<Self>, pkt: &[u8]) {
         use smoltcp::wire::Ipv4Packet;
-        let Ok(ip) = Ipv4Packet::new_checked(pkt) else { return };
+        let Ok(ip) = Ipv4Packet::new_checked(pkt) else {
+            return;
+        };
         if ip.next_header() == IpProtocol::Tcp {
             let dst = IpAddress::Ipv4(ip.dst_addr());
             let src = IpAddress::Ipv4(ip.src_addr());
@@ -531,7 +549,9 @@ impl TunStack {
 
     fn prescan_ipv6(self: &Arc<Self>, pkt: &[u8]) {
         use smoltcp::wire::Ipv6Packet;
-        let Ok(ip) = Ipv6Packet::new_checked(pkt) else { return };
+        let Ok(ip) = Ipv6Packet::new_checked(pkt) else {
+            return;
+        };
         if ip.next_header() == IpProtocol::Tcp {
             let dst = IpAddress::Ipv6(ip.dst_addr());
             let src = IpAddress::Ipv6(ip.src_addr());
@@ -542,7 +562,9 @@ impl TunStack {
     /// TCP: SYN (无 ACK) 且 4 元组无匹配 → 建 catcher + spawn relay。
     fn prescan_tcp(self: &Arc<Self>, src: IpAddress, dst: IpAddress, payload: &[u8]) {
         use smoltcp::wire::TcpPacket;
-        let Ok(tcp) = TcpPacket::new_checked(payload) else { return };
+        let Ok(tcp) = TcpPacket::new_checked(payload) else {
+            return;
+        };
         if !tcp.syn() || tcp.ack() {
             return; // 只对全新连接的第一个 SYN 建 socket
         }
@@ -558,8 +580,10 @@ impl TunStack {
         let exists = g.sockets.iter().any(|(_, s)| match s {
             smoltcp::socket::Socket::Tcp(t) => {
                 if let (Some(local), Some(remote)) = (t.local_endpoint(), t.remote_endpoint()) {
-                    local.addr == dst && local.port == dst_port
-                        && remote.addr == src && remote.port == src_port
+                    local.addr == dst
+                        && local.port == dst_port
+                        && remote.addr == src
+                        && remote.port == src_port
                 } else {
                     false
                 }
@@ -585,12 +609,22 @@ impl TunStack {
         let g = &mut *g;
         let listen_endpoint = if is_dns {
             // DNS over TCP: 精确绑定 DNS 地址
-            smoltcp::wire::IpListenEndpoint { addr: Some(dst), port: 53 }
+            smoltcp::wire::IpListenEndpoint {
+                addr: Some(dst),
+                port: 53,
+            }
         } else {
             // 通用 catcher: 精确绑定目标 IP 与端口, 避免多目标 IP 在 443 端口产生监听竞争与错配
-            smoltcp::wire::IpListenEndpoint { addr: Some(dst), port: dst_port }
+            smoltcp::wire::IpListenEndpoint {
+                addr: Some(dst),
+                port: dst_port,
+            }
         };
-        if let Err(e) = g.sockets.get_mut::<stcp::Socket>(handle).listen(listen_endpoint) {
+        if let Err(e) = g
+            .sockets
+            .get_mut::<stcp::Socket>(handle)
+            .listen(listen_endpoint)
+        {
             g.sockets.remove(handle);
             debug!("[TUN] catcher listen 失败 ({}:{})", dst_port, e);
             return;
@@ -639,7 +673,10 @@ fn handle_fake_ip_icmp_echo(stack: &TunStack, pkt: &[u8]) -> Option<PooledBuf> {
 
     let dst_ip = std::net::Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]);
     // 检查是否属于 Fake-IP (反查域名存在或在 198.18.0.0/15 段内)
-    let is_fake = stack.engine().fake_ip_reverse(&std::net::IpAddr::V4(dst_ip)).is_some()
+    let is_fake = stack
+        .engine()
+        .fake_ip_reverse(&std::net::IpAddr::V4(dst_ip))
+        .is_some()
         || (dst_ip.octets()[0] == 198 && (dst_ip.octets()[1] & 0xFE) == 18);
     if !is_fake {
         return None;
@@ -670,6 +707,10 @@ fn handle_fake_ip_icmp_echo(stack: &TunStack, pkt: &[u8]) -> Option<PooledBuf> {
     let icmp_csum = crate::tun::udp::checksum_public(&reply[ihl..]);
     reply[ihl + 2..ihl + 4].copy_from_slice(&icmp_csum.to_be_bytes());
 
-    debug!("[TUN-ICMP] 反射 Fake-IP Echo Reply: {} → {}", dst_ip, std::net::Ipv4Addr::from(src_bytes));
+    debug!(
+        "[TUN-ICMP] 反射 Fake-IP Echo Reply: {} → {}",
+        dst_ip,
+        std::net::Ipv4Addr::from(src_bytes)
+    );
     Some(reply)
 }

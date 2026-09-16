@@ -5,7 +5,9 @@ use mirage_core::proxy::outbound::OutboundNode;
 use std::time::Duration;
 
 fn fd_count() -> usize {
-    std::fs::read_dir("/proc/self/fd").map(|d| d.count()).unwrap_or(0)
+    std::fs::read_dir("/proc/self/fd")
+        .map(|d| d.count())
+        .unwrap_or(0)
 }
 
 #[tokio::main]
@@ -13,18 +15,26 @@ async fn main() -> anyhow::Result<()> {
     let node = NodeInfo {
         tag: "proxy".into(),
         server: std::env::var("MIRAGE_SERVER").unwrap_or("117.55.230.75".into()),
-        server_port: std::env::var("MIRAGE_PORT").unwrap_or("8443".into()).parse().unwrap(),
+        server_port: std::env::var("MIRAGE_PORT")
+            .unwrap_or("8443".into())
+            .parse()
+            .unwrap(),
         password: std::env::var("MIRAGE_PWD").unwrap_or("d029c98fd9fd3104cebf7ebb2ce632cd".into()),
         sni: std::env::var("MIRAGE_SNI").unwrap_or("speedtest.net".into()),
         pool_size: 8,
         pfs: false,
         udp_mux: true,
     };
-    eprintln!("[fd_stress] 连 {}:{} 构建引擎...", node.server, node.server_port);
+    eprintln!(
+        "[fd_stress] 连 {}:{} 构建引擎...",
+        node.server, node.server_port
+    );
     let engine = Engine::new(&node)?;
     let outbound = engine.outbounds.get("proxy").expect("出站");
     let leaf = outbound.resolve_leaf();
-    let OutboundNode::Mirage { pool, .. } = &*leaf else { return Ok(()) };
+    let OutboundNode::Mirage { pool, .. } = &*leaf else {
+        return Ok(());
+    };
 
     println!("baseline fd = {}", fd_count());
     eprintln!("[fd_stress] baseline 完成, 观察池自稳...");
@@ -45,7 +55,11 @@ async fn main() -> anyhow::Result<()> {
                 Ok(Err(e)) => eprintln!("round {round}: pool.get err {e}"),
             }
         }
-        println!("round {round}: 取到 {} 条, 持有中 fd = {}", got.len(), fd_count());
+        println!(
+            "round {round}: 取到 {} 条, 持有中 fd = {}",
+            got.len(),
+            fd_count()
+        );
         tokio::time::sleep(Duration::from_secs(2)).await;
         drop(got);
         println!("round {round}: drop 后 fd = {}", fd_count());

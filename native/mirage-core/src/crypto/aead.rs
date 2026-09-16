@@ -1,7 +1,7 @@
-use anyhow::{anyhow, Result};
-use ring::aead::{self, LessSafeKey, UnboundKey, Nonce as RingNonce};
 use crate::crypto::cipher::Cipher;
+use anyhow::{anyhow, Result};
 use hkdf::Hkdf;
+use ring::aead::{self, LessSafeKey, Nonce as RingNonce, UnboundKey};
 use sha2::Sha256;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
 
@@ -301,10 +301,11 @@ impl<R: AsyncRead + Unpin> CryptoReader<R> {
         self.nonce += 1;
 
         // In-place 极速解密
-        let plaintext_slice = self.cipher
+        let plaintext_slice = self
+            .cipher
             .open_in_place(nonce_bytes, aead::Aad::empty(), &mut self.buffer)
             .map_err(|e| anyhow!("decryption failed: {:?}", e))?;
-        
+
         let plaintext_len = plaintext_slice.len();
         self.buffer.truncate(plaintext_len);
 
@@ -339,7 +340,10 @@ impl<R: AsyncRead + Unpin> CryptoReader<R> {
     }
 
     /// 接收、解密并直接写入目标 AsyncWrite (复用实例内部 buffer 避免每次循环重复分配堆内存，提升高吞吐流式传输效率)
-    pub async fn recv_data_to<W: AsyncWrite + Unpin>(&mut self, writer: &mut W) -> Result<Option<usize>> {
+    pub async fn recv_data_to<W: AsyncWrite + Unpin>(
+        &mut self,
+        writer: &mut W,
+    ) -> Result<Option<usize>> {
         let mut header = [0u8; 5];
         self.reader.read_exact(&mut header).await?;
 
@@ -361,10 +365,11 @@ impl<R: AsyncRead + Unpin> CryptoReader<R> {
         let nonce_bytes = format_nonce(self.nonce);
         self.nonce += 1;
 
-        let plaintext_slice = self.cipher
+        let plaintext_slice = self
+            .cipher
             .open_in_place(nonce_bytes, aead::Aad::empty(), &mut self.buffer)
             .map_err(|e| anyhow!("decryption failed: {:?}", e))?;
-        
+
         let plaintext_len = plaintext_slice.len();
         self.buffer.truncate(plaintext_len);
 
@@ -527,8 +532,12 @@ mod rekey_tests {
         let k_old = LessSafeKey::new(UnboundKey::new(&aead::CHACHA20_POLY1305, &okm).unwrap());
         let mut b1 = b"legacy-compat".to_vec();
         let mut b2 = b1.clone();
-        k_new.seal_in_place_append_tag(format_nonce(0), aead::Aad::empty(), &mut b1).unwrap();
-        k_old.seal_in_place_append_tag(format_nonce(0), aead::Aad::empty(), &mut b2).unwrap();
+        k_new
+            .seal_in_place_append_tag(format_nonce(0), aead::Aad::empty(), &mut b1)
+            .unwrap();
+        k_old
+            .seal_in_place_append_tag(format_nonce(0), aead::Aad::empty(), &mut b2)
+            .unwrap();
         assert_eq!(b1, b2, "ChaCha20 密钥必须与旧版字节一致 (向后兼容)");
     }
 
@@ -573,10 +582,15 @@ mod rekey_tests {
         // 一端 ecdh 不同 (模拟 pfs 失配) → master 不同 → 解密必失败, 不静默出乱数据。
         let (a, b) = duplex(64 * 1024);
         let salt = [7u8; 32];
-        let (_ra, mut wa) = create_crypto_pair_pfs(tokio::io::empty(), a, "pw", &salt, &[8u8; 32], true);
-        let (mut rb, _wb) = create_crypto_pair_pfs(b, tokio::io::sink(), "pw", &salt, &[9u8; 32], false);
+        let (_ra, mut wa) =
+            create_crypto_pair_pfs(tokio::io::empty(), a, "pw", &salt, &[8u8; 32], true);
+        let (mut rb, _wb) =
+            create_crypto_pair_pfs(b, tokio::io::sink(), "pw", &salt, &[9u8; 32], false);
         wa.send_data(b"boom").await.unwrap();
-        assert!(rb.recv_data().await.is_err(), "ecdh 不一致必须解密失败 (fail-closed)");
+        assert!(
+            rb.recv_data().await.is_err(),
+            "ecdh 不一致必须解密失败 (fail-closed)"
+        );
     }
 }
 
@@ -594,7 +608,8 @@ mod cipher_bench {
             let mut nb = [0u8; 12];
             nb[4..12].copy_from_slice(&i.to_be_bytes());
             buf.truncate(16384);
-            key.seal_in_place_append_tag(Nonce::assume_unique_for_key(nb), Aad::empty(), &mut buf).unwrap();
+            key.seal_in_place_append_tag(Nonce::assume_unique_for_key(nb), Aad::empty(), &mut buf)
+                .unwrap();
         }
         let secs = t.elapsed().as_secs_f64();
         let gb = (iters * 16384) as f64 / 1e9;
@@ -637,7 +652,15 @@ mod padding_tests {
     /// 前 4 条被填充、之后不填, 全部必须精确还原。
     #[tokio::test]
     async fn padding_roundtrip_exact() {
-        roundtrip_with_padding(&[b"first", b"second", b"third", b"fourth", b"fifth-nopad", b"sixth"]).await;
+        roundtrip_with_padding(&[
+            b"first",
+            b"second",
+            b"third",
+            b"fourth",
+            b"fifth-nopad",
+            b"sixth",
+        ])
+        .await;
     }
 
     /// 关键安全性: content **自身尾部的零字节**不得被剥零逻辑误删 (它们在 content_type 之前)。

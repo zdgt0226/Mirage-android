@@ -1,7 +1,8 @@
 use std::net::IpAddr;
 use std::sync::OnceLock;
 
-pub type PackageResolver = Box<dyn Fn(u8, IpAddr, u16, IpAddr, u16) -> Option<String> + Send + Sync>;
+pub type PackageResolver =
+    Box<dyn Fn(u8, IpAddr, u16, IpAddr, u16) -> Option<String> + Send + Sync>;
 
 static RESOLVER: OnceLock<PackageResolver> = OnceLock::new();
 
@@ -11,7 +12,13 @@ pub fn set_package_resolver(resolver: PackageResolver) {
 }
 
 /// 解析连接归属的应用包名 (protocol: 6=TCP, 17=UDP)
-pub fn resolve_package(proto: u8, src_ip: IpAddr, src_port: u16, dst_ip: IpAddr, dst_port: u16) -> Option<String> {
+pub fn resolve_package(
+    proto: u8,
+    src_ip: IpAddr,
+    src_port: u16,
+    dst_ip: IpAddr,
+    dst_port: u16,
+) -> Option<String> {
     if let Some(f) = RESOLVER.get() {
         f(proto, src_ip, src_port, dst_ip, dst_port)
     } else {

@@ -19,9 +19,16 @@ mod tests {
 
     #[test]
     fn brackets_v6_literals() {
-        assert_eq!(join_host_port("2606:4700:4700::1111", 443), "[2606:4700:4700::1111]:443");
+        assert_eq!(
+            join_host_port("2606:4700:4700::1111", 443),
+            "[2606:4700:4700::1111]:443"
+        );
         assert_eq!(join_host_port("::1", 8443), "[::1]:8443");
-        assert_eq!(join_host_port("::", 443), "[::]:443", "服务端 v6 全接口 bind");
+        assert_eq!(
+            join_host_port("::", 443),
+            "[::]:443",
+            "服务端 v6 全接口 bind"
+        );
     }
 
     #[test]
@@ -41,9 +48,17 @@ mod tests {
     fn results_parse_as_socketaddr() {
         // 端到端: 产物必须能 parse 成 SocketAddr (裸 format 的 v6 会在这里挂)。
         use std::net::SocketAddr;
-        for (h, p) in [("2606::1", 443u16), ("::1", 80), ("::", 443), ("1.2.3.4", 8443)] {
+        for (h, p) in [
+            ("2606::1", 443u16),
+            ("::1", 80),
+            ("::", 443),
+            ("1.2.3.4", 8443),
+        ] {
             let s = join_host_port(h, p);
-            assert!(s.parse::<SocketAddr>().is_ok(), "{s} 应能 parse 成 SocketAddr");
+            assert!(
+                s.parse::<SocketAddr>().is_ok(),
+                "{s} 应能 parse 成 SocketAddr"
+            );
         }
     }
 }

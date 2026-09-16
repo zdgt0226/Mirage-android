@@ -10,6 +10,13 @@ fn main() {
         println!("{ip} ({desc}) → {}", if r { "直连" } else { "代理" });
     }
     for d in ["www.baidu.com", "www.google.com", "mp.weixin.qq.com"] {
-        println!("{d} → {}", if direct::is_cn_domain(d) { "直连" } else { "代理" });
+        println!(
+            "{d} → {}",
+            if direct::is_cn_domain(d) {
+                "直连"
+            } else {
+                "代理"
+            }
+        );
     }
 }

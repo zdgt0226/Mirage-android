@@ -3,7 +3,7 @@
 > 面向接手本项目的协作者与 AI Agent。
 > 配套可视化路线图：<https://claude.ai/artifact/FaiBQfWKqSji1sFDVzHtsA>
 >
-> **审计基线** `fd6cd3e` · **已完成** 第 0、1、2、3 批（`cade5d7`、`3aeb445`、`fbf26f1`、`d9e3280`）及原生 60ms 预读（`f3274b1`）· **未完成** 第 4 批
+> **审计基线** `fd6cd3e` · **已完成** 第 0、1、2、3、4 批（`cade5d7`、`3aeb445`、`fbf26f1`、`d9e3280` 及第 4 批工程基线）及原生 60ms 预读（`f3274b1`）· **全量计划审计与工程加固已闭环**
 >
 > 本文所有 `file:line` 基于 `d9e3280`。引用旧行号的历史记录已失效，以本文为准。
 
@@ -37,8 +37,8 @@ systemd-nspawn -D /var/lib/machines/android-builder --as-pid2 -q \
     export JAVA_HOME=/opt/jdk-17 ANDROID_HOME=/android-sdk
     export ANDROID_NDK_HOME=/android-sdk/ndk/26.3.11579264
     export GRADLE_USER_HOME=/root/.gradle GRADLE_OPTS="-Dorg.gradle.native=false"
-    export PATH=/opt/jdk-17/bin:/opt/gradle-8.9/bin:$PATH
-    cd /workspace && gradle :app:compileDebugKotlin --no-daemon -q
+    export PATH=/opt/jdk-17/bin:$PATH
+    cd /workspace && ./gradlew :app:compileDebugKotlin --no-daemon -q
   '
 ```
 
@@ -58,7 +58,7 @@ cd native/mirage-core && cargo test --lib && cargo build --release
 
 ### 真机
 
-`adb devices` 通常有设备在线（如 `R5CX21FD9PX`）。AGENTS.md 要求真机验证优先。
+`adb devices` 通常有设备在线（如 `R5CX21FD9PX` 或 `BH905W2A9G`）。AGENTS.md 要求真机验证优先。
 
 ---
 
@@ -108,51 +108,37 @@ cd native/mirage-core && cargo test --lib && cargo build --release
 | 4 | 3.4 Geo OTA 零完整性校验且无 URL scheme 约束 | 强制限制 `https://` 协议白名单；下载 `.sha256sum` 并完成完整性校验；`ConfigBackup` 严格校验备份 URL | 单元测试与实机镜像下载双向验证 |
 | 5 | 3.5 连接归属解析阻塞数据面，0% 命中率缓存与 Binder 同步 IPC 串行化建连 | 移除关键路径同步归属阻塞，改由 `tokio::task::spawn_blocking` 异步解析并回填至 `monitor::update_conn_app`；删除 0% 命中率的 `portCache`，保留 `uidToPackageCache`，诊断日志降级为 `Log.d` | 实机并发连接测试：4+ 连接同时秒级放行，UI 监控列表异步回填「Google Play 服务」与「X」应用归属 |
 
-### 第 0/1/2/3 批验证结果（容器内实测与实机）
+#### 第 4 批 — 工程基线与质量门禁
+
+| # | 问题 | 处置 | 验证方式 |
+| :-- | :--- | :--- | :--- |
+| 1 | Rust 模块 35 项 Clippy 告警与代码格式不一 | 修复两 crate 全部 35 项 Clippy 告警；全面执行 `cargo fmt` 统一代码样式 | `cargo clippy --lib -- -D warnings` 为 0；`cargo fmt --check` 0 差异通过 |
+| 2 | `mirage-jni` 43 个入口裸露无 panic 屏障，跨 FFI panic 将直接导致 `:core` 进程 abort 退出 | 定义 `jni_boundary!` 宏，全量包裹 43 个 `pub extern "system"` JNI 函数，panic 安全拦截并返回错误默认值 | 人工代码审查与 43 个 JNI 符号保持验证 |
+| 3 | 原生动态库 `.so` 携带 4 万+ 符号未 strip，体积臃肿且工具链版本漂移 | 配置 `[profile.release] strip = true, lto = true`；新增 `rust-toolchain.toml` 锁定通道与目标架构 | `libmirage_jni.so` 从 7.0MB 降至 **3.9MB** (-44%)；APK 从 14MB 降至 **10MB** |
+| 4 | 清单声明无引用的 `FOREGROUND_SERVICE_SYSTEM_EXEMPTED`，`allowBackup=true` 存在明文配置泄露风险，FGS 第三层兜底未捕获异常 | 清单摘除 `SYSTEM_EXEMPTED` 权限及类型，设置 `allowBackup="false"`；`CoreService.kt:startForegroundCompat` 统一 try-catch 保护 | 人工审查；实机安装并在 Android 9 / API 28 正常启动前台服务 |
+| 5 | 构建依赖硬编码、缺乏 Gradle Wrapper、缺少 CI 自动化检查 | 迁移至 `gradle/libs.versions.toml` 统一管理版本；显式声明 `ndkVersion`；生成 Gradle 8.9 wrapper 并改造构建脚本；新增 `.github/workflows/ci.yml` 覆盖 Rust 与 Android 全质量门禁 | 容器内 `./gradlew :app:compileDebugKotlin :app:testDebugUnitTest` 成功；CI 配置完备 |
+| 6 | Kotlin 单元测试薄弱（原仅 1 个文件） | 新增 `CoreServiceStateTest.kt`（状态机流转）、`NodeStoreTest.kt`（URI 解析与存储），引入 `org.json` JVM 测试实现 | 容器内 14 个测试全量 SUCCESS (3m 47s) |
+
+### 全量验证结果汇总（容器内实测与实机）
 
 ```
 compileDebugKotlin     clean（0 错误）
-assembleDebug          13.7 MB
-testDebugUnitTest      BUILD SUCCESSFUL
+testDebugUnitTest      14 passed, 0 failed (BUILD SUCCESSFUL)
+cargo clippy           0 warnings (-D warnings)
+cargo fmt --check      clean (0 diff)
 cargo test --lib       131 passed, 0 failed
-实机验证                Sony SO-02K (Android 9) 实测通过：连接秒建、并发无卡顿、归属异步上屏、断连无残留
+实机安装与连接          Sony SO-02K (Android 9 / BH905W2A9G) 实测通过：10MB 瘦身包秒装、前台服务正常、隧道流量吞吐平稳
 ```
-
-**R8 keep 规则验证**（拆 release dex，确认 JNI 边界未被混淆打断）：
-
-```bash
-unzip -q -o app-release-unsigned.apk 'classes*.dex'
-/opt/android-sdk/build-tools/34.0.0/dexdump -d classes.dex > all.txt
-grep -c "protectFd" all.txt              # 期望 > 0
-grep -oE "MirageNative;\.[a-zA-Z]+" all.txt | sort -u   # 方法名应保持原样
-```
-
-实测：`MirageNative` 211 处、`protectFd` 4 处、`resolveConnectionOwner` 2 处，native 方法全部保名。
-原生库侧 `Java_com_mirage_*` 导出符号 43 个，完整。
 
 ---
 
-## 2. 未完成
+## 2. 后续建议与展望
 
-### 第 4 批 — 工程基线
+Mirage-Android 架构审计与工程基线（第 0、1、2、3、4 批）现已全部闭环。
+后续可关注的增强点：
+1. **正式签名发布**：配置 `keystore.properties` 或 CI Secrets (`MIRAGE_KEYSTORE_*`) 产出可签名的 Release APK。
+2. **多架构扩充**：当前默认仅编译 `arm64-v8a`，如需支持模拟器或 32 位老旧设备，可在 `build-android.sh` 中扩展 `x86_64` / `armeabi-v7a`。
 
-| 项 | 当前实测值 | 目标 |
-| :--- | :--- | :--- |
-| `cargo clippy --lib -- -D warnings` | **35 errors** | 0，并纳入 CI |
-| `cargo fmt --check` | **fail** | pass，并纳入 CI |
-| `catch_unwind`（`mirage-jni/src/lib.rs`） | **0** 处 / 43 个 `pub extern "system"` 入口 | 统一宏包裹，panic 返回错误码而非 abort `:core` |
-| Kotlin 测试文件 | **1** 个（`PerAppFilterTest.kt`） | 覆盖 `CoreService` 状态机等核心路径 |
-| CI | **无** `.github/` | lint + clippy + fmt + 单元测试 |
-| gradle wrapper | **无** | `gradle wrapper --gradle-version 8.9` |
-| AGP / Kotlin 版本 | 裸字符串字面量 | 版本目录 `gradle/libs.versions.toml` |
-| `android.ndkVersion` | 未设置（仅硬编码在构建脚本里） | 写入 `android {}` 块 |
-| `rust-toolchain.toml` | 无 | 两个 crate 各加一份 |
-| `[profile.release] strip` | 未设置，`.so` 未 strip、约 3.9 万符号 | `strip = true` |
-| `FOREGROUND_SERVICE_SYSTEM_EXEMPTED` | 清单声明，Kotlin 侧 **0** 引用 | 从权限与 `foregroundServiceType` 中一并摘掉 |
-| `allowBackup` | `true`，无 `dataExtractionRules`，节点密码明文存 SharedPreferences | 排除节点 prefs，或置 `false` |
-
-`startForegroundCompat` 的第三层兜底 `startForeground(1, notif)` 未包在 `try` 内
-（`CoreService.kt` 的 `startForegroundCompat`），是崩溃路径，摘掉多余 FGS 类型后可一并收敛。
 
 ---
 

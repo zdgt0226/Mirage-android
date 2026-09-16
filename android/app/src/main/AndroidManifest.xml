@@ -7,7 +7,6 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Android 11+ (API 30~36) 连接归属包名溯源与分应用代理必需权限 -->
@@ -19,7 +18,7 @@
         android:icon="@mipmap/ic_launcher"
         android:theme="@style/Theme.Mirage"
         android:supportsRtl="true"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:enableOnBackInvokedCallback="true">
 
         <!-- 主界面 -->
@@ -55,7 +54,7 @@
         <service
             android:name=".CoreService"
             android:exported="false"
-            android:foregroundServiceType="specialUse|systemExempted|connectedDevice"
+            android:foregroundServiceType="specialUse|connectedDevice"
             android:permission="android.permission.BIND_VPN_SERVICE"
             android:process=":core">
             <intent-filter>

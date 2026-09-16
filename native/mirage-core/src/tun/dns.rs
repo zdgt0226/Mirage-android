@@ -15,12 +15,14 @@ use std::time::{Duration, Instant};
 use tracing::debug;
 
 use crate::engine::Engine;
-use crate::tun::TunStack;
 use crate::tun::tcp::TunTcpStream;
+use crate::tun::TunStack;
+
+type DirectCacheMap = HashMap<String, (std::net::Ipv4Addr, bool, Instant)>;
 
 /// 国内域名 → 真实 IP & 决策结果共享缓存 (分流写入, direct::route_decision 读)。
-fn direct_cache() -> &'static StdMutex<HashMap<String, (std::net::Ipv4Addr, bool, Instant)>> {
-    static C: OnceLock<StdMutex<HashMap<String, (std::net::Ipv4Addr, bool, Instant)>>> = OnceLock::new();
+fn direct_cache() -> &'static StdMutex<DirectCacheMap> {
+    static C: OnceLock<StdMutex<DirectCacheMap>> = OnceLock::new();
     C.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
@@ -43,25 +45,33 @@ const CACHE_TTL: Duration = Duration::from_secs(1800);
 
 /// 设置国内直连 DNS
 pub fn set_direct_dns(ip: std::net::Ipv4Addr) {
-    let mut s = direct_dns_server().lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = direct_dns_server()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     *s = ip;
     clear_direct_cache();
     tracing::info!("[TUN-DNS] 国内直连 DNS 设置为: {}", ip);
 }
 
 pub fn get_direct_dns() -> std::net::Ipv4Addr {
-    *direct_dns_server().lock().unwrap_or_else(|e| e.into_inner())
+    *direct_dns_server()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 /// 设置国外远程 DNS
 pub fn set_remote_dns(ip: std::net::IpAddr) {
-    let mut s = remote_dns_server().lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = remote_dns_server()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     *s = ip;
     tracing::info!("[TUN-DNS] 国外远程 DNS 设置为: {}", ip);
 }
 
 pub fn get_remote_dns() -> std::net::IpAddr {
-    *remote_dns_server().lock().unwrap_or_else(|e| e.into_inner())
+    *remote_dns_server()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 /// 清空直连 DNS 缓存 (VPN 重连/断开时调用)
@@ -245,13 +255,14 @@ pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
 async fn resolve_upstream_internal(domain: &str) -> Option<std::net::Ipv4Addr> {
     // 限制同时进行的上游 DNS UDP Socket 并发总数不超过 256 个
     static DNS_UPSTREAM_SEM: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(256);
-    let _permit = match tokio::time::timeout(Duration::from_millis(1500), DNS_UPSTREAM_SEM.acquire()).await {
-        Ok(Ok(p)) => p,
-        _ => {
-            tracing::warn!("[TUN-DNS] 上游直连解析并发达到上限 (256 并发)，触发快速降级");
-            return None;
-        }
-    };
+    let _permit =
+        match tokio::time::timeout(Duration::from_millis(1500), DNS_UPSTREAM_SEM.acquire()).await {
+            Ok(Ok(p)) => p,
+            _ => {
+                tracing::warn!("[TUN-DNS] 上游直连解析并发达到上限 (256 并发)，触发快速降级");
+                return None;
+            }
+        };
 
     let sock = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => s,
@@ -265,7 +276,7 @@ async fn resolve_upstream_internal(domain: &str) -> Option<std::net::Ipv4Addr> {
     let id = fastrand::u16(..);
     let query = build_a_query(domain, id);
     let primary_dns = get_direct_dns();
-    
+
     // 4路极速竞速上游 (覆盖阿里、腾讯、火山引擎/字节、114，消除单节点抖动与网络丢包)
     let up1 = std::net::SocketAddr::from((primary_dns, 53));
     let up2 = std::net::SocketAddr::from((std::net::Ipv4Addr::new(119, 29, 29, 29), 53));
@@ -284,7 +295,11 @@ async fn resolve_upstream_internal(domain: &str) -> Option<std::net::Ipv4Addr> {
 
     // 采用带快速重传的抢答循环 (350ms 内未收到应答立即重传广播，总超时 1200ms)
     for attempt in 0..2 {
-        let wait_dur = if attempt == 0 { Duration::from_millis(350) } else { Duration::from_millis(850) };
+        let wait_dur = if attempt == 0 {
+            Duration::from_millis(350)
+        } else {
+            Duration::from_millis(850)
+        };
         let deadline = tokio::time::Instant::now() + wait_dur;
 
         while tokio::time::Instant::now() < deadline {
@@ -294,7 +309,10 @@ async fn resolve_upstream_internal(domain: &str) -> Option<std::net::Ipv4Addr> {
             }
             match tokio::time::timeout(remain, sock.recv_from(&mut buf)).await {
                 Ok(Ok((v, from))) => {
-                    if upstreams.contains(&from) && v >= 2 && u16::from_be_bytes([buf[0], buf[1]]) == id {
+                    if upstreams.contains(&from)
+                        && v >= 2
+                        && u16::from_be_bytes([buf[0], buf[1]]) == id
+                    {
                         let qname_end = skip_dns_name(&buf[..v], 12).map(|end| end - 12);
                         if let Some(qlen) = qname_end {
                             if let Some(ip) = parse_a_answer(&buf[..v], qlen) {
@@ -319,7 +337,8 @@ async fn resolve_upstream_internal(domain: &str) -> Option<std::net::Ipv4Addr> {
                                 } else {
                                     tracing::debug!(
                                         "[TUN-DNS] 上游解析出非国内 IP ({})，标记为非直连: {}",
-                                        direct_v4, domain
+                                        direct_v4,
+                                        domain
                                     );
                                 }
                                 return Some(direct_v4);
@@ -342,14 +361,22 @@ async fn resolve_upstream_internal(domain: &str) -> Option<std::net::Ipv4Addr> {
 
     tracing::warn!(
         "[TUN-DNS] 4路竞速直连解析超时 ({}ms): {}",
-        start_time.elapsed().as_millis(), domain
+        start_time.elapsed().as_millis(),
+        domain
     );
     None
 }
 
 /// 构造应答: A → 给定 IP; AAAA/其他 → 空 answer (NOERROR); rcode=3 → SERVFAIL
 /// (隧道也不可用时的快速失败, 避免客户端连必死的 fake-IP 白等)。
-fn build_response(query: &[u8], domain: &str, qtype: u16, a_record: Option<[u8; 4]>, question_len: usize, rcode: u8) -> Option<Vec<u8>> {
+fn build_response(
+    query: &[u8],
+    domain: &str,
+    qtype: u16,
+    a_record: Option<[u8; 4]>,
+    question_len: usize,
+    rcode: u8,
+) -> Option<Vec<u8>> {
     if query.len() < 12 || question_len < 13 || question_len > query.len() {
         return None;
     }
@@ -372,7 +399,7 @@ fn build_response(query: &[u8], domain: &str, qtype: u16, a_record: Option<[u8; 
         resp.extend_from_slice(&[0xC0, 0x0C]);
         resp.extend_from_slice(&qtype.to_be_bytes());
         resp.extend_from_slice(&[0, 1]); // IN
-        // 统一使用 60s TTL，降低客户端 DNS 轮询负载与耗电；重连/启停时由 FakeIpMapper 重置机制兜底
+                                         // 统一使用 60s TTL，降低客户端 DNS 轮询负载与耗电；重连/启停时由 FakeIpMapper 重置机制兜底
         resp.extend_from_slice(&DNS_RESPONSE_TTL.to_be_bytes()); // TTL = 60s
         resp.extend_from_slice(&[0, 4]);
         resp.extend_from_slice(&ip);
@@ -421,14 +448,43 @@ fn parse_query(buf: &[u8]) -> Option<(String, u16, usize)> {
 }
 
 /// 把应答写回 TUN 的公共封装。
-fn send_dns_reply(stack: &TunStack, client: std::net::SocketAddr, server: std::net::SocketAddr, query: &[u8],
-                  domain: &str, qtype: u16, a: Option<[u8; 4]>, question_len: usize) {
-    send_dns_reply_rcode(stack, client, server, query, domain, qtype, a, question_len, 0);
+#[allow(clippy::too_many_arguments)]
+fn send_dns_reply(
+    stack: &TunStack,
+    client: std::net::SocketAddr,
+    server: std::net::SocketAddr,
+    query: &[u8],
+    domain: &str,
+    qtype: u16,
+    a: Option<[u8; 4]>,
+    question_len: usize,
+) {
+    send_dns_reply_rcode(
+        stack,
+        client,
+        server,
+        query,
+        domain,
+        qtype,
+        a,
+        question_len,
+        0,
+    );
 }
 
 /// 带 RCODE 的应答封装 (rcode=3 用于 SERVFAIL)。
-fn send_dns_reply_rcode(stack: &TunStack, client: std::net::SocketAddr, server: std::net::SocketAddr, query: &[u8],
-                        domain: &str, qtype: u16, a: Option<[u8; 4]>, question_len: usize, rcode: u8) {
+#[allow(clippy::too_many_arguments)]
+fn send_dns_reply_rcode(
+    stack: &TunStack,
+    client: std::net::SocketAddr,
+    server: std::net::SocketAddr,
+    query: &[u8],
+    domain: &str,
+    qtype: u16,
+    a: Option<[u8; 4]>,
+    question_len: usize,
+    rcode: u8,
+) {
     if let Some(resp) = build_response(query, domain, qtype, a, question_len, rcode) {
         if let Some(pkt) = crate::tun::udp::build_reply_ip_public(server, client, &resp) {
             stack.write_raw(&pkt);
@@ -440,12 +496,20 @@ fn send_dns_reply_rcode(stack: &TunStack, client: std::net::SocketAddr, server: 
 pub static DNS_QUERIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// DNS 查询入口 (mod.rs 调用): 全量 Fake-IP 极速架构 (0ms 秒回，彻底免疫 GFW 污染与排队)。
-pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, server: std::net::SocketAddr, query: &[u8]) {
+pub fn handle_dns_query(
+    stack: Arc<TunStack>,
+    client: std::net::SocketAddr,
+    server: std::net::SocketAddr,
+    query: &[u8],
+) {
     use crate::direct;
-    let Some((domain, qtype, question_len)) = parse_query(query) else { return };
+    let Some((domain, qtype, question_len)) = parse_query(query) else {
+        return;
+    };
     DNS_QUERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    let (decision, _, matched_rule) = direct::route_decision_sourced(Some(&domain), None, Some(53), Some("udp"));
+    let (decision, _, matched_rule) =
+        direct::route_decision_sourced(Some(&domain), None, Some(53), Some("udp"));
 
     if decision == direct::RuleAction::Block {
         let (cid, _conn_up, _conn_down, _) = crate::monitor::record_conn_start(
@@ -455,18 +519,41 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, serv
             &matched_rule,
             "BLOCK",
         );
-        tracing::info!("[TUN-DNS] 规则拦截 (Block): {} (qtype={}) from {}", domain, qtype, client);
+        tracing::info!(
+            "[TUN-DNS] 规则拦截 (Block): {} (qtype={}) from {}",
+            domain,
+            qtype,
+            client
+        );
         let a = if qtype == 1 { Some([0, 0, 0, 0]) } else { None };
-        send_dns_reply(&stack, client, server, query, &domain, qtype, a, question_len);
+        send_dns_reply(
+            &stack,
+            client,
+            server,
+            query,
+            &domain,
+            qtype,
+            a,
+            question_len,
+        );
         crate::monitor::record_conn_close(cid, query.len() as u64, 64, "Blocked");
         return;
     }
 
     if qtype == 1 {
         // A 记录: 全量统一分配 Fake-IP (0ms 秒回，避免上游 DNS 排队与 GFW 污染注入系统 DNS 缓存)
-        let a = stack.engine().fake_ip_allocate(&domain).map(|ip| ip.octets());
+        let a = stack
+            .engine()
+            .fake_ip_allocate(&domain)
+            .map(|ip| ip.octets());
         let fake_ip_str = if let Some(ref oct) = a {
-            tracing::debug!("[TUN-DNS] Fake-IP 分配: {} → 198.18.{}.{} (qtype=1) from {}", domain, oct[2], oct[3], client);
+            tracing::debug!(
+                "[TUN-DNS] Fake-IP 分配: {} → 198.18.{}.{} (qtype=1) from {}",
+                domain,
+                oct[2],
+                oct[3],
+                client
+            );
             format!("198.18.{}.{}", oct[2], oct[3])
         } else {
             "198.18.0.2".to_string()
@@ -478,7 +565,16 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, serv
             &matched_rule,
             "Fake-IP",
         );
-        send_dns_reply(&stack, client, server, query, &domain, qtype, a, question_len);
+        send_dns_reply(
+            &stack,
+            client,
+            server,
+            query,
+            &domain,
+            qtype,
+            a,
+            question_len,
+        );
         crate::monitor::record_conn_close(cid, query.len() as u64, 64, "Resolved (Fake-IP)");
 
         // 异步预解析门控 (严防 DNS 泄露与 GFW 投毒):
@@ -491,8 +587,22 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, serv
         }
     } else {
         // 非 A 记录 (AAAA/HTTPS/TXT): 返回空应答 (NOERROR)，引导客户端立即回退 IPv4
-        tracing::debug!("[TUN-DNS] 非 A 记录查询: {} (type={}) from {} → 空应答", domain, qtype, client);
-        send_dns_reply(&stack, client, server, query, &domain, qtype, None, question_len);
+        tracing::debug!(
+            "[TUN-DNS] 非 A 记录查询: {} (type={}) from {} → 空应答",
+            domain,
+            qtype,
+            client
+        );
+        send_dns_reply(
+            &stack,
+            client,
+            server,
+            query,
+            &domain,
+            qtype,
+            None,
+            question_len,
+        );
     }
 }
 
@@ -534,7 +644,9 @@ pub async fn relay_tcp_dns(stack: Arc<TunStack>, handle: SocketHandle) {
         if let Some((domain, qtype, question_len)) = parse_query(&query) {
             if qtype == 1 && crate::direct::should_direct(Some(&domain), None) {
                 if let Some(ip) = resolve_upstream(&domain).await {
-                    let resp = build_response(&query, &domain, qtype, Some(ip.octets()), question_len, 0).unwrap_or_default();
+                    let resp =
+                        build_response(&query, &domain, qtype, Some(ip.octets()), question_len, 0)
+                            .unwrap_or_default();
                     let mut framed = Vec::with_capacity(2 + resp.len());
                     framed.extend_from_slice(&(resp.len() as u16).to_be_bytes());
                     framed.extend_from_slice(&resp);
@@ -569,7 +681,15 @@ mod tests {
             }
             p - 12 + 1
         };
-        let resp = build_response(&query, "example.com", 1, Some([198, 18, 0, 2]), 12 + qname_end + 4, 0).unwrap();
+        let resp = build_response(
+            &query,
+            "example.com",
+            1,
+            Some([198, 18, 0, 2]),
+            12 + qname_end + 4,
+            0,
+        )
+        .unwrap();
         // A 记录部分: [C0 0C][00 01][00 01][TTL 4B][00 04][IP 4B]
         let a_offset = resp.len() - 16;
         let ttl_bytes = &resp[a_offset + 6..a_offset + 10];
@@ -603,7 +723,14 @@ mod tests {
         clear_direct_cache();
         {
             let mut map = direct_cache().lock().unwrap_or_else(|e| e.into_inner());
-            map.insert("baidu.com".to_string(), (std::net::Ipv4Addr::new(220, 181, 38, 148), true, Instant::now()));
+            map.insert(
+                "baidu.com".to_string(),
+                (
+                    std::net::Ipv4Addr::new(220, 181, 38, 148),
+                    true,
+                    Instant::now(),
+                ),
+            );
         }
         assert!(direct_dns_lookup("baidu.com").is_some());
         assert_eq!(is_dynamic_direct_domain("baidu.com"), Some(true));
@@ -622,8 +749,14 @@ mod tests {
         insert_direct_cache("Api.Bilibili.Com.".to_string(), cn_ip, true);
 
         // 验证大小写与尾点完全归一化
-        assert_eq!(direct_dns_lookup("api.bilibili.com"), Some(std::net::IpAddr::V4(cn_ip)));
-        assert_eq!(direct_dns_lookup("API.BILIBILI.COM."), Some(std::net::IpAddr::V4(cn_ip)));
+        assert_eq!(
+            direct_dns_lookup("api.bilibili.com"),
+            Some(std::net::IpAddr::V4(cn_ip))
+        );
+        assert_eq!(
+            direct_dns_lookup("API.BILIBILI.COM."),
+            Some(std::net::IpAddr::V4(cn_ip))
+        );
         assert_eq!(is_dynamic_direct_domain("api.bilibili.com"), Some(true));
         assert_eq!(is_dynamic_direct_domain("API.BILIBILI.COM."), Some(true));
 
@@ -631,26 +764,47 @@ mod tests {
         let foreign_ip = std::net::Ipv4Addr::new(8, 8, 8, 8);
         insert_direct_cache("Foreign.Example.Org".to_string(), foreign_ip, false);
 
-        assert_eq!(direct_dns_lookup("foreign.example.org"), Some(std::net::IpAddr::V4(foreign_ip)));
+        assert_eq!(
+            direct_dns_lookup("foreign.example.org"),
+            Some(std::net::IpAddr::V4(foreign_ip))
+        );
         assert_eq!(is_dynamic_direct_domain("foreign.example.org"), Some(false));
 
         // 3. 验证路由决策：正向命中 Direct，负向不短路回退至 Default Proxy
-        let (act_cn, _, _) = crate::direct::route_decision_sourced(Some("api.bilibili.com"), None, Some(443), Some("tcp"));
+        let (act_cn, _, _) = crate::direct::route_decision_sourced(
+            Some("api.bilibili.com"),
+            None,
+            Some(443),
+            Some("tcp"),
+        );
         assert_eq!(act_cn, crate::direct::RuleAction::Direct);
 
-        let (act_neg, _, rule_neg) = crate::direct::route_decision_sourced(Some("foreign.example.org"), None, Some(443), Some("tcp"));
+        let (act_neg, _, rule_neg) = crate::direct::route_decision_sourced(
+            Some("foreign.example.org"),
+            None,
+            Some(443),
+            Some("tcp"),
+        );
         assert_eq!(act_neg, crate::direct::RuleAction::Proxy);
         assert_eq!(rule_neg, "Default Proxy");
 
         // 验证强证据优先: 若域名负向缓存，但实际目标 IP 为国内合法 IP (is_cn_ip)，强证据推翻负缓存，放行直连
         let real_cn_target = std::net::IpAddr::V4(std::net::Ipv4Addr::new(223, 5, 5, 5));
-        let (act_override, _, rule_override) = crate::direct::route_decision_sourced(Some("foreign.example.org"), Some(real_cn_target), Some(443), Some("tcp"));
+        let (act_override, _, rule_override) = crate::direct::route_decision_sourced(
+            Some("foreign.example.org"),
+            Some(real_cn_target),
+            Some(443),
+            Some("tcp"),
+        );
         assert_eq!(act_override, crate::direct::RuleAction::Direct);
         assert_eq!(rule_override, "CN IP (Direct)");
 
         // 4. 防投毒验证: GFW 注入 bogon IP (243.185.187.39) 必须被 is_trustworthy_cn_answer 严格拒绝
         let bogon_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(243, 185, 187, 39));
-        assert!(!crate::direct::is_trustworthy_cn_answer(bogon_ip), "GFW 注入 Bogon IP 绝不可作为国内直连证据！");
+        assert!(
+            !crate::direct::is_trustworthy_cn_answer(bogon_ip),
+            "GFW 注入 Bogon IP 绝不可作为国内直连证据！"
+        );
 
         clear_direct_cache();
     }
@@ -662,12 +816,16 @@ mod tests {
 
         // 1. 未命中规则的未知境外域名 (如 obscure.example.org)
         let domain = "obscure.example.org";
-        let (decision, _, matched_rule) = crate::direct::route_decision_sourced(Some(domain), None, Some(53), Some("udp"));
+        let (decision, _, matched_rule) =
+            crate::direct::route_decision_sourced(Some(domain), None, Some(53), Some("udp"));
         assert_eq!(decision, crate::direct::RuleAction::Direct);
         assert_eq!(matched_rule, "Default Direct");
 
         // 验证生产门控函数: 即使 default_action 为 direct，未显式匹配直连的境外域名绝不向国内 UDP 53 解析！
-        assert!(!crate::direct::should_resolve_upstream(domain), "default_action 为 direct 时的兜底域名绝不能向国内 UDP 53 广播泄漏！");
+        assert!(
+            !crate::direct::should_resolve_upstream(domain),
+            "default_action 为 direct 时的兜底域名绝不能向国内 UDP 53 广播泄漏！"
+        );
 
         // 2. 验证显式国内域名与国别 TLD 能够正确放行预解析
         assert!(crate::direct::should_resolve_upstream("bilibili.com"));

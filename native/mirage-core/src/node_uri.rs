@@ -30,8 +30,7 @@ fn percent_decode(s: &str) -> Result<String> {
                 return Err(anyhow!("百分号转义不完整: ...{}", &s[i..]));
             }
             let hex = std::str::from_utf8(&b[i + 1..i + 3])?;
-            let v = u8::from_str_radix(hex, 16)
-                .map_err(|_| anyhow!("非法百分号转义: %{}", hex))?;
+            let v = u8::from_str_radix(hex, 16).map_err(|_| anyhow!("非法百分号转义: %{}", hex))?;
             out.push(v);
             i += 3;
         } else {
@@ -117,7 +116,14 @@ impl NodeUri {
             return Err(anyhow!("缺少 sni 参数 (伪装域名, 必须与服务端一致)"));
         }
 
-        Ok(NodeUri { password, host: host.to_string(), port, sni, pool_size, udp_mux })
+        Ok(NodeUri {
+            password,
+            host: host.to_string(),
+            port,
+            sni,
+            pool_size,
+            udp_mux,
+        })
     }
 }
 
@@ -140,9 +146,9 @@ mod tests {
         assert_eq!(n.host, "2606:4700:4700::1111", "括号剥离, host 不带 []");
         assert_eq!(n.port, 443);
         // 拼回可用 socket 串 (join_host_port 会重新加括号)
-        assert!(
-            crate::net_util::join_host_port(&n.host, n.port).parse::<std::net::SocketAddr>().is_ok()
-        );
+        assert!(crate::net_util::join_host_port(&n.host, n.port)
+            .parse::<std::net::SocketAddr>()
+            .is_ok());
     }
 
     #[test]
@@ -170,14 +176,14 @@ mod tests {
     #[test]
     fn rejects_malformed() {
         for bad in [
-            "http://p@h:1?sni=x",              // 协议不对
-            "mirage://noatsign",               // 无 @
-            "mirage://p@hostonly?sni=x",       // 无端口
-            "mirage://p@h:notaport?sni=x",     // 端口非数字
-            "mirage://p@h:0?sni=x",            // 端口 0
-            "mirage://@h:1?sni=x",             // 空密码
-            "mirage://p@h:1",                  // 缺 sni
-            "mirage://p@h:1?sni=",             // 空 sni
+            "http://p@h:1?sni=x",          // 协议不对
+            "mirage://noatsign",           // 无 @
+            "mirage://p@hostonly?sni=x",   // 无端口
+            "mirage://p@h:notaport?sni=x", // 端口非数字
+            "mirage://p@h:0?sni=x",        // 端口 0
+            "mirage://@h:1?sni=x",         // 空密码
+            "mirage://p@h:1",              // 缺 sni
+            "mirage://p@h:1?sni=",         // 空 sni
         ] {
             assert!(NodeUri::parse(bad).is_err(), "应拒绝: {bad}");
         }

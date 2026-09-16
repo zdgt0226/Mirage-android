@@ -1,9 +1,9 @@
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::Mutex;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{error, info, warn};
 use rand::RngExt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex;
+use tracing::{error, info, warn};
 
 static HANDSHAKE_CACHE: OnceLock<Mutex<Vec<Vec<u8>>>> = OnceLock::new();
 static WARMING_UP: AtomicBool = AtomicBool::new(false);
@@ -99,12 +99,18 @@ pub async fn prewarm(camouflage_host: &str) {
         return; // 已在预热 (启动阶段理论上不会撞)
     }
     let _guard = WarmGuard;
-    info!("Prewarming HandshakeCache from {} at startup", camouflage_host);
+    info!(
+        "Prewarming HandshakeCache from {} at startup",
+        camouflage_host
+    );
     let templates = fetch_batch(camouflage_host).await;
     if !templates.is_empty() {
         let mut guard = cache().lock().await;
         guard.extend(templates);
-        info!("HandshakeCache prewarmed with {} real templates", guard.len());
+        info!(
+            "HandshakeCache prewarmed with {} real templates",
+            guard.len()
+        );
     } else {
         warn!(
             "HandshakeCache prewarm got no templates from {} — will retry lazily on first connection",
@@ -143,13 +149,19 @@ pub async fn get_server_hello_pfs(
         // 主动预热正常应已填充; 走到这说明预热失败或未运行 —— 懒预热兜底.
         if !WARMING_UP.swap(true, Ordering::SeqCst) {
             let _guard = WarmGuard;
-            info!("HandshakeCache empty, lazy-warming from {}", camouflage_host);
+            info!(
+                "HandshakeCache empty, lazy-warming from {}",
+                camouflage_host
+            );
             let templates = fetch_batch(camouflage_host).await;
             let mut guard = cache().lock().await;
             if !templates.is_empty() {
                 guard.extend(templates);
             } else {
-                error!("Failed to fetch any templates from {}. Using fallback.", camouflage_host);
+                error!(
+                    "Failed to fetch any templates from {}. Using fallback.",
+                    camouflage_host
+                );
                 guard.push(fallback_server_hello(client_hello, client_session_id));
             }
             drop(guard);
@@ -197,13 +209,24 @@ async fn fetch_real_server_hello(host: &str) -> anyhow::Result<Vec<u8>> {
         }?;
         crate::protect::protect(sock.as_raw_fd());
         match tokio::time::timeout(std::time::Duration::from_secs(5), sock.connect(a)).await {
-            Ok(Ok(s)) => { stream = Some(s); break; }
+            Ok(Ok(s)) => {
+                stream = Some(s);
+                break;
+            }
             Ok(Err(e)) => last_err = Some(e),
-            Err(_) => last_err = Some(std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timeout")),
+            Err(_) => {
+                last_err = Some(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "connect timeout",
+                ))
+            }
         }
     }
     let mut stream = stream.ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::TimedOut, format!("模板获取 connect 失败: {last_err:?}"))
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("模板获取 connect 失败: {last_err:?}"),
+        )
     })?;
 
     let mut session_id = [0u8; 32];
@@ -223,12 +246,20 @@ async fn fetch_real_server_hello(host: &str) -> anyhow::Result<Vec<u8>> {
 
     let mut buf = Vec::new();
     let mut header = [0u8; 5];
-    
+
     // Read ServerHello (0x16)。超时/读不全绝不能返回 Ok(空 buf) —— fetch_batch
     // 无长度过滤会把它当合法模板灌进 cache 毒化全局 (所有连接随机取到空/残破模板 →
     // 客户端 read_server_handshake 校验崩)。抖动丢包时返回 Err 让上层回落 fallback。
-    if tokio::time::timeout(std::time::Duration::from_secs(5), stream.read_exact(&mut header)).await.is_err() {
-        return Err(anyhow::anyhow!("timeout reading ServerHello header from camouflage host"));
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.read_exact(&mut header),
+    )
+    .await
+    .is_err()
+    {
+        return Err(anyhow::anyhow!(
+            "timeout reading ServerHello header from camouflage host"
+        ));
     }
     // 首记录必须是 Handshake(0x16). 若对端回 Alert(0x15) 说明 ClientHello 被拒,
     // 决不能把 alert 当模板缓存 (会毒化 cache 让所有客户端收到 alert). 返回 Err
@@ -242,8 +273,17 @@ async fn fetch_real_server_hello(host: &str) -> anyhow::Result<Vec<u8>> {
     buf.extend_from_slice(&header);
     let len = u16::from_be_bytes([header[3], header[4]]) as usize;
     let mut body = vec![0u8; len];
-    if tokio::time::timeout(std::time::Duration::from_secs(5), stream.read_exact(&mut body)).await.is_err() {
-        return Err(anyhow::anyhow!("timeout reading ServerHello body (len={}) from camouflage host", len));
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.read_exact(&mut body),
+    )
+    .await
+    .is_err()
+    {
+        return Err(anyhow::anyhow!(
+            "timeout reading ServerHello body (len={}) from camouflage host",
+            len
+        ));
     }
     buf.extend_from_slice(&body);
 
@@ -260,10 +300,22 @@ async fn fetch_real_server_hello(host: &str) -> anyhow::Result<Vec<u8>> {
         if template_is_complete(&buf) {
             break;
         }
-        if tokio::time::timeout(std::time::Duration::from_secs(2), stream.read_exact(&mut header)).await.is_ok() {
+        if tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.read_exact(&mut header),
+        )
+        .await
+        .is_ok()
+        {
             let len = u16::from_be_bytes([header[3], header[4]]) as usize;
             let mut body = vec![0u8; len];
-            if tokio::time::timeout(std::time::Duration::from_secs(2), stream.read_exact(&mut body)).await.is_ok() {
+            if tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                stream.read_exact(&mut body),
+            )
+            .await
+            .is_ok()
+            {
                 buf.extend_from_slice(&header);
                 buf.extend_from_slice(&body);
             } else {
@@ -289,48 +341,50 @@ fn patch_server_hello(flight: &[u8], client_session_id: &[u8]) -> Vec<u8> {
     if flight.len() < 44 || flight[0] != 0x16 {
         return flight.to_vec();
     }
-    
+
     let sid_len = flight[43] as usize;
     if flight.len() < 44 + sid_len {
         return flight.to_vec();
     }
-    
+
     let diff = client_session_id.len() as isize - sid_len as isize;
-    
+
     let mut result = Vec::with_capacity(flight.len() + client_session_id.len());
     result.extend_from_slice(&flight[..43]);
     result.push(client_session_id.len() as u8);
     result.extend_from_slice(client_session_id);
     result.extend_from_slice(&flight[44 + sid_len..]);
-    
+
     // Server Random
     let mut new_random = [0u8; 32];
     rand::fill(&mut new_random);
     result[11..43].copy_from_slice(&new_random);
-    
+
     let old_record_len = u16::from_be_bytes([flight[3], flight[4]]) as usize;
     let old_hs_len = u32::from_be_bytes([0, flight[6], flight[7], flight[8]]) as usize;
-    
+
     // clamp 到各字段合法范围, 别让负值/越界静默回绕成乱长度 (record 16bit, hs 24bit)。
     // 正常输入 (session_id <= 32B) 恒落区间内, clamp 只是防御。
     let new_record_len = (old_record_len as isize + diff).clamp(0, u16::MAX as isize) as u16;
     let new_hs_len = (old_hs_len as isize + diff).clamp(0, 0xFF_FFFF) as u32;
-    
+
     result[3] = (new_record_len >> 8) as u8;
     result[4] = (new_record_len & 0xFF) as u8;
-    
+
     result[6] = (new_hs_len >> 16) as u8;
     result[7] = (new_hs_len >> 8) as u8;
     result[8] = (new_hs_len & 0xFF) as u8;
-    
+
     result
 }
 
 fn get_session_id(client_hello: &[u8]) -> Option<&[u8]> {
-    if client_hello.len() < 44 { return None; }
+    if client_hello.len() < 44 {
+        return None;
+    }
     let sid_len = client_hello[43] as usize;
     if client_hello.len() >= 44 + sid_len {
-        Some(&client_hello[44..44+sid_len])
+        Some(&client_hello[44..44 + sid_len])
     } else {
         None
     }
@@ -340,10 +394,14 @@ fn get_session_id(client_hello: &[u8]) -> Option<&[u8]> {
 /// 选它没提供的套件, 浅层探针可识破). 偏好 AES256>AES128>ChaCha; 解析失败退 1301.
 fn pick_cipher(client_hello: &[u8]) -> [u8; 2] {
     let default = [0x13, 0x01];
-    if client_hello.len() < 44 { return default; }
+    if client_hello.len() < 44 {
+        return default;
+    }
     let sid_len = client_hello[43] as usize;
     let off = 44 + sid_len;
-    if client_hello.len() < off + 2 { return default; }
+    if client_hello.len() < off + 2 {
+        return default;
+    }
     let cl = u16::from_be_bytes([client_hello[off], client_hello[off + 1]]) as usize;
     let end = (off + 2 + cl).min(client_hello.len());
     let ciphers = &client_hello[off + 2..end];
@@ -490,11 +548,18 @@ mod tests {
             }
             i += 4 + el;
         }
-        assert!(saw_keyshare && saw_supver, "必须有 key_share + supported_versions");
+        assert!(
+            saw_keyshare && saw_supver,
+            "必须有 key_share + supported_versions"
+        );
 
         // ---- CCS + ApplicationData flight ----
         let mut j = 5 + rec_len; // ServerHello record 之后
-        assert_eq!(&sh[j..j + 6], &[0x14, 0x03, 0x03, 0x00, 0x01, 0x01], "ChangeCipherSpec");
+        assert_eq!(
+            &sh[j..j + 6],
+            &[0x14, 0x03, 0x03, 0x00, 0x01, 0x01],
+            "ChangeCipherSpec"
+        );
         j += 6;
         assert_eq!(sh[j], 0x17, "ApplicationData");
         let flight_len = u16(&sh, j + 3);
@@ -522,7 +587,10 @@ mod tests {
     fn fallback_template_is_complete() {
         let ch = make_client_hello();
         let fb = fallback_server_hello(&ch, &[0xAB; 32]);
-        assert!(template_is_complete(&fb), "fallback 必须含齐 0x16+0x14+0x17");
+        assert!(
+            template_is_complete(&fb),
+            "fallback 必须含齐 0x16+0x14+0x17"
+        );
     }
 
     #[test]
@@ -540,7 +608,10 @@ mod tests {
         t.extend(rec(0x16, 800));
         t.extend(rec(0x16, 300));
         t.extend(rec(0x16, 4));
-        assert!(!template_is_complete(&t), "全 0x16 (缺 CCS/加密) 必须判不完整");
+        assert!(
+            !template_is_complete(&t),
+            "全 0x16 (缺 CCS/加密) 必须判不完整"
+        );
     }
 
     #[test]
@@ -592,7 +663,7 @@ mod tests {
             let (mut sock, _) = listener.accept().await.unwrap();
             let mut buf = [0u8; 1024];
             let _ = sock.read(&mut buf).await; // 读掉 ClientHello
-            // 只回一条 ServerHello record: [0x16][03 03][len=48][48B]。缺 0x14/0x17。
+                                               // 只回一条 ServerHello record: [0x16][03 03][len=48][48B]。缺 0x14/0x17。
             let mut sh = vec![0x16, 0x03, 0x03];
             sh.extend_from_slice(&48u16.to_be_bytes());
             sh.extend(std::iter::repeat_n(0u8, 48));
@@ -601,6 +672,10 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         });
         let res = fetch_real_server_hello(&addr.to_string()).await;
-        assert!(res.is_err(), "只回 ServerHello 的不完整模板必须被拒, 得到: {:?}", res.map(|b| b.len()));
+        assert!(
+            res.is_err(),
+            "只回 ServerHello 的不完整模板必须被拒, 得到: {:?}",
+            res.map(|b| b.len())
+        );
     }
 }

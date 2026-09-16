@@ -112,7 +112,10 @@ mod tests {
                 break;
             }
         }
-        assert!(saw0 && saw1, "公钥最高位应随机化 (0/1 都出现), 实得 saw0={saw0} saw1={saw1}");
+        assert!(
+            saw0 && saw1,
+            "公钥最高位应随机化 (0/1 都出现), 实得 saw0={saw0} saw1={saw1}"
+        );
     }
 
     /// 即便对端随机化了最高位 (或人为设 1), agree 仍应算出与规范公钥相同的共享秘密
@@ -124,7 +127,7 @@ mod tests {
         let a_pub = a.public;
         let mut b_pub_flipped = b.public;
         b_pub_flipped[31] ^= 0x80; // 翻转对端公钥最高位
-        // a 与"翻转最高位的 b 公钥" agree, 应等于 b 与 a 公钥 agree (b 收端 mask a 的最高位)。
+                                   // a 与"翻转最高位的 b 公钥" agree, 应等于 b 与 a 公钥 agree (b 收端 mask a 的最高位)。
         let s1 = a.agree(&b_pub_flipped).unwrap();
         let s2 = b.agree(&a_pub).unwrap();
         assert_eq!(s1, s2, "最高位翻转不应改变 ECDH 结果 (收端 mask)");

@@ -24,28 +24,40 @@ static SET_SOCK_NETWORK_FN: OnceLock<Option<AndroidSetSockNetworkFn>> = OnceLock
 
 #[cfg(target_os = "android")]
 fn bind_socket_to_network(net_handle: u64, fd: i32) -> bool {
-    let fn_opt = SET_SOCK_NETWORK_FN.get_or_init(|| {
-        unsafe {
-            let sym = libc::dlsym(libc::RTLD_DEFAULT, b"android_setsocknetwork\0".as_ptr() as *const _);
-            if !sym.is_null() {
-                return Some(std::mem::transmute::<*mut libc::c_void, AndroidSetSockNetworkFn>(sym));
-            }
-            let handle = libc::dlopen(b"libandroid.so\0".as_ptr() as *const _, libc::RTLD_NOW);
-            if !handle.is_null() {
-                let sym = libc::dlsym(handle, b"android_setsocknetwork\0".as_ptr() as *const _);
-                if !sym.is_null() {
-                    return Some(std::mem::transmute::<*mut libc::c_void, AndroidSetSockNetworkFn>(sym));
-                }
-            }
-            None
+    let fn_opt = SET_SOCK_NETWORK_FN.get_or_init(|| unsafe {
+        let sym = libc::dlsym(
+            libc::RTLD_DEFAULT,
+            b"android_setsocknetwork\0".as_ptr() as *const _,
+        );
+        if !sym.is_null() {
+            return Some(std::mem::transmute::<
+                *mut libc::c_void,
+                AndroidSetSockNetworkFn,
+            >(sym));
         }
+        let handle = libc::dlopen(b"libandroid.so\0".as_ptr() as *const _, libc::RTLD_NOW);
+        if !handle.is_null() {
+            let sym = libc::dlsym(handle, b"android_setsocknetwork\0".as_ptr() as *const _);
+            if !sym.is_null() {
+                return Some(std::mem::transmute::<
+                    *mut libc::c_void,
+                    AndroidSetSockNetworkFn,
+                >(sym));
+            }
+        }
+        None
     });
 
     if let Some(f) = fn_opt {
         let ret = unsafe { f(net_handle, fd) };
         if ret != 0 {
             let errno = std::io::Error::last_os_error();
-            tracing::warn!("[protect] android_setsocknetwork(handle={}, fd={}) 失败: {}", net_handle, fd, errno);
+            tracing::warn!(
+                "[protect] android_setsocknetwork(handle={}, fd={}) 失败: {}",
+                net_handle,
+                fd,
+                errno
+            );
             // 自愈机制：若句柄失效 (如 ENONET / 64: Machine is not on the network, 或 EINVAL / 22),
             // 说明底层网络已被系统销毁。立即清空 ACTIVE_NET_HANDLE, 避免后续套接字持续被死句柄毒化
             ACTIVE_NET_HANDLE.store(0, Ordering::Release);

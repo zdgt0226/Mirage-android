@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use smoltcp::wire::{Ipv4Packet, Ipv6Packet, IpProtocol, UdpPacket};
+use smoltcp::wire::{IpProtocol, Ipv4Packet, Ipv6Packet, UdpPacket};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
@@ -70,11 +70,21 @@ struct UdpFlow {
 
 impl UdpEngine {
     pub fn new(engine: Arc<Engine>) -> Self {
-        Self { flows: StdMutex::new(HashMap::new()), engine }
+        Self {
+            flows: StdMutex::new(HashMap::new()),
+            engine,
+        }
     }
 
     /// 泵线程调用: 把一个 TUN 数据报送进对应流。无流则建 (超限丢)。
-    pub fn feed(&self, stack: Arc<TunStack>, src: SocketAddr, dst: SocketAddr, payload: &[u8], raw_pkt: &[u8]) {
+    pub fn feed(
+        &self,
+        stack: Arc<TunStack>,
+        src: SocketAddr,
+        dst: SocketAddr,
+        payload: &[u8],
+        raw_pkt: &[u8],
+    ) {
         let fake_domain = self.engine.fake_ip_reverse(&dst.ip());
 
         // 规则拦截 (Block / Reject): 立即回送 ICMP Port Unreachable 并丢弃
@@ -99,7 +109,12 @@ impl UdpEngine {
             }
         }
 
-        let key = FlowKey { src: src.ip(), src_port: src.port(), dst: dst.ip(), dst_port: dst.port() };
+        let key = FlowKey {
+            src: src.ip(),
+            src_port: src.port(),
+            dst: dst.ip(),
+            dst_port: dst.port(),
+        };
         let mut map = self.flows.lock().unwrap_or_else(|e| e.into_inner());
         GLOBAL_FLOW_COUNT.store(map.len(), std::sync::atomic::Ordering::Relaxed);
         let flow = match map.get(&key) {
@@ -114,7 +129,6 @@ impl UdpEngine {
                 map.insert(key, flow.clone());
                 let stack = Arc::clone(&stack);
                 let eng = Arc::clone(&self.engine);
-                let key = key;
                 tokio::spawn(async move {
                     udp_flow_relay(stack, eng, key, rx).await;
                 });
@@ -162,16 +176,34 @@ async fn udp_flow_relay(
     key: FlowKey,
     mut rx: tokio::sync::mpsc::Receiver<(SocketAddr, SocketAddr, Vec<u8>)>,
 ) {
-    let _guard = FlowGuard { stack: stack.clone(), key };
+    let _guard = FlowGuard {
+        stack: stack.clone(),
+        key,
+    };
     let flow_id = NEXT_FLOW_ID.fetch_add(1, Ordering::Relaxed);
 
     // 复合分流规则决策
     let reverse_domain = engine.fake_ip_reverse(&key.dst);
-    let (action, source, matched_rule) = crate::direct::route_decision_sourced(reverse_domain.as_deref(), Some(key.dst), Some(key.dst_port), Some("udp"));
+    let (action, source, matched_rule) = crate::direct::route_decision_sourced(
+        reverse_domain.as_deref(),
+        Some(key.dst),
+        Some(key.dst_port),
+        Some("udp"),
+    );
 
     if action == crate::direct::RuleAction::Block {
-        let target_str = reverse_domain.as_deref().map(|d| d.to_string()).unwrap_or_else(|| format!("{}:{}", key.dst, key.dst_port));
-        let (cid, _, _, _) = crate::monitor::record_conn_start_with_app("UDP", &target_str, &key.dst.to_string(), &matched_rule, "BLOCK", None);
+        let target_str = reverse_domain
+            .as_deref()
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| format!("{}:{}", key.dst, key.dst_port));
+        let (cid, _, _, _) = crate::monitor::record_conn_start_with_app(
+            "UDP",
+            &target_str,
+            &key.dst.to_string(),
+            &matched_rule,
+            "BLOCK",
+            None,
+        );
         let s_ip = key.src;
         let s_port = key.src_port;
         let d_ip = key.dst;
@@ -210,7 +242,9 @@ async fn udp_flow_relay(
         None => return,
     };
     let leaf = node.resolve_leaf();
-    let OutboundNode::Mirage { pool, .. } = &*leaf else { return };
+    let OutboundNode::Mirage { pool, .. } = &*leaf else {
+        return;
+    };
 
     // 目标描述: fake-IP → 域名 (ATYP=0x03); 否则裸 IP
     let (target_domain, target_ip) = if let Some(domain) = engine.fake_ip_reverse(&key.dst) {
@@ -230,7 +264,14 @@ async fn udp_flow_relay(
     } else {
         key.dst.to_string()
     };
-    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start_with_app("UDP", &target_display, &resolved_str, &matched_rule, "PROXY", None);
+    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start_with_app(
+        "UDP",
+        &target_display,
+        &resolved_str,
+        &matched_rule,
+        "PROXY",
+        None,
+    );
     let s_ip = key.src;
     let s_port = key.src_port;
     let d_ip = key.dst;
@@ -252,21 +293,23 @@ async fn udp_flow_relay(
             }
         };
         let sid = mtun.alloc_sid();
-        let (_sid_guard, got_downlink) = match mtun.try_register(
-            sid,
-            stack.clone(),
-            key,
-            Some(conn_down.clone()),
-        ) {
-            Some(v) => v,
-            None => {
-                debug!("[TUN-UDP] Mirage-MUX 单隧道 sid 到上限, 丢弃 (客户端回落 TCP)");
-                crate::monitor::record_conn_close(cid, 0, 0, "Mux Sid Limit Reached");
-                return;
-            }
-        };
+        let (_sid_guard, got_downlink) =
+            match mtun.try_register(sid, stack.clone(), key, Some(conn_down.clone())) {
+                Some(v) => v,
+                None => {
+                    debug!("[TUN-UDP] Mirage-MUX 单隧道 sid 到上限, 丢弃 (客户端回落 TCP)");
+                    crate::monitor::record_conn_close(cid, 0, 0, "Mux Sid Limit Reached");
+                    return;
+                }
+            };
 
-        debug!("[TUN-UDP] #{} 新 Mux 会话 {} → {} (sid={})", flow_id, fmt_flow(&key), target_display, sid);
+        debug!(
+            "[TUN-UDP] #{} 新 Mux 会话 {} → {} (sid={})",
+            flow_id,
+            fmt_flow(&key),
+            target_display,
+            sid
+        );
 
         let shared_tx = mtun.uplink();
         let up_atomic = conn_up.clone();
@@ -345,7 +388,12 @@ async fn udp_flow_relay(
     let writer = Arc::new(Mutex::new(tunnel.writer));
     let mut reader = tunnel.reader;
 
-    debug!("[TUN-UDP] #{} 新单流会话 {} → {}", flow_id, fmt_flow(&key), target_domain.as_deref().unwrap_or(""));
+    debug!(
+        "[TUN-UDP] #{} 新单流会话 {} → {}",
+        flow_id,
+        fmt_flow(&key),
+        target_domain.as_deref().unwrap_or("")
+    );
 
     // 下行: rx → 封帧 → 隧道 (机会式合帧)
     let dn_writer = writer.clone();
@@ -365,7 +413,8 @@ async fn udp_flow_relay(
             while batch.len() < 16 * 1024 {
                 match rx.try_recv() {
                     Ok((_, _, p2)) => {
-                        if let Some(f2) = build_frame(&target_domain, target_ip, key.dst_port, &p2) {
+                        if let Some(f2) = build_frame(&target_domain, target_ip, key.dst_port, &p2)
+                        {
                             batch.extend_from_slice(&f2);
                         }
                     }
@@ -389,7 +438,11 @@ async fn udp_flow_relay(
         let mut got_downlink = false;
         let mut recv: u64 = 0;
         loop {
-            let to = if got_downlink { UDP_IDLE } else { FIRST_DOWNLINK_TIMEOUT };
+            let to = if got_downlink {
+                UDP_IDLE
+            } else {
+                FIRST_DOWNLINK_TIMEOUT
+            };
             let chunk = match tokio::time::timeout(to, reader.recv_data()).await {
                 Ok(Ok(c)) => c,
                 _ => break,
@@ -571,7 +624,11 @@ fn checksum(data: &[u8]) -> u16 {
     !(sum as u16)
 }
 
-fn build_ipv4_udp(src: std::net::SocketAddrV4, dst: std::net::SocketAddrV4, payload: &[u8]) -> Vec<u8> {
+fn build_ipv4_udp(
+    src: std::net::SocketAddrV4,
+    dst: std::net::SocketAddrV4,
+    payload: &[u8],
+) -> Vec<u8> {
     let udp_len = 8 + payload.len();
     let total_len = 20 + udp_len;
     let mut pkt = vec![0u8; total_len];
@@ -584,8 +641,8 @@ fn build_ipv4_udp(src: std::net::SocketAddrV4, dst: std::net::SocketAddrV4, payl
     pkt[6..8].copy_from_slice(&0u16.to_be_bytes()); // flags/frag
     pkt[8] = 64; // TTL
     pkt[9] = 17; // UDP
-    // ⚠️ IPv4 头布局: offset 12-15 = **源地址**, 16-19 = **目的地址**
-    // (早期写反导致应答包地址颠倒, 回程永远到不了客户端 —— 见 tcpdump 抓包)
+                 // ⚠️ IPv4 头布局: offset 12-15 = **源地址**, 16-19 = **目的地址**
+                 // (早期写反导致应答包地址颠倒, 回程永远到不了客户端 —— 见 tcpdump 抓包)
     pkt[12..16].copy_from_slice(&src.ip().octets());
     pkt[16..20].copy_from_slice(&dst.ip().octets());
     let ip_csum = checksum(&pkt[0..20]);
@@ -612,7 +669,11 @@ fn build_ipv4_udp(src: std::net::SocketAddrV4, dst: std::net::SocketAddrV4, payl
     pkt
 }
 
-fn build_ipv6_udp(src: std::net::SocketAddrV6, dst: std::net::SocketAddrV6, payload: &[u8]) -> Vec<u8> {
+fn build_ipv6_udp(
+    src: std::net::SocketAddrV6,
+    dst: std::net::SocketAddrV6,
+    payload: &[u8],
+) -> Vec<u8> {
     let udp_len = 8 + payload.len();
     let total_len = 40 + udp_len;
     let mut pkt = vec![0u8; total_len];
@@ -622,7 +683,7 @@ fn build_ipv6_udp(src: std::net::SocketAddrV6, dst: std::net::SocketAddrV6, payl
     pkt[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
     pkt[6] = 17; // next header UDP
     pkt[7] = 64; // hop limit
-    // IPv6 头布局: offset 8-23 = **源地址**, 24-39 = **目的地址**
+                 // IPv6 头布局: offset 8-23 = **源地址**, 24-39 = **目的地址**
     pkt[8..24].copy_from_slice(&src.ip().octets());
     pkt[24..40].copy_from_slice(&dst.ip().octets());
 
@@ -669,7 +730,7 @@ pub fn build_icmp_port_unreachable(orig_pkt: &[u8]) -> Option<Vec<u8>> {
             pkt[0] = 0x45;
             pkt[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
             pkt[8] = 64; // TTL
-            pkt[9] = 1;  // Protocol: ICMP (1)
+            pkt[9] = 1; // Protocol: ICMP (1)
             pkt[12..16].copy_from_slice(&orig_dst); // Src = original Dst
             pkt[16..20].copy_from_slice(&orig_src); // Dst = original Src
             let ip_csum = checksum(&pkt[0..20]);
@@ -749,10 +810,8 @@ pub fn parse_udp_datagram(pkt: &[u8]) -> Option<(SocketAddr, SocketAddr, &[u8])>
                 return None;
             }
             let udp = UdpPacket::new_checked(ip.payload()).ok()?;
-            let src: Ipv4Addr = ip.src_addr().into();
-            let src = SocketAddr::new(IpAddr::V4(src), udp.src_port());
-            let dst: Ipv4Addr = ip.dst_addr().into();
-            let dst = SocketAddr::new(IpAddr::V4(dst), udp.dst_port());
+            let src = SocketAddr::new(IpAddr::V4(ip.src_addr()), udp.src_port());
+            let dst = SocketAddr::new(IpAddr::V4(ip.dst_addr()), udp.dst_port());
             Some((src, dst, udp.payload()))
         }
         6 => {
@@ -761,10 +820,8 @@ pub fn parse_udp_datagram(pkt: &[u8]) -> Option<(SocketAddr, SocketAddr, &[u8])>
                 return None;
             }
             let udp = UdpPacket::new_checked(ip.payload()).ok()?;
-            let src: Ipv6Addr = ip.src_addr().into();
-            let src = SocketAddr::new(IpAddr::V6(src), udp.src_port());
-            let dst: Ipv6Addr = ip.dst_addr().into();
-            let dst = SocketAddr::new(IpAddr::V6(dst), udp.dst_port());
+            let src = SocketAddr::new(IpAddr::V6(ip.src_addr()), udp.src_port());
+            let dst = SocketAddr::new(IpAddr::V6(ip.dst_addr()), udp.dst_port());
             Some((src, dst, udp.payload()))
         }
         _ => None,
@@ -795,13 +852,14 @@ mod tests {
             q.extend_from_slice(label.as_bytes());
         }
         q.extend_from_slice(&[0, 0, 1, 0, 1]); // root + A + IN
-        // IP 头 + UDP 头
+                                               // IP 头 + UDP 头
         let udp_len = 8 + q.len();
         let total = 20 + udp_len;
         let mut p = vec![0u8; total];
         p[0] = 0x45;
         p[2..4].copy_from_slice(&(total as u16).to_be_bytes());
-        p[8] = 64; p[9] = 17;
+        p[8] = 64;
+        p[9] = 17;
         p[12..16].copy_from_slice(&[10, 99, 0, 2]);
         p[16..20].copy_from_slice(&[198, 18, 0, 1]);
         let u = &mut p[20..];
@@ -851,7 +909,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_udp_abort_cancels_relay() {
-        let (cid, _up, _down, abort) = crate::monitor::record_conn_start("UDP", "1.1.1.1:53", "1.1.1.1", "Rule", "PROXY");
+        let (cid, _up, _down, abort) =
+            crate::monitor::record_conn_start("UDP", "1.1.1.1:53", "1.1.1.1", "Rule", "PROXY");
 
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let handle = tokio::spawn(async move {
@@ -871,7 +930,10 @@ mod tests {
         // 模拟 UI "断开连接" 操作
         assert!(crate::monitor::close_connection(cid));
         let aborted = handle.await.unwrap();
-        assert!(aborted, "UDP 连接 abort 必须可被 close_connection 立即唤醒并终止");
+        assert!(
+            aborted,
+            "UDP 连接 abort 必须可被 close_connection 立即唤醒并终止"
+        );
     }
 }
 
@@ -912,7 +974,10 @@ async fn udp_flow_direct(
                 }
             }
         } else {
-            debug!("[TUN-UDP/direct] 目标为 Fake-IP ({}) 但无对应域名，无法直连 UDP", key.dst);
+            debug!(
+                "[TUN-UDP/direct] 目标为 Fake-IP ({}) 但无对应域名，无法直连 UDP",
+                key.dst
+            );
             return None;
         }
     } else {
@@ -944,7 +1009,14 @@ async fn udp_flow_direct(
     let client = SocketAddr::new(key.src, key.src_port);
     debug!("[TUN-UDP/direct] 新流 {} → {}", fmt_flow(&key), dst);
 
-    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start_with_app("UDP", &target_display, &target_ip.to_string(), &matched_rule, "DIRECT", None);
+    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start_with_app(
+        "UDP",
+        &target_display,
+        &target_ip.to_string(),
+        &matched_rule,
+        "DIRECT",
+        None,
+    );
     let s_ip = key.src;
     let s_port = key.src_port;
     let d_ip = key.dst;
@@ -987,7 +1059,8 @@ async fn udp_flow_direct(
         let mut n_recv: u64 = 0;
         let mut buf = vec![0u8; 65536];
         loop {
-            let (n, _from) = match tokio::time::timeout(UDP_IDLE, up_sock.recv_from(&mut buf)).await {
+            let (n, _from) = match tokio::time::timeout(UDP_IDLE, up_sock.recv_from(&mut buf)).await
+            {
                 Ok(Ok(v)) => v,
                 _ => break,
             };
@@ -1013,7 +1086,12 @@ async fn udp_flow_direct(
         }
     };
     crate::monitor::record_conn_close(cid, sent, recv, close_reason);
-    debug!("[TUN-UDP/direct] {} 关闭 (↑{} ↓{}, 原因: {})", fmt_flow(&key),
-        human_bytes(sent), human_bytes(recv), close_reason);
+    debug!(
+        "[TUN-UDP/direct] {} 关闭 (↑{} ↓{}, 原因: {})",
+        fmt_flow(&key),
+        human_bytes(sent),
+        human_bytes(recv),
+        close_reason
+    );
     None
 }

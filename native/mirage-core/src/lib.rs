@@ -18,21 +18,10 @@
 //! - Android: `native/mirage-jni` (JNI cdylib, 拿 VpnService 的 TUN fd + protect 回调)
 //! - iOS:     `native/mirage-ios` (规划中, 见 `docs/IOS_PORTING.md`)
 
+pub mod attribution;
+pub mod command_server;
 pub mod config;
 pub mod crypto;
-pub mod direct;
-pub mod direct_cn_domains;
-pub mod direct_cn_ipv4;
-pub mod geo;
-pub mod dns;
-pub mod engine;
-pub mod net_util;
-pub mod node_uri;
-pub mod proxy;
-pub mod time_sync;
-pub mod monitor;
-pub mod protect;
-pub mod tun;
 /// 未鉴权的本机调试 REST 接口。
 ///
 /// Android 不隔离 App 之间的 loopback: 任何持有 INTERNET 权限的应用都能访问
@@ -41,8 +30,19 @@ pub mod tun;
 /// feature 时才编译。
 #[cfg(any(debug_assertions, feature = "debug-server"))]
 pub mod debug_server;
-pub mod attribution;
-pub mod command_server;
+pub mod direct;
+pub mod direct_cn_domains;
+pub mod direct_cn_ipv4;
+pub mod dns;
+pub mod engine;
+pub mod geo;
+pub mod monitor;
+pub mod net_util;
+pub mod node_uri;
+pub mod protect;
+pub mod proxy;
+pub mod time_sync;
+pub mod tun;
 
 /// 版本信息 (跟随 vendored 协议版本, 见 vendor/SYNC.md)。
 pub const PROTOCOL_SYNC: &str = include_str!("vendor/SYNC.md");

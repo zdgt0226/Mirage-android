@@ -39,7 +39,11 @@ pub struct Ipv4Cidr {
 impl Ipv4Cidr {
     pub fn new(ip: Ipv4Addr, prefix: u8) -> Self {
         let net = u32::from(ip);
-        let mask = if prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
+        let mask = if prefix == 0 {
+            0
+        } else {
+            !0u32 << (32 - prefix)
+        };
         Self {
             net: net & mask,
             mask,
@@ -62,7 +66,11 @@ pub struct Ipv6Cidr {
 impl Ipv6Cidr {
     pub fn new(ip: std::net::Ipv6Addr, prefix: u8) -> Self {
         let net = u128::from(ip);
-        let mask = if prefix == 0 { 0 } else { !0u128 << (128 - prefix) };
+        let mask = if prefix == 0 {
+            0
+        } else {
+            !0u128 << (128 - prefix)
+        };
         Self {
             net: net & mask,
             mask,
@@ -224,7 +232,7 @@ fn read_varint(buf: &[u8], mut pos: usize) -> Option<(u64, usize)> {
     None
 }
 
-fn read_len_delim<'a>(buf: &'a [u8], pos: usize) -> Option<(&'a [u8], usize)> {
+fn read_len_delim(buf: &[u8], pos: usize) -> Option<(&[u8], usize)> {
     let (len, pos) = read_varint(buf, pos)?;
     let len = len as usize;
     if pos + len > buf.len() {
@@ -256,7 +264,9 @@ fn parse_domain_msg(buf: &[u8]) -> Option<SiteDomain> {
             (2, 2) => {
                 // value
                 let (data, next_pos) = read_len_delim(buf, pos)?;
-                value = String::from_utf8_lossy(data).trim_end_matches('.').to_ascii_lowercase();
+                value = String::from_utf8_lossy(data)
+                    .trim_end_matches('.')
+                    .to_ascii_lowercase();
                 pos = next_pos;
             }
             (_, 0) => {
@@ -268,11 +278,15 @@ fn parse_domain_msg(buf: &[u8]) -> Option<SiteDomain> {
                 pos = next_pos;
             }
             (_, 1) => {
-                if pos + 8 > buf.len() { break; }
+                if pos + 8 > buf.len() {
+                    break;
+                }
                 pos += 8;
             }
             (_, 5) => {
-                if pos + 4 > buf.len() { break; }
+                if pos + 4 > buf.len() {
+                    break;
+                }
                 pos += 4;
             }
             _ => break,
@@ -330,11 +344,15 @@ fn parse_geosite_entry(buf: &[u8]) -> Option<(String, Vec<SiteDomain>)> {
                 pos = next_pos;
             }
             (_, 1) => {
-                if pos + 8 > buf.len() { break; }
+                if pos + 8 > buf.len() {
+                    break;
+                }
                 pos += 8;
             }
             (_, 5) => {
-                if pos + 4 > buf.len() { break; }
+                if pos + 4 > buf.len() {
+                    break;
+                }
                 pos += 4;
             }
             _ => break,
@@ -352,28 +370,40 @@ pub fn parse_geosite_file(data: &[u8]) -> HashMap<String, Vec<SiteDomain>> {
     let mut map = HashMap::new();
     let mut pos = 0;
     while pos < data.len() {
-        let Some((tag, next_pos)) = read_varint(data, pos) else { break };
+        let Some((tag, next_pos)) = read_varint(data, pos) else {
+            break;
+        };
         pos = next_pos;
         let fn_num = tag >> 3;
         let wire_type = tag & 7;
 
         if fn_num == 1 && wire_type == 2 {
-            let Some((entry_data, next_pos)) = read_len_delim(data, pos) else { break };
+            let Some((entry_data, next_pos)) = read_len_delim(data, pos) else {
+                break;
+            };
             if let Some((code, domains)) = parse_geosite_entry(entry_data) {
                 map.insert(code, domains);
             }
             pos = next_pos;
         } else if wire_type == 0 {
-            let Some((_, next_pos)) = read_varint(data, pos) else { break };
+            let Some((_, next_pos)) = read_varint(data, pos) else {
+                break;
+            };
             pos = next_pos;
         } else if wire_type == 2 {
-            let Some((_, next_pos)) = read_len_delim(data, pos) else { break };
+            let Some((_, next_pos)) = read_len_delim(data, pos) else {
+                break;
+            };
             pos = next_pos;
         } else if wire_type == 1 {
-            if pos + 8 > data.len() { break; }
+            if pos + 8 > data.len() {
+                break;
+            }
             pos += 8;
         } else if wire_type == 5 {
-            if pos + 4 > data.len() { break; }
+            if pos + 4 > data.len() {
+                break;
+            }
             pos += 4;
         } else {
             break;
@@ -415,11 +445,15 @@ fn parse_cidr_msg(buf: &[u8]) -> Option<IpCidr> {
                 pos = next_pos;
             }
             (_, 1) => {
-                if pos + 8 > buf.len() { break; }
+                if pos + 8 > buf.len() {
+                    break;
+                }
                 pos += 8;
             }
             (_, 5) => {
-                if pos + 4 > buf.len() { break; }
+                if pos + 4 > buf.len() {
+                    break;
+                }
                 pos += 4;
             }
             _ => break,
@@ -476,11 +510,15 @@ fn parse_geoip_entry(buf: &[u8]) -> Option<(String, Vec<Ipv4Cidr>, Vec<Ipv6Cidr>
                 pos = next_pos;
             }
             (_, 1) => {
-                if pos + 8 > buf.len() { break; }
+                if pos + 8 > buf.len() {
+                    break;
+                }
                 pos += 8;
             }
             (_, 5) => {
-                if pos + 4 > buf.len() { break; }
+                if pos + 4 > buf.len() {
+                    break;
+                }
                 pos += 4;
             }
             _ => break,
@@ -494,18 +532,27 @@ fn parse_geoip_entry(buf: &[u8]) -> Option<(String, Vec<Ipv4Cidr>, Vec<Ipv6Cidr>
     }
 }
 
-pub fn parse_geoip_file(data: &[u8]) -> (HashMap<String, Vec<Ipv4Cidr>>, HashMap<String, Vec<Ipv6Cidr>>) {
+pub fn parse_geoip_file(
+    data: &[u8],
+) -> (
+    HashMap<String, Vec<Ipv4Cidr>>,
+    HashMap<String, Vec<Ipv6Cidr>>,
+) {
     let mut v4_map = HashMap::new();
     let mut v6_map = HashMap::new();
     let mut pos = 0;
     while pos < data.len() {
-        let Some((tag, next_pos)) = read_varint(data, pos) else { break };
+        let Some((tag, next_pos)) = read_varint(data, pos) else {
+            break;
+        };
         pos = next_pos;
         let fn_num = tag >> 3;
         let wire_type = tag & 7;
 
         if fn_num == 1 && wire_type == 2 {
-            let Some((entry_data, next_pos)) = read_len_delim(data, pos) else { break };
+            let Some((entry_data, next_pos)) = read_len_delim(data, pos) else {
+                break;
+            };
             if let Some((code, v4, v6)) = parse_geoip_entry(entry_data) {
                 if !v4.is_empty() {
                     v4_map.insert(code.clone(), v4);
@@ -516,16 +563,24 @@ pub fn parse_geoip_file(data: &[u8]) -> (HashMap<String, Vec<Ipv4Cidr>>, HashMap
             }
             pos = next_pos;
         } else if wire_type == 0 {
-            let Some((_, next_pos)) = read_varint(data, pos) else { break };
+            let Some((_, next_pos)) = read_varint(data, pos) else {
+                break;
+            };
             pos = next_pos;
         } else if wire_type == 2 {
-            let Some((_, next_pos)) = read_len_delim(data, pos) else { break };
+            let Some((_, next_pos)) = read_len_delim(data, pos) else {
+                break;
+            };
             pos = next_pos;
         } else if wire_type == 1 {
-            if pos + 8 > data.len() { break; }
+            if pos + 8 > data.len() {
+                break;
+            }
             pos += 8;
         } else if wire_type == 5 {
-            if pos + 4 > data.len() { break; }
+            if pos + 4 > data.len() {
+                break;
+            }
             pos += 4;
         } else {
             break;
@@ -546,7 +601,11 @@ pub fn load_geo_files(geosite_path: &str, geoip_path: &str) -> (usize, usize) {
         match std::fs::read(geosite_path) {
             Ok(bytes) => {
                 site_map = parse_geosite_file(&bytes);
-                info!("[GEO] 成功加载 geosite.dat ({} tags, 路径: {})", site_map.len(), geosite_path);
+                info!(
+                    "[GEO] 成功加载 geosite.dat ({} tags, 路径: {})",
+                    site_map.len(),
+                    geosite_path
+                );
             }
             Err(e) => warn!("[GEO] 读取 geosite.dat 失败 ({}): {}", geosite_path, e),
         }
@@ -560,7 +619,9 @@ pub fn load_geo_files(geosite_path: &str, geoip_path: &str) -> (usize, usize) {
                 ip_v6_map = res.1;
                 info!(
                     "[GEO] 成功加载 geoip.dat ({} IPv4 codes, {} IPv6 codes, 路径: {})",
-                    ip_v4_map.len(), ip_v6_map.len(), geoip_path
+                    ip_v4_map.len(),
+                    ip_v6_map.len(),
+                    geoip_path
                 );
             }
             Err(e) => warn!("[GEO] 读取 geoip.dat 失败 ({}): {}", geoip_path, e),
@@ -610,31 +671,46 @@ pub fn get_geo_tags_json() -> String {
         "geoip_count": ips.len(),
         "geosite_tags": sites,
         "geoip_codes": ips,
-    }).to_string()
+    })
+    .to_string()
 }
 
 /// 获取包含详细条目数量的 GeoSite 和 GeoIP 列表 (供 Tag 内省搜索器使用)
 pub fn get_geo_tags_detail_json() -> String {
     let g = global_geo().read().unwrap_or_else(|e| e.into_inner());
-    
-    let mut site_details: Vec<serde_json::Value> = g.sites.iter().map(|(tag, matcher)| {
-        serde_json::json!({
-            "tag": tag,
-            "count": matcher.count,
+
+    let mut site_details: Vec<serde_json::Value> = g
+        .sites
+        .iter()
+        .map(|(tag, matcher)| {
+            serde_json::json!({
+                "tag": tag,
+                "count": matcher.count,
+            })
         })
-    }).collect();
+        .collect();
     site_details.sort_by(|a, b| {
-        a["tag"].as_str().unwrap_or("").cmp(b["tag"].as_str().unwrap_or(""))
+        a["tag"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["tag"].as_str().unwrap_or(""))
     });
 
-    let mut ip_details: Vec<serde_json::Value> = g.ip_v4.iter().map(|(code, entries)| {
-        serde_json::json!({
-            "code": code,
-            "count": entries.len(),
+    let mut ip_details: Vec<serde_json::Value> = g
+        .ip_v4
+        .iter()
+        .map(|(code, entries)| {
+            serde_json::json!({
+                "code": code,
+                "count": entries.len(),
+            })
         })
-    }).collect();
+        .collect();
     ip_details.sort_by(|a, b| {
-        a["code"].as_str().unwrap_or("").cmp(b["code"].as_str().unwrap_or(""))
+        a["code"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["code"].as_str().unwrap_or(""))
     });
 
     serde_json::json!({
@@ -644,5 +720,6 @@ pub fn get_geo_tags_detail_json() -> String {
         "geoip_codes": ip_details,
         "geosite_path": g.geosite_path,
         "geoip_path": g.geoip_path,
-    }).to_string()
+    })
+    .to_string()
 }

@@ -17,10 +17,10 @@ pub fn start_command_server(
     stop_notify: Arc<tokio::sync::Notify>,
     handle: Option<&tokio::runtime::Handle>,
 ) {
-    #[cfg(target_os = "linux")]
-    use std::os::linux::net::SocketAddrExt;
     #[cfg(target_os = "android")]
     use std::os::android::net::SocketAddrExt;
+    #[cfg(target_os = "linux")]
+    use std::os::linux::net::SocketAddrExt;
     use std::os::unix::net::UnixListener as StdUnixListener;
 
     let fut = async move {

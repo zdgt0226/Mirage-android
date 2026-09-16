@@ -26,6 +26,7 @@ type Writer = CryptoWriter<TunnelWrite>;
 type ReadFut = Pin<Box<dyn Future<Output = (Reader, io::Result<Vec<u8>>)> + Send>>;
 type WriteFut = Pin<Box<dyn Future<Output = (Writer, io::Result<()>)> + Send>>;
 
+#[allow(clippy::large_enum_variant)]
 enum ReadState {
     Idle(Reader),
     Busy(ReadFut),
@@ -33,6 +34,7 @@ enum ReadState {
     Poisoned,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum WriteState {
     Idle(Writer),
     Busy(WriteFut),
@@ -224,7 +226,11 @@ mod tests {
 
         let mut buf = vec![0u8; 64];
         let n = ms.read(&mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"world back", "MirageStream 应把隧道回包当字节流读出");
+        assert_eq!(
+            &buf[..n],
+            b"world back",
+            "MirageStream 应把隧道回包当字节流读出"
+        );
 
         srv.await.unwrap();
     }

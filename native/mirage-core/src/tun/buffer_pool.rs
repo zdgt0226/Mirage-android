@@ -183,7 +183,9 @@ impl PooledBuf {
         self.buf.as_mut_ptr()
     }
 
-    /// 安全性需由调用者保证：new_len <= capacity
+    /// # Safety
+    ///
+    /// 调用者必须保证 `new_len <= self.buf.capacity()`，且缓冲区前 `new_len` 个字节已被正确初始化。
     #[inline]
     pub unsafe fn set_len(&mut self, new_len: usize) {
         self.buf.set_len(new_len);

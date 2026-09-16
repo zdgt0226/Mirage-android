@@ -22,10 +22,10 @@ use std::time::Duration;
 // 每条 brutal-enabled 连接起一个 monitor task, 周期性读 TCP_INFO, 重传率
 // 超阈值 → setsockopt TCP_CONGESTION=bbr 切回, 让 kernel 自适应.
 const MONITOR_INTERVAL: Duration = Duration::from_secs(10);
-const MIN_SEGS_PER_WINDOW: u32 = 500;        // 不到 500 包不评估 (流量太少噪声大)
-const RETRANS_THRESHOLD_PCT: f64 = 5.0;      // 单窗口 retrans 比 > 5% 判定不适合
-const MAX_MONITOR_CHECKS: usize = 18;        // 3 分钟 (18 × 10s) 后停止监测
-const STABLE_OK_CHECKS: usize = 6;           // 连续 6 个窗口正常即认定该链路稳定
+const MIN_SEGS_PER_WINDOW: u32 = 500; // 不到 500 包不评估 (流量太少噪声大)
+const RETRANS_THRESHOLD_PCT: f64 = 5.0; // 单窗口 retrans 比 > 5% 判定不适合
+const MAX_MONITOR_CHECKS: usize = 18; // 3 分钟 (18 × 10s) 后停止监测
+const STABLE_OK_CHECKS: usize = 6; // 连续 6 个窗口正常即认定该链路稳定
 
 /// 仅在 LISTENER fd 上设 TCP_CONGESTION = "brutal", accept 出来的子 socket
 /// 自动继承算法名. 这样子 socket 从 SYN-ACK 起就是 brutal, kernel pacing
@@ -54,7 +54,10 @@ pub fn set_brutal_on_listener(fd: i32) {
                 );
             }
         } else {
-            tracing::info!("Brutal CC pre-set on listener fd={} (will be inherited by accepted sockets)", fd);
+            tracing::info!(
+                "Brutal CC pre-set on listener fd={} (will be inherited by accepted sockets)",
+                fd
+            );
         }
     }
 }
@@ -364,7 +367,8 @@ pub fn spawn_fallback_monitor(fd: i32) {
                     ),
                     Err(e) => tracing::warn!(
                         "Brutal CC retrans high ({:.1}%) but BBR fallback failed: {}",
-                        retrans_pct, e
+                        retrans_pct,
+                        e
                     ),
                 }
                 return;
@@ -375,7 +379,8 @@ pub fn spawn_fallback_monitor(fd: i32) {
                 // 链路稳定, 不必再监测
                 tracing::debug!(
                     "Brutal CC stable on fd={} ({} OK windows), stopping monitor",
-                    fd, consecutive_ok
+                    fd,
+                    consecutive_ok
                 );
                 return;
             }
@@ -440,7 +445,10 @@ mod decide_tests {
 
     #[test]
     fn zero_rtt_no_decision() {
-        assert_eq!(decide_brutal_rate(0, BASE_RTT, 100, 0, 1000, BASE_RATE, BASE_RATE), None);
+        assert_eq!(
+            decide_brutal_rate(0, BASE_RTT, 100, 0, 1000, BASE_RATE, BASE_RATE),
+            None
+        );
     }
 
     #[test]
@@ -465,7 +473,10 @@ mod decide_tests {
         let current = BASE_RATE / 2;
         let r = decide_brutal_rate(50, BASE_RTT, 100, 0, 1000, BASE_RATE, current);
         let rate = r.expect("恢复应产出新速率");
-        assert!(rate > current, "健康应向上恢复; got {rate} vs current {current}");
+        assert!(
+            rate > current,
+            "健康应向上恢复; got {rate} vs current {current}"
+        );
         assert!(rate <= BASE_RATE, "不得超过 base_rate");
     }
 

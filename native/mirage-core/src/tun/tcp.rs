@@ -21,7 +21,7 @@ use tracing::{debug, warn};
 
 use crate::proxy::outbound::Address;
 use crate::proxy::tunnel::Tunnel;
-use crate::tun::{TunStack, SOCK_BUF, lock_inner};
+use crate::tun::{lock_inner, TunStack, SOCK_BUF};
 
 /// 活跃 TCP 连接计数 (含隧道/直连, 流量监测用)。
 pub static TCP_ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -72,14 +72,18 @@ impl TunTcpStream {
         std::future::poll_fn(|cx| {
             let mut g = lock_inner(&self.stack.inner);
             if !g.sockets.iter().any(|(h, _)| h == self.handle) {
-                return Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionAborted, "连接已被清理")));
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "连接已被清理",
+                )));
             }
             let sock = g.sockets.get_mut::<tcp::Socket>(self.handle);
             match sock.state() {
                 tcp::State::Established => Poll::Ready(Ok(())),
-                tcp::State::Closed | tcp::State::TimeWait => {
-                    Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionAborted, "连接被拒绝/重置")))
-                }
+                tcp::State::Closed | tcp::State::TimeWait => Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "连接被拒绝/重置",
+                ))),
                 _ => {
                     sock.register_recv_waker(cx.waker());
                     sock.register_send_waker(cx.waker());
@@ -166,7 +170,10 @@ impl AsyncRead for TunTcpStream {
                         }
                         Ok(_) => break,
                         Err(e) => {
-                            err = Some(io::Error::new(io::ErrorKind::ConnectionReset, format!("{e:?}")));
+                            err = Some(io::Error::new(
+                                io::ErrorKind::ConnectionReset,
+                                format!("{e:?}"),
+                            ));
                             break;
                         }
                     }
@@ -254,7 +261,7 @@ async fn connect_tunnel(
     let node = stack
         .engine()
         .outbounds
-        .get(&stack.engine().default_tag())
+        .get(stack.engine().default_tag())
         .ok_or_else(|| anyhow::anyhow!("默认出站不存在"))?;
     let leaf = node.resolve_leaf();
     let OutboundNode::Mirage { pool, .. } = &*leaf else {
@@ -284,7 +291,7 @@ async fn connect_tunnel(
             Ok(()) => return Ok(tunnel),
             Err(e) => {
                 warn!("[TUN-TCP] 隧道发送目标头失败 (attempt={attempt}): {e}, 自动重试新鲜隧道");
-                last_err = Some(e.into());
+                last_err = Some(e);
             }
         }
     }
@@ -321,11 +328,19 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
     if should_sniff {
         let mut sniff_buf = [0u8; 2048];
         // 将超时从 150ms 压缩至 40ms (移动端 smoltcp 缓冲区读取为 0ms，非 HTTP/TLS 最多等待 40ms 放行)
-        if let Ok(Ok(n)) = tokio::time::timeout(std::time::Duration::from_millis(40), stream.read(&mut sniff_buf)).await {
+        if let Ok(Ok(n)) = tokio::time::timeout(
+            std::time::Duration::from_millis(40),
+            stream.read(&mut sniff_buf),
+        )
+        .await
+        {
             if n > 0 {
                 let sniffed = crate::tun::sniffer::Sniffer::sniff_tcp(&sniff_buf[..n]);
                 if let Some(h) = sniffed.host {
-                    debug!("[TUN-TCP] 智能嗅探提取域名 ({:?}): {} (目标: {}:{})", sniffed.protocol, h, dst.0, dst.1);
+                    debug!(
+                        "[TUN-TCP] 智能嗅探提取域名 ({:?}): {} (目标: {}:{})",
+                        sniffed.protocol, h, dst.0, dst.1
+                    );
                     direct_domain = Some(h);
                 }
                 initial_payload.extend_from_slice(&sniff_buf[..n]);
@@ -333,10 +348,18 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
         }
     }
 
-    let (action, source, matched_rule) = crate::direct::route_decision_sourced(direct_domain.as_deref(), Some(dst.0), Some(dst.1), Some("tcp"));
+    let (action, source, matched_rule) = crate::direct::route_decision_sourced(
+        direct_domain.as_deref(),
+        Some(dst.0),
+        Some(dst.1),
+        Some("tcp"),
+    );
 
     if action == crate::direct::RuleAction::Block {
-        let target_name = direct_domain.as_deref().map(|d| d.to_string()).unwrap_or_else(|| dst.0.to_string());
+        let target_name = direct_domain
+            .as_deref()
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| dst.0.to_string());
         let (cid, _, _, _) = crate::monitor::record_conn_start_with_app(
             "TCP",
             &format!("{}:{}", target_name, dst.1),
@@ -351,7 +374,9 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
             let d_ip = dst.0;
             let d_port = dst.1;
             tokio::task::spawn_blocking(move || {
-                if let Some(pkg) = crate::attribution::resolve_package(6, s_ip, s_port, d_ip, d_port) {
+                if let Some(pkg) =
+                    crate::attribution::resolve_package(6, s_ip, s_port, d_ip, d_port)
+                {
                     crate::monitor::update_conn_app(cid, pkg);
                 }
             });
@@ -363,11 +388,30 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
     }
 
     if action == crate::direct::RuleAction::Direct {
-        relay_direct(stack.clone(), stream, dst, direct_domain.clone(), initial_payload, matched_rule, source, src).await;
+        relay_direct(
+            stack.clone(),
+            stream,
+            dst,
+            direct_domain.clone(),
+            initial_payload,
+            matched_rule,
+            source,
+            src,
+        )
+        .await;
         return;
     }
 
-    relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule, src).await;
+    relay_proxy(
+        stack,
+        stream,
+        dst,
+        direct_domain,
+        initial_payload,
+        matched_rule,
+        src,
+    )
+    .await;
 }
 
 /// 代理路径: smoltcp socket ⇄ Mirage 加密隧道
@@ -425,7 +469,9 @@ async fn relay_proxy(
     let mut initial_data = initial_payload;
     if initial_data.is_empty() {
         let mut buf = [0u8; 16384];
-        if let Ok(Ok(n)) = tokio::time::timeout(std::time::Duration::from_millis(60), stream.read(&mut buf)).await {
+        if let Ok(Ok(n)) =
+            tokio::time::timeout(std::time::Duration::from_millis(60), stream.read(&mut buf)).await
+        {
             if n > 0 {
                 initial_data.extend_from_slice(&buf[..n]);
             }
@@ -457,13 +503,20 @@ async fn relay_proxy(
                 }
             }
         }
-        conn_up.fetch_add(initial_data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        conn_up.fetch_add(
+            initial_data.len() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     let (mut local_rd, mut local_wr) = tokio::io::split(stream);
 
     let start_time = std::time::Instant::now();
-    let effective_ip = if crate::direct::is_fake_ip(dst.0) { None } else { Some(dst.0) };
+    let effective_ip = if crate::direct::is_fake_ip(dst.0) {
+        None
+    } else {
+        Some(dst.0)
+    };
     let dom_ref = direct_domain.as_deref();
     let dst_port = dst.1;
     let up_atomic = conn_up.clone();
@@ -471,7 +524,9 @@ async fn relay_proxy(
     // 跨事务多请求复用判定与双向活跃时间戳 (HTTP/1.1 Keep-Alive / HTTP/2 多路复用)
     let request_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
     let server_has_downloaded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let last_active = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(crate::tun::adaptive_idle::unix_now_secs()));
+    let last_active = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+        crate::tun::adaptive_idle::unix_now_secs(),
+    ));
 
     let req_counter_up = request_count.clone();
     let srv_flag_up = server_has_downloaded.clone();
@@ -508,7 +563,10 @@ async fn relay_proxy(
                     }
                     up_bytes += n as u64;
                     up_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
-                    last_act_up.store(crate::tun::adaptive_idle::unix_now_secs(), std::sync::atomic::Ordering::Relaxed);
+                    last_act_up.store(
+                        crate::tun::adaptive_idle::unix_now_secs(),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     // 若在接收服务端响应后，客户端再次发起上行写入，计入一次新的请求复用 (Request Cycle)
                     if srv_flag_up.swap(false, std::sync::atomic::Ordering::Relaxed) {
                         req_counter_up.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -525,7 +583,10 @@ async fn relay_proxy(
                         // 下行仍在活跃推流，上行继续等待，不中断连接
                         continue;
                     }
-                    debug!("[TUN-TCP] 全双工空闲超时 ({}s), 优雅关闭", timeout_dur.as_secs());
+                    debug!(
+                        "[TUN-TCP] 全双工空闲超时 ({}s), 优雅关闭",
+                        timeout_dur.as_secs()
+                    );
                     let _ = tun_writer.send_close_notify().await;
                     timed_out = true;
                     break;
@@ -564,7 +625,10 @@ async fn relay_proxy(
                     }
                     down_bytes += n as u64;
                     down_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
-                    last_act_down.store(crate::tun::adaptive_idle::unix_now_secs(), std::sync::atomic::Ordering::Relaxed);
+                    last_act_down.store(
+                        crate::tun::adaptive_idle::unix_now_secs(),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     srv_flag_down.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 Ok(Ok(None)) => break, // 对端正常 close_notify
@@ -576,7 +640,10 @@ async fn relay_proxy(
                         // 上行近期有活跃传输，下行继续等待
                         continue;
                     }
-                    debug!("[TUN-TCP] 全双工空闲超时 ({}s), 优雅关闭", timeout_dur.as_secs());
+                    debug!(
+                        "[TUN-TCP] 全双工空闲超时 ({}s), 优雅关闭",
+                        timeout_dur.as_secs()
+                    );
                     timed_out = true;
                     break;
                 }
@@ -621,7 +688,13 @@ async fn relay_proxy(
         }
     }
     let duration_ms = start_time.elapsed().as_millis() as u64;
-    crate::monitor::record_conn_close_with_duration(cid, up, down, &format!("{:?}", close_reason), duration_ms);
+    crate::monitor::record_conn_close_with_duration(
+        cid,
+        up,
+        down,
+        &format!("{:?}", close_reason),
+        duration_ms,
+    );
     let req_total = request_count.load(std::sync::atomic::Ordering::Relaxed);
     // 复用或大流量长连接 (避免单请求大文件下载被误判为一次性短探测触发 zombie decay)
     let is_reused = req_total >= 2 || down >= 512 * 1024 || (up + down) >= 1024 * 1024;
@@ -680,7 +753,10 @@ pub(crate) fn may_query_upstream(dom: &str, source: crate::direct::DecisionSourc
 }
 
 /// 统一裁决 Fake-IP 直连域名应访问的真实目标 IP 或降级策略
-pub async fn resolve_direct_target(dom: &str, source: crate::direct::DecisionSource) -> DirectTarget {
+pub async fn resolve_direct_target(
+    dom: &str,
+    source: crate::direct::DecisionSource,
+) -> DirectTarget {
     // 1. 本地已学习的直连缓存 (高优先级快速通道)
     if let Some(real_ip) = crate::tun::dns::direct_dns_lookup(dom) {
         return DirectTarget::Ip(real_ip);
@@ -705,7 +781,10 @@ pub async fn resolve_direct_target(dom: &str, source: crate::direct::DecisionSou
             if crate::direct::is_private_ip(ip) {
                 return DirectTarget::Ip(ip);
             }
-            debug!("[TUN-TCP/direct] 局域网域名 [{}] 解析出非私有地址 {}，判定为自环或污染，丢弃", dom, ip);
+            debug!(
+                "[TUN-TCP/direct] 局域网域名 [{}] 解析出非私有地址 {}，判定为自环或污染，丢弃",
+                dom, ip
+            );
         }
         return DirectTarget::Drop;
     }
@@ -728,6 +807,7 @@ pub async fn resolve_direct_target(dom: &str, source: crate::direct::DecisionSou
 }
 
 /// 直连路径: smoltcp socket ⇄ 真实 TCP socket (protect 绕过 TUN，带自动回退代理)。
+#[allow(clippy::too_many_arguments)]
 async fn relay_direct(
     stack: Arc<TunStack>,
     stream: TunTcpStream,
@@ -748,7 +828,10 @@ async fn relay_direct(
             match resolve_direct_target(dom, source).await {
                 DirectTarget::Ip(real_ip) => (real_ip, dns_start.elapsed().as_millis() as u32),
                 DirectTarget::RouterIp(router_ip) => {
-                    debug!("[TUN-TCP/direct] 局域网管理域名 [{}] 使用默认网关 IP: {}", dom, router_ip);
+                    debug!(
+                        "[TUN-TCP/direct] 局域网管理域名 [{}] 使用默认网关 IP: {}",
+                        dom, router_ip
+                    );
                     (router_ip, 0)
                 }
                 DirectTarget::FallbackProxy => {
@@ -760,20 +843,37 @@ async fn relay_direct(
                     } else {
                         debug!("[TUN-TCP/direct] 直连域名 [{}] 真实解析失败或超时，自动平滑回退走隧道代理", dom);
                     }
-                    return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule, src).await;
+                    return relay_proxy(
+                        stack,
+                        stream,
+                        dst,
+                        direct_domain,
+                        initial_payload,
+                        matched_rule,
+                        src,
+                    )
+                    .await;
                 }
                 DirectTarget::Drop => {
                     // 局域网域名解析不出私有地址: 转代理会把内网主机名发给远端且必然连不通，
                     // 直接关闭连接让上层应用快速失败。
                     let (cid, _, _, _) = crate::monitor::record_conn_start_with_app(
-                        "TCP", &format!("{}:{}", dom, dst.1), &dst.0.to_string(), &matched_rule, "DIRECT", None);
+                        "TCP",
+                        &format!("{}:{}", dom, dst.1),
+                        &dst.0.to_string(),
+                        &matched_rule,
+                        "DIRECT",
+                        None,
+                    );
                     if let Some(s) = src {
                         let s_ip = s.0;
                         let s_port = s.1;
                         let d_ip = dst.0;
                         let d_port = dst.1;
                         tokio::task::spawn_blocking(move || {
-                            if let Some(pkg) = crate::attribution::resolve_package(6, s_ip, s_port, d_ip, d_port) {
+                            if let Some(pkg) =
+                                crate::attribution::resolve_package(6, s_ip, s_port, d_ip, d_port)
+                            {
                                 crate::monitor::update_conn_app(cid, pkg);
                             }
                         });
@@ -785,7 +885,10 @@ async fn relay_direct(
                 }
             }
         } else {
-            debug!("[TUN-TCP/direct] 目标为 Fake-IP ({}) 但无对应域名映射，无法直连", dst.0);
+            debug!(
+                "[TUN-TCP/direct] 目标为 Fake-IP ({}) 但无对应域名映射，无法直连",
+                dst.0
+            );
             return;
         }
     } else {
@@ -800,7 +903,16 @@ async fn relay_direct(
         // 私有局域网 IP / 国内 IP 直连
     } else if is_fake {
         debug!("[TUN-TCP/direct] 方案D双重置信拦截: 域名 [{:?}] 本地解析 IP ({}) 属于非国内 IP，自动切换走隧道代理", direct_domain, target_ip);
-        return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule, src).await;
+        return relay_proxy(
+            stack,
+            stream,
+            dst,
+            direct_domain,
+            initial_payload,
+            matched_rule,
+            src,
+        )
+        .await;
     }
 
     let target_display = if let Some(ref dom) = direct_domain {
@@ -809,7 +921,14 @@ async fn relay_direct(
         format!("{}:{}", target_ip, dst.1)
     };
 
-    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start_with_app("TCP", &target_display, &target_ip.to_string(), &matched_rule, "DIRECT", None);
+    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start_with_app(
+        "TCP",
+        &target_display,
+        &target_ip.to_string(),
+        &matched_rule,
+        "DIRECT",
+        None,
+    );
     if let Some(s) = src {
         let s_ip = s.0;
         let s_port = s.1;
@@ -841,22 +960,45 @@ async fn relay_direct(
     #[cfg(unix)]
     unsafe {
         let idle: libc::c_int = 15;
-        libc::setsockopt(raw_fd, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, &idle as *const _ as *const libc::c_void, std::mem::size_of_val(&idle) as libc::socklen_t);
+        libc::setsockopt(
+            raw_fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_KEEPIDLE,
+            &idle as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&idle) as libc::socklen_t,
+        );
         let intvl: libc::c_int = 5;
-        libc::setsockopt(raw_fd, libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, &intvl as *const _ as *const libc::c_void, std::mem::size_of_val(&intvl) as libc::socklen_t);
+        libc::setsockopt(
+            raw_fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_KEEPINTVL,
+            &intvl as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&intvl) as libc::socklen_t,
+        );
         let cnt: libc::c_int = 3;
-        libc::setsockopt(raw_fd, libc::IPPROTO_TCP, libc::TCP_KEEPCNT, &cnt as *const _ as *const libc::c_void, std::mem::size_of_val(&cnt) as libc::socklen_t);
+        libc::setsockopt(
+            raw_fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_KEEPCNT,
+            &cnt as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&cnt) as libc::socklen_t,
+        );
     }
     // protect: 直连 socket 也要绕过 TUN (否则 0.0.0.0/0→tun0 环路)
     crate::protect::protect(raw_fd);
-    let is_strict_cn = direct_domain.as_ref().map(|d| crate::direct::is_cn_domain_strict(d)).unwrap_or(false);
+    let is_strict_cn = direct_domain
+        .as_ref()
+        .map(|d| crate::direct::is_cn_domain_strict(d))
+        .unwrap_or(false);
     let is_raw_cn_ip = direct_domain.is_none() && crate::direct::is_cn_ip(target_ip);
     let connect_start = std::time::Instant::now();
 
     let mut remote = match tokio::time::timeout(
         std::time::Duration::from_millis(2500),
         sock.connect(addr),
-    ).await {
+    )
+    .await
+    {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             if is_raw_cn_ip || is_strict_cn {
@@ -866,7 +1008,16 @@ async fn relay_direct(
             }
             crate::monitor::record_conn_close(cid, 0, 0, "Connect Failed (Fallback Proxy)");
             debug!("[TUN-TCP/direct] 直连 {addr} 失败: {e}，自动回退走隧道代理");
-            return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule, src).await;
+            return relay_proxy(
+                stack,
+                stream,
+                dst,
+                direct_domain,
+                initial_payload,
+                matched_rule,
+                src,
+            )
+            .await;
         }
         Err(_) => {
             if is_raw_cn_ip || is_strict_cn {
@@ -876,7 +1027,16 @@ async fn relay_direct(
             }
             crate::monitor::record_conn_close(cid, 0, 0, "Connect Timeout (Fallback Proxy)");
             debug!("[TUN-TCP/direct] 直连 {addr} 超时，自动回退走隧道代理");
-            return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule, src).await;
+            return relay_proxy(
+                stack,
+                stream,
+                dst,
+                direct_domain,
+                initial_payload,
+                matched_rule,
+                src,
+            )
+            .await;
         }
     };
     let connect_ms = connect_start.elapsed().as_millis() as u32;
@@ -889,7 +1049,10 @@ async fn relay_direct(
             crate::monitor::record_conn_close(cid, 0, 0, "Write Initial Payload Failed");
             return;
         }
-        conn_up.fetch_add(initial_payload.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        conn_up.fetch_add(
+            initial_payload.len() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         crate::monitor::add_up(initial_payload.len() as u64);
     }
 
@@ -905,7 +1068,9 @@ async fn relay_direct(
     // 跨事务多请求复用判定与双向活跃时间戳 (HTTP/1.1 Keep-Alive / HTTP/2 多路复用)
     let request_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
     let server_has_downloaded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let last_active = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(crate::tun::adaptive_idle::unix_now_secs()));
+    let last_active = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+        crate::tun::adaptive_idle::unix_now_secs(),
+    ));
 
     let req_counter_to = request_count.clone();
     let srv_flag_to = server_has_downloaded.clone();
@@ -925,7 +1090,9 @@ async fn relay_direct(
             match tokio::time::timeout(timeout_dur, lr.read(&mut buf)).await {
                 Ok(Ok(0)) => break,
                 Ok(Ok(n)) => {
-                    if rw.write_all(&buf[..n]).await.is_err() { break; }
+                    if rw.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
                     if up_bytes == 0 {
                         timeout_dur = crate::tun::adaptive_idle::compute_adaptive_timeout(
                             Some(target_ip),
@@ -938,7 +1105,10 @@ async fn relay_direct(
                     up_bytes += n as u64;
                     up_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     crate::monitor::add_up(n as u64);
-                    last_act_to.store(crate::tun::adaptive_idle::unix_now_secs(), std::sync::atomic::Ordering::Relaxed);
+                    last_act_to.store(
+                        crate::tun::adaptive_idle::unix_now_secs(),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     // 若在接收服务端响应后，客户端再次发起上行写入，计入一次新的请求复用 (Request Cycle)
                     if srv_flag_to.swap(false, std::sync::atomic::Ordering::Relaxed) {
                         req_counter_to.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -976,7 +1146,9 @@ async fn relay_direct(
             match tokio::time::timeout(timeout_dur, rr.read(&mut buf)).await {
                 Ok(Ok(0)) => break,
                 Ok(Ok(n)) => {
-                    if lw.write_all(&buf[..n]).await.is_err() { break; }
+                    if lw.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
                     if down_bytes == 0 {
                         let ttfb_ms = start_time.elapsed().as_millis() as u32;
                         crate::monitor::record_conn_timings(cid, dns_ms, connect_ms, 0, ttfb_ms);
@@ -991,7 +1163,10 @@ async fn relay_direct(
                     down_bytes += n as u64;
                     down_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     crate::monitor::add_down(n as u64);
-                    last_act_from.store(crate::tun::adaptive_idle::unix_now_secs(), std::sync::atomic::Ordering::Relaxed);
+                    last_act_from.store(
+                        crate::tun::adaptive_idle::unix_now_secs(),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     srv_flag_from.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 Ok(Err(_)) => break,
@@ -1043,7 +1218,13 @@ async fn relay_direct(
         }
     }
     let duration_ms = start_time.elapsed().as_millis() as u64;
-    crate::monitor::record_conn_close_with_duration(cid, up, down, &format!("{:?}", close_reason), duration_ms);
+    crate::monitor::record_conn_close_with_duration(
+        cid,
+        up,
+        down,
+        &format!("{:?}", close_reason),
+        duration_ms,
+    );
     let req_total = request_count.load(std::sync::atomic::Ordering::Relaxed);
     let is_reused = req_total >= 2;
     crate::tun::adaptive_idle::record_conn_metrics(
@@ -1054,10 +1235,17 @@ async fn relay_direct(
         close_reason,
         is_reused,
     );
-    debug!("[TUN-TCP/direct] {}:{} 直连关闭 (↑{} ↓{}, 耗时{}ms, 原因:{:?}, 请求数:{}, 复用:{})",
-        dst.0, dst.1,
-        crate::tun::udp::human_bytes(up), crate::tun::udp::human_bytes(down),
-        duration_ms, close_reason, req_total, is_reused);
+    debug!(
+        "[TUN-TCP/direct] {}:{} 直连关闭 (↑{} ↓{}, 耗时{}ms, 原因:{:?}, 请求数:{}, 复用:{})",
+        dst.0,
+        dst.1,
+        crate::tun::udp::human_bytes(up),
+        crate::tun::udp::human_bytes(down),
+        duration_ms,
+        close_reason,
+        req_total,
+        is_reused
+    );
 }
 
 #[cfg(test)]
@@ -1076,33 +1264,50 @@ mod tests {
         let cached_domain = "cached.cn-service.org";
         let cached_ip = Ipv4Addr::new(114, 114, 114, 114);
         crate::tun::dns::insert_direct_cache(cached_domain.to_string(), cached_ip, true);
-        let res = resolve_direct_target(cached_domain, crate::direct::DecisionSource::Default).await;
+        let res =
+            resolve_direct_target(cached_domain, crate::direct::DecisionSource::Default).await;
         assert_eq!(res, DirectTarget::Ip(IpAddr::V4(cached_ip)));
 
         // 2. 局域网主流路由器管理域名 (前置绝对守卫，直接返回网关 IP)
         let res_tp = resolve_direct_target("tplogin.cn", crate::direct::DecisionSource::Lan).await;
-        assert_eq!(res_tp, DirectTarget::RouterIp(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        assert_eq!(
+            res_tp,
+            DirectTarget::RouterIp(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)))
+        );
 
         let res_mi = resolve_direct_target("miwifi.com", crate::direct::DecisionSource::Lan).await;
-        assert_eq!(res_mi, DirectTarget::RouterIp(IpAddr::V4(Ipv4Addr::new(192, 168, 31, 1))));
+        assert_eq!(
+            res_mi,
+            DirectTarget::RouterIp(IpAddr::V4(Ipv4Addr::new(192, 168, 31, 1)))
+        );
 
         // 3. 攻击者伪造的子串域名 (如 tplogin.cn.attacker.com): 绝不命中 RouterIp，Default 下安全降级为 FallbackProxy
-        let res_spoof = resolve_direct_target("tplogin.cn.attacker.com", crate::direct::DecisionSource::Default).await;
+        let res_spoof = resolve_direct_target(
+            "tplogin.cn.attacker.com",
+            crate::direct::DecisionSource::Default,
+        )
+        .await;
         assert_eq!(res_spoof, DirectTarget::FallbackProxy);
 
         // 4. Default 兜底来源下的未知长尾境外域名: 防泄露安全门控立即降级为 FallbackProxy (绝不发公网 DNS 查询)
-        let res_default = resolve_direct_target("obscure.foreign-site.org", crate::direct::DecisionSource::Default).await;
+        let res_default = resolve_direct_target(
+            "obscure.foreign-site.org",
+            crate::direct::DecisionSource::Default,
+        )
+        .await;
         assert_eq!(res_default, DirectTarget::FallbackProxy);
 
         // 5. 已知境外域名 (如 google.com): 即使传入 DecisionSource::Rule，为防 GFW 投毒与泄漏也绝不查询国内上游，返回 FallbackProxy
-        let res_google = resolve_direct_target("google.com", crate::direct::DecisionSource::Rule).await;
+        let res_google =
+            resolve_direct_target("google.com", crate::direct::DecisionSource::Rule).await;
         assert_eq!(res_google, DirectTarget::FallbackProxy);
 
         // 6. 直连缓存对显式 Rule 来源同样是最高优先快速通道
         let corp_domain = "api.mycorp.example";
         let corp_ip = Ipv4Addr::new(192, 168, 10, 50);
         crate::tun::dns::insert_direct_cache(corp_domain.to_string(), corp_ip, true);
-        let res_corp = resolve_direct_target(corp_domain, crate::direct::DecisionSource::Rule).await;
+        let res_corp =
+            resolve_direct_target(corp_domain, crate::direct::DecisionSource::Rule).await;
         assert_eq!(res_corp, DirectTarget::Ip(IpAddr::V4(corp_ip)));
     }
 
@@ -1115,7 +1320,8 @@ mod tests {
     fn test_may_query_upstream_gate() {
         use crate::direct::DecisionSource;
         let _guard = crate::direct::acquire_test_guard();
-        assert!(crate::direct::set_custom_rules(r#"{
+        assert!(crate::direct::set_custom_rules(
+            r#"{
             "rules": [
                 {
                     "id": "corp_rule",
@@ -1130,7 +1336,8 @@ mod tests {
                 }
             ],
             "default_action": "proxy"
-        }"#));
+        }"#
+        ));
 
         // 该复合 AND 规则在只有域名时无法复现匹配，是 N1 的根因
         assert!(
@@ -1144,8 +1351,14 @@ mod tests {
         );
 
         // Default 兜底来源: 不放行，防明文 DNS 泄露
-        assert!(!may_query_upstream("api.mycorp.example", DecisionSource::Default));
-        assert!(!may_query_upstream("obscure.foreign-site.org", DecisionSource::Default));
+        assert!(!may_query_upstream(
+            "api.mycorp.example",
+            DecisionSource::Default
+        ));
+        assert!(!may_query_upstream(
+            "obscure.foreign-site.org",
+            DecisionSource::Default
+        ));
 
         // 已知境外域名: 任何来源都不放行 (防 GFW 投毒)
         assert!(!may_query_upstream("google.com", DecisionSource::Rule));
@@ -1167,9 +1380,18 @@ mod tests {
         let _guard = crate::direct::acquire_test_guard();
 
         for dom in ["nas.local", "printer.lan", "gitlab.corp", "host.home.arpa"] {
-            let (action, source, _) = crate::direct::route_decision_sourced(Some(dom), None, Some(80), Some("tcp"));
-            assert_eq!(action, crate::direct::RuleAction::Direct, "{dom} 必须判定为直连");
-            assert_eq!(source, crate::direct::DecisionSource::Lan, "{dom} 来源必须是 Lan");
+            let (action, source, _) =
+                crate::direct::route_decision_sourced(Some(dom), None, Some(80), Some("tcp"));
+            assert_eq!(
+                action,
+                crate::direct::RuleAction::Direct,
+                "{dom} 必须判定为直连"
+            );
+            assert_eq!(
+                source,
+                crate::direct::DecisionSource::Lan,
+                "{dom} 来源必须是 Lan"
+            );
 
             let target = resolve_direct_target(dom, source).await;
             assert_ne!(
@@ -1178,7 +1400,11 @@ mod tests {
                 "{dom} 是内网域名，绝不可回退隧道代理"
             );
             // CI/测试环境无内网 DNS，解析不出私有地址即为 Drop
-            assert_eq!(target, DirectTarget::Drop, "{dom} 解析失败时必须丢弃而非外发");
+            assert_eq!(
+                target,
+                DirectTarget::Drop,
+                "{dom} 解析失败时必须丢弃而非外发"
+            );
         }
 
         // 有固定网关映射的路由器域名仍然直接返回网关 IP

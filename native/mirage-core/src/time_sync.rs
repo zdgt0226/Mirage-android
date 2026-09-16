@@ -57,12 +57,17 @@ pub fn set_offset_from_server_time(server_time: u64) {
     if delta.abs() >= SIGNIFICANT_DELTA {
         tracing::info!(
             "TIME_SYNC: offset updated {}s → {}s (Δ {}s) from server's encrypted handshake",
-            old, offset, delta
+            old,
+            offset,
+            delta
         );
     } else if delta != 0 {
         tracing::debug!(
             "TIME_SYNC: minor drift {}s → {}s (Δ {}s, < {}s threshold)",
-            old, offset, delta, SIGNIFICANT_DELTA
+            old,
+            offset,
+            delta,
+            SIGNIFICANT_DELTA
         );
     } else {
         tracing::trace!("TIME_SYNC: offset maintained at {}s", offset);
@@ -79,7 +84,10 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn local_now() -> u64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
     }
 
     fn reset_offset() {
@@ -117,7 +125,11 @@ mod tests {
         set_offset_from_server_time(local - 5);
 
         let diff = now_sec() as i64 - local_now() as i64;
-        assert!((-6..=-4).contains(&diff), "expected ~-5s offset, got {}", diff);
+        assert!(
+            (-6..=-4).contains(&diff),
+            "expected ~-5s offset, got {}",
+            diff
+        );
     }
 
     #[test]
@@ -131,7 +143,11 @@ mod tests {
         set_offset_from_server_time(local + 86401);
 
         let diff = now_sec() as i64 - local_now() as i64;
-        assert!(diff.abs() <= 1, "offset should stay near 0 (rejected), got {}", diff);
+        assert!(
+            diff.abs() <= 1,
+            "offset should stay near 0 (rejected), got {}",
+            diff
+        );
     }
 
     #[test]
@@ -144,7 +160,11 @@ mod tests {
         set_offset_from_server_time(local - 86401);
 
         let diff = now_sec() as i64 - local_now() as i64;
-        assert!(diff.abs() <= 1, "offset should stay near 0 (rejected), got {}", diff);
+        assert!(
+            diff.abs() <= 1,
+            "offset should stay near 0 (rejected), got {}",
+            diff
+        );
     }
 
     #[test]
@@ -158,8 +178,11 @@ mod tests {
         set_offset_from_server_time(local + 86400);
 
         let diff = now_sec() as i64 - local_now() as i64;
-        assert!((86399..=86401).contains(&diff),
-                "boundary 86400 should be accepted, got {}", diff);
+        assert!(
+            (86399..=86401).contains(&diff),
+            "boundary 86400 should be accepted, got {}",
+            diff
+        );
     }
 
     #[test]
@@ -174,8 +197,11 @@ mod tests {
         set_offset_from_server_time(local + 20);
 
         let diff = now_sec() as i64 - local_now() as i64;
-        assert!((19..=21).contains(&diff),
-                "expected ~20s after overwrite, got {}", diff);
+        assert!(
+            (19..=21).contains(&diff),
+            "expected ~20s after overwrite, got {}",
+            diff
+        );
     }
 
     #[test]
@@ -190,7 +216,10 @@ mod tests {
         set_offset_from_server_time(local + 200_000); // rejected
 
         let diff = now_sec() as i64 - local_now() as i64;
-        assert!((4..=6).contains(&diff),
-                "rejected offset must not clobber prior valid +5s, got {}", diff);
+        assert!(
+            (4..=6).contains(&diff),
+            "rejected offset must not clobber prior valid +5s, got {}",
+            diff
+        );
     }
 }

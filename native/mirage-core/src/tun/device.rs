@@ -85,8 +85,14 @@ impl phy::TxToken for TunTxToken<'_> {
 }
 
 impl Device for TunDevice {
-    type RxToken<'a> = TunRxToken where Self: 'a;
-    type TxToken<'a> = TunTxToken<'a> where Self: 'a;
+    type RxToken<'a>
+        = TunRxToken
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = TunTxToken<'a>
+    where
+        Self: 'a;
 
     fn receive(&mut self, _t: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let pkt = self.rx.pop_front()?;

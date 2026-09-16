@@ -362,10 +362,7 @@ static REGISTRY: LazyLock<StdMutex<HashMap<usize, Arc<MuxSet>>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 /// 取 (或懒建/重建) 给定 pool + flowkey 对应的共享 mux 隧道。
-pub async fn get_mux_tunnel(
-    pool: &Arc<WarmPool>,
-    key: &FlowKey,
-) -> anyhow::Result<Arc<MuxTunnel>> {
+pub async fn get_mux_tunnel(pool: &Arc<WarmPool>, key: &FlowKey) -> anyhow::Result<Arc<MuxTunnel>> {
     let ptr = Arc::as_ptr(pool) as usize;
     let set = {
         let mut reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());

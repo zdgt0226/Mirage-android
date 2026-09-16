@@ -110,7 +110,7 @@ build_apk() {
             export MIRAGE_KEY_ALIAS=\"${MIRAGE_KEY_ALIAS:-}\"
             export MIRAGE_KEY_PASSWORD=\"${MIRAGE_KEY_PASSWORD:-}\"
             cd /workspace
-            gradle clean $gradle_task -PbuildTime=\"$build_date\" -PbuildTag=\"$build_tag\" -PversionCode=$git_count -PversionName=\"$ver\" --no-daemon 2>&1 > /tmp/gradle_err.log || (cat /tmp/gradle_err.log | grep -B2 -A6 -iE \"e: file|error:|unresolved\" | head -40)
+            ./gradlew clean $gradle_task -PbuildTime=\"$build_date\" -PbuildTag=\"$build_tag\" -PversionCode=$git_count -PversionName=\"$ver\" --no-daemon 2>&1 > /tmp/gradle_err.log || (cat /tmp/gradle_err.log | grep -B2 -A6 -iE \"e: file|error:|unresolved\" | head -40)
             cp app/build/outputs/apk/$VARIANT/$apk_name /output/latest-build.apk 2>/dev/null || true
         " 2>&1 | tail -25
 

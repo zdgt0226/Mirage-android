@@ -47,7 +47,11 @@ impl TunnelRead {
 }
 
 impl AsyncRead for TunnelRead {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
             TunnelRead::Tcp(s) => Pin::new(s).poll_read(cx, buf),
             TunnelRead::Boxed(s) => Pin::new(s).poll_read(cx, buf),
@@ -56,7 +60,11 @@ impl AsyncRead for TunnelRead {
 }
 
 impl AsyncWrite for TunnelWrite {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
         match self.get_mut() {
             TunnelWrite::Tcp(s) => Pin::new(s).poll_write(cx, buf),
             TunnelWrite::Boxed(s) => Pin::new(s).poll_write(cx, buf),

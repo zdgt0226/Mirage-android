@@ -122,7 +122,8 @@ fn handle_request(
             let down = crate::monitor::GLOBAL_DOWN.load(std::sync::atomic::Ordering::Relaxed);
             let tcp = crate::tun::tcp::TCP_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
             let flow_cnt = crate::tun::udp::flow_count_global();
-            let queries_cnt = crate::tun::dns::DNS_QUERIES.load(std::sync::atomic::Ordering::Relaxed);
+            let queries_cnt =
+                crate::tun::dns::DNS_QUERIES.load(std::sync::atomic::Ordering::Relaxed);
 
             // 获取 /proc/self 状态 (Linux / Android)
             let fd_count = get_proc_fd_count();
@@ -144,39 +145,44 @@ fn handle_request(
             )
         }
 
-        ("GET", "/debug/dns") => {
-            (
-                "200 OK",
-                serde_json::json!({
-                    "direct_dns": crate::tun::dns::get_direct_dns().to_string(),
-                    "remote_dns": crate::tun::dns::get_remote_dns().to_string(),
-                    "total_queries": crate::tun::dns::DNS_QUERIES.load(std::sync::atomic::Ordering::Relaxed),
-                    "mode": "Pure Fake-IP (0ms Immunity)",
-                }),
-            )
-        }
+        ("GET", "/debug/dns") => (
+            "200 OK",
+            serde_json::json!({
+                "direct_dns": crate::tun::dns::get_direct_dns().to_string(),
+                "remote_dns": crate::tun::dns::get_remote_dns().to_string(),
+                "total_queries": crate::tun::dns::DNS_QUERIES.load(std::sync::atomic::Ordering::Relaxed),
+                "mode": "Pure Fake-IP (0ms Immunity)",
+            }),
+        ),
 
-        ("GET", "/debug/fake-ip") => {
-            (
-                "200 OK",
-                serde_json::json!({
-                    "pool_range": "198.18.0.0/16",
-                    "mode": "Full Intercept (All A records mapped to 198.18.x.x)",
-                }),
-            )
-        }
+        ("GET", "/debug/fake-ip") => (
+            "200 OK",
+            serde_json::json!({
+                "pool_range": "198.18.0.0/16",
+                "mode": "Full Intercept (All A records mapped to 198.18.x.x)",
+            }),
+        ),
 
         ("POST", "/debug/route") => {
-            let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+            let parsed: serde_json::Value =
+                serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
             let domain = parsed.get("domain").and_then(|v| v.as_str());
             let ip_str = parsed.get("ip").and_then(|v| v.as_str());
-            let port = parsed.get("port").and_then(|v| v.as_u64()).map(|p| p as u16);
-            let proto = parsed.get("proto").and_then(|v| v.as_str()).unwrap_or("tcp");
+            let port = parsed
+                .get("port")
+                .and_then(|v| v.as_u64())
+                .map(|p| p as u16);
+            let proto = parsed
+                .get("proto")
+                .and_then(|v| v.as_str())
+                .unwrap_or("tcp");
 
             let ip = ip_str.and_then(|s| s.parse::<std::net::IpAddr>().ok());
 
             let decision = crate::direct::route_decision(domain, ip, port, Some(proto));
-            let is_strict_cn = domain.map(crate::direct::is_cn_domain_strict).unwrap_or(false);
+            let is_strict_cn = domain
+                .map(crate::direct::is_cn_domain_strict)
+                .unwrap_or(false);
 
             (
                 "200 OK",
@@ -193,7 +199,8 @@ fn handle_request(
 
         ("GET", "/debug/conns") | ("GET", "/debug/connections") => {
             let conns_str = crate::monitor::get_connections_json();
-            let conns_json: serde_json::Value = serde_json::from_str(&conns_str).unwrap_or_else(|_| serde_json::json!([]));
+            let conns_json: serde_json::Value =
+                serde_json::from_str(&conns_str).unwrap_or_else(|_| serde_json::json!([]));
 
             (
                 "200 OK",
@@ -205,7 +212,8 @@ fn handle_request(
 
         ("GET", "/debug/traffic-profiles") | ("GET", "/debug/profiles") => {
             let profiles_str = crate::tun::adaptive_idle::get_learned_profiles_json();
-            let profiles_json: serde_json::Value = serde_json::from_str(&profiles_str).unwrap_or_else(|_| serde_json::json!([]));
+            let profiles_json: serde_json::Value =
+                serde_json::from_str(&profiles_str).unwrap_or_else(|_| serde_json::json!([]));
 
             (
                 "200 OK",
@@ -217,8 +225,9 @@ fn handle_request(
         }
 
         ("GET", "/requests") | ("GET", "/debug/requests") => {
-            let reqs_json: serde_json::Value = serde_json::from_str(&crate::monitor::get_recent_requests_json())
-                .unwrap_or_else(|_| serde_json::json!([]));
+            let reqs_json: serde_json::Value =
+                serde_json::from_str(&crate::monitor::get_recent_requests_json())
+                    .unwrap_or_else(|_| serde_json::json!([]));
             (
                 "200 OK",
                 serde_json::json!({
@@ -244,7 +253,8 @@ fn handle_request(
         }
 
         ("POST", "/mode") | ("POST", "/debug/mode") => {
-            let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+            let parsed: serde_json::Value =
+                serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
             let mode = parsed.get("mode").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
             crate::direct::set_outbound_mode(mode);
             (
@@ -339,7 +349,8 @@ fn handle_request(
         }
 
         ("POST", "/debug/control") => {
-            let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+            let parsed: serde_json::Value =
+                serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
             let action = parsed.get("action").and_then(|v| v.as_str()).unwrap_or("");
 
             match action {
