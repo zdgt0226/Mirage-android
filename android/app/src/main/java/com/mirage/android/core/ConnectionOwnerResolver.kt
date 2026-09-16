@@ -34,10 +34,6 @@ object ConnectionOwnerResolver {
     // UID -> Package Name 缓存 (常驻)
     private val uidToPackageCache = LruCache<Int, String>(256)
 
-    // (protocol, srcPort) -> (timestamp, packageName) 临时缓存 (TTL: 5000ms)
-    private data class PortCacheEntry(val timestamp: Long, val packageName: String)
-    private val portCache = LruCache<Long, PortCacheEntry>(512)
-
     fun init(context: Context) {
         val app = context.applicationContext
         appContext = app
@@ -59,17 +55,7 @@ object ConnectionOwnerResolver {
     fun resolve(protocol: Int, srcIp: String, srcPort: Int, dstIp: String, dstPort: Int): String? {
         if (srcPort <= 0) return null
 
-        val cacheKey = ((protocol.toLong() and 0xFFL) shl 32) or (srcPort.toLong() and 0xFFFFL)
-        val now = System.currentTimeMillis()
-
-        synchronized(portCache) {
-            val cached = portCache.get(cacheKey)
-            if (cached != null && (now - cached.timestamp) < 5000) {
-                return cached.packageName
-            }
-        }
-
-        Log.i("ConnOwnerResolver", "resolve: proto=$protocol, src=$srcIp:$srcPort, dst=$dstIp:$dstPort")
+        Log.d("ConnOwnerResolver", "resolve: proto=$protocol, src=$srcIp:$srcPort, dst=$dstIp:$dstPort")
         var resolvedUid: Int? = null
 
         // 1. Android 10+ (API 29+) 优先使用 ConnectivityManager
@@ -80,7 +66,7 @@ object ConnectionOwnerResolver {
                     val local = InetSocketAddress(InetAddress.getByName(srcIp), srcPort)
                     val remote = InetSocketAddress(InetAddress.getByName(dstIp), dstPort)
                     val uid = cm.getConnectionOwnerUid(protocol, local, remote)
-                    Log.i("ConnOwnerResolver", "getConnectionOwnerUid(proto=$protocol, local=$local, remote=$remote) -> $uid")
+                    Log.d("ConnOwnerResolver", "getConnectionOwnerUid(proto=$protocol, local=$local, remote=$remote) -> $uid")
                     if (uid > 0 && uid != Process.INVALID_UID) uid else null
                 }.onFailure { e ->
                     Log.w("ConnOwnerResolver", "getConnectionOwnerUid 抛出异常: ${e.message}", e)
@@ -93,7 +79,7 @@ object ConnectionOwnerResolver {
         // 2. Android 9 / API 28 或系统 API 失败时，通过 procfs 读取
         if (resolvedUid == null) {
             resolvedUid = resolveUidFromProcfs(protocol, srcIp, srcPort)
-            Log.i("ConnOwnerResolver", "resolveUidFromProcfs -> $resolvedUid")
+            Log.d("ConnOwnerResolver", "resolveUidFromProcfs -> $resolvedUid")
         }
 
         val uid = resolvedUid ?: return null
@@ -104,12 +90,7 @@ object ConnectionOwnerResolver {
         }
 
         val packageName = getPackageNameForUid(uid)
-        Log.i("ConnOwnerResolver", "uid=$uid -> package=$packageName")
-        if (!packageName.isNullOrBlank()) {
-            synchronized(portCache) {
-                portCache.put(cacheKey, PortCacheEntry(now, packageName))
-            }
-        }
+        Log.d("ConnOwnerResolver", "uid=$uid -> package=$packageName")
         return packageName
     }
 

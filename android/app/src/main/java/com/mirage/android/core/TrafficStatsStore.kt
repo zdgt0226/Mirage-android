@@ -89,6 +89,7 @@ object SettingsStore {
 
     fun setAutoReconnect(ctx: Context, v: Boolean) {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("auto_reconnect", v).apply()
+        CoreController.setAutoReconnect(v)
     }
 
     /** failover 方式: "best"(测活选最优) | "next"(顺序换下一个) */
@@ -97,6 +98,7 @@ object SettingsStore {
 
     fun setFailoverMode(ctx: Context, v: String) {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("failover_mode", v).apply()
+        CoreController.setFailoverMode(v)
     }
 
     /** 重连检查间隔 (秒)。 */
@@ -105,5 +107,6 @@ object SettingsStore {
 
     fun setCheckIntervalSec(ctx: Context, v: Int) {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt("check_interval", v).apply()
+        CoreController.setCheckInterval(v)
     }
 }

@@ -91,9 +91,11 @@ object NodeStore {
         }
     }
 
-    fun getNodes(ctx: Context): List<Node> {
-        val raw = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    fun getNodesJson(ctx: Context): String =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_NODES, "[]") ?: "[]"
+
+    fun parseNodesJson(raw: String): List<Node> {
         return runCatching {
             val arr = JSONArray(raw)
             (0 until arr.length()).map { i ->
@@ -102,6 +104,9 @@ object NodeStore {
             }
         }.getOrDefault(emptyList())
     }
+
+    fun getNodes(ctx: Context): List<Node> =
+        parseNodesJson(getNodesJson(ctx))
 
     fun addNode(ctx: Context, node: Node): Int {
         val list = getNodes(ctx).toMutableList()
@@ -133,8 +138,10 @@ object NodeStore {
         for (n in list) {
             arr.put(JSONObject().put("uri", n.uri).put("name", n.name))
         }
+        val json = arr.toString()
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putString(KEY_NODES, arr.toString()).apply()
+            .edit().putString(KEY_NODES, json).apply()
+        CoreController.updateNodes(json)
     }
 
     fun getSelected(ctx: Context): Int =

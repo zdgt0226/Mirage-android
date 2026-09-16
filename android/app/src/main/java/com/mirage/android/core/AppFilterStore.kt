@@ -42,4 +42,31 @@ object AppFilterStore {
             .putString(KEY_PACKAGES, array.toString())
             .apply()
     }
+
+    fun toJson(config: AppFilterConfig): String {
+        val obj = JSONObject()
+        obj.put("enabled", config.enabled)
+        obj.put("mode", config.mode.name)
+        val array = JSONArray()
+        config.selectedPackages.forEach { array.put(it) }
+        obj.put("packages", array)
+        return obj.toString()
+    }
+
+    fun fromJson(json: String): AppFilterConfig {
+        return runCatching {
+            val obj = JSONObject(json)
+            val enabled = obj.optBoolean("enabled", false)
+            val modeStr = obj.optString("mode", AppFilterMode.DISALLOW.name)
+            val mode = runCatching { AppFilterMode.valueOf(modeStr) }.getOrDefault(AppFilterMode.DISALLOW)
+            val array = obj.optJSONArray("packages")
+            val set = mutableSetOf<String>()
+            if (array != null) {
+                for (i in 0 until array.length()) {
+                    set.add(array.getString(i))
+                }
+            }
+            AppFilterConfig(enabled, mode, set)
+        }.getOrDefault(AppFilterConfig(false, AppFilterMode.DISALLOW, emptySet()))
+    }
 }

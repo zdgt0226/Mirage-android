@@ -198,9 +198,23 @@ class VpnRepository(private val context: Context) {
         // 启动前清理残留 Fake-IP 与 DNS 缓存
         runCatching { CoreController.clearDnsCache() }
 
+        val appFilterConfig = com.mirage.android.core.AppFilterStore.getConfig(context)
         val intent = Intent(context, CoreService::class.java).apply {
             putExtra("uri", selected.uri)
             putExtra("pool_size", nodeRepo.getPoolSize())
+            putExtra("bypass_lan", _isBypassLanEnabled.value)
+            putExtra("enable_ipv6", _isIpv6Enabled.value)
+            putExtra("mtu", com.mirage.android.core.TunConfigStore.getMtu(context))
+            putExtra("app_filter_json", com.mirage.android.core.AppFilterStore.toJson(appFilterConfig))
+            putExtra("direct_dns", dnsRepo.getDirectDns())
+            putExtra("remote_dns", dnsRepo.getRemoteDns())
+            putExtra("block_quic", _isBlockQuic.value)
+            putExtra("udp_mux", _isUdpMux.value)
+            putExtra("auto_reconnect", com.mirage.android.core.SettingsStore.isAutoReconnect(context))
+            putExtra("check_interval", com.mirage.android.core.SettingsStore.getCheckIntervalSec(context))
+            putExtra("failover_mode", com.mirage.android.core.SettingsStore.getFailoverMode(context))
+            putExtra("nodes_json", com.mirage.android.core.NodeStore.getNodesJson(context))
+            putExtra("outbound_mode", _outboundMode.value)
         }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             context.startForegroundService(intent)

@@ -150,6 +150,13 @@ object CoreController {
         call { it.outboundMode } ?: 0
     fun getRecentRequestsJson(): String =
         call { it.recentRequestsJson } ?: "[]"
+    fun setAutoReconnect(enabled: Boolean): Boolean = call { it.setAutoReconnect(enabled) } ?: false
+    fun isAutoReconnect(): Boolean = call { it.isAutoReconnect } ?: true
+    fun setCheckInterval(interval: Int): Boolean = call { it.setCheckInterval(interval) } ?: false
+    fun getCheckInterval(): Int = call { it.checkInterval } ?: 15
+    fun setFailoverMode(mode: String): Boolean = call { it.setFailoverMode(mode) } ?: false
+    fun getFailoverMode(): String = call { it.failoverMode } ?: "best"
+    fun updateNodes(nodesJson: String): Boolean = call { it.updateNodes(nodesJson) } ?: false
 
     fun registerCallback(cb: ICoreCallback) {
         callbacks.add(cb)

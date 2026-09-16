@@ -54,6 +54,25 @@ class CoreService : VpnService() {
      */
     private enum class ServiceState { Stopped, Starting, Running, Stopping }
 
+    data class ServiceConfig(
+        var uri: String = "",
+        var poolSize: Int = -1,
+        var bypassLan: Boolean = false,
+        var ipv6Enabled: Boolean = false,
+        var mtu: Int = 1500,
+        var appFilterConfig: com.mirage.android.data.model.AppFilterConfig? = null,
+        var directDns: String = "223.5.5.5",
+        var remoteDns: String = "1.1.1.1",
+        var blockQuic: Boolean = true,
+        var udpMux: Boolean = true,
+        var autoReconnect: Boolean = true,
+        var checkIntervalSec: Int = 15,
+        var failoverMode: String = "best",
+        var nodes: List<NodeStore.Node> = emptyList(),
+        var outboundMode: Int = 0,
+    )
+    private var serviceConfig = ServiceConfig()
+
     private val stateLock = Any()
     @Volatile
     private var serviceState = ServiceState.Stopped
@@ -186,8 +205,42 @@ class CoreService : VpnService() {
             return START_NOT_STICKY
         }
 
-        val uri = intent.getStringExtra("uri")
-        val poolSize = intent.getIntExtra("pool_size", -1)
+        val uri = intent.getStringExtra("uri") ?: serviceConfig.uri
+        val poolSize = intent.getIntExtra("pool_size", serviceConfig.poolSize)
+        val bypassLan = if (intent.hasExtra("bypass_lan")) intent.getBooleanExtra("bypass_lan", false) else serviceConfig.bypassLan
+        val ipv6 = if (intent.hasExtra("enable_ipv6")) intent.getBooleanExtra("enable_ipv6", false) else serviceConfig.ipv6Enabled
+        val mtu = if (intent.hasExtra("mtu")) intent.getIntExtra("mtu", 1500) else serviceConfig.mtu
+        val blockQuic = if (intent.hasExtra("block_quic")) intent.getBooleanExtra("block_quic", true) else serviceConfig.blockQuic
+        val udpMux = if (intent.hasExtra("udp_mux")) intent.getBooleanExtra("udp_mux", true) else serviceConfig.udpMux
+        val autoReconnect = if (intent.hasExtra("auto_reconnect")) intent.getBooleanExtra("auto_reconnect", true) else serviceConfig.autoReconnect
+        val checkInterval = if (intent.hasExtra("check_interval")) intent.getIntExtra("check_interval", 15) else serviceConfig.checkIntervalSec
+        val failoverMode = intent.getStringExtra("failover_mode") ?: serviceConfig.failoverMode
+        val directDns = intent.getStringExtra("direct_dns") ?: serviceConfig.directDns
+        val remoteDns = intent.getStringExtra("remote_dns") ?: serviceConfig.remoteDns
+        val outboundMode = if (intent.hasExtra("outbound_mode")) intent.getIntExtra("outbound_mode", 0) else serviceConfig.outboundMode
+        val appFilterJson = intent.getStringExtra("app_filter_json")
+        val appFilterConfig = if (!appFilterJson.isNullOrBlank()) com.mirage.android.core.AppFilterStore.fromJson(appFilterJson) else serviceConfig.appFilterConfig
+        val nodesJson = intent.getStringExtra("nodes_json")
+        val nodes = if (!nodesJson.isNullOrBlank()) NodeStore.parseNodesJson(nodesJson) else serviceConfig.nodes
+
+        serviceConfig = ServiceConfig(
+            uri = uri,
+            poolSize = poolSize,
+            bypassLan = bypassLan,
+            ipv6Enabled = ipv6,
+            mtu = mtu,
+            appFilterConfig = appFilterConfig,
+            directDns = directDns,
+            remoteDns = remoteDns,
+            blockQuic = blockQuic,
+            udpMux = udpMux,
+            autoReconnect = autoReconnect,
+            checkIntervalSec = checkInterval,
+            failoverMode = failoverMode,
+            nodes = nodes,
+            outboundMode = outboundMode
+        )
+
         // 直接驱动启动 (建 TUN + 内核), 不依赖 UI 后续 AIDL 调用
         val rc = startInternal(uri, poolSize)
         if (rc != 0) {
@@ -293,7 +346,13 @@ class CoreService : VpnService() {
 
     /** startInternal 的实际执行体; 调用方已持有 stateLock 并负责 serviceState 与失败清理。 */
     private fun startLocked(uriOverride: String?, poolSizeOverride: Int): Int {
-        val uri = if (!uriOverride.isNullOrBlank()) uriOverride else NodeStore.getSelectedUri(this)
+        val uri = if (!uriOverride.isNullOrBlank()) {
+            uriOverride
+        } else if (serviceConfig.uri.isNotBlank()) {
+            serviceConfig.uri
+        } else {
+            NodeStore.getSelectedUri(this)
+        }
         if (uri.isEmpty()) {
             log("[core] 无选中节点")
             return -1
@@ -304,7 +363,7 @@ class CoreService : VpnService() {
             return -2
         }
 
-        val mtu = TunConfigStore.getMtu(this)
+        val mtu = if (serviceConfig.mtu in 1280..1500) serviceConfig.mtu else TunConfigStore.getMtu(this)
 
         // 修复 2.1: 重连/failover 时复用已建立的 TUN 描述符，杜绝关闭重建窗口内的明文泄露
         val fd = if (tunFd?.fileDescriptor?.valid() == true) {
@@ -318,7 +377,7 @@ class CoreService : VpnService() {
             val builder = Builder()
             builder.setSession("Mirage")
             builder.addAddress("198.18.0.1", 32)
-            val bypassLan = TunConfigStore.isBypassLanEnabled(this)
+            val bypassLan = serviceConfig.bypassLan
             if (bypassLan) {
                 log("[core] 启用绕过局域网: 路由排除 RFC 1918 / 组播 / 广播私有网段")
                 NON_LAN_IPV4_ROUTES.forEach { (net, prefix) ->
@@ -330,7 +389,7 @@ class CoreService : VpnService() {
             builder.addRoute("198.18.0.0", 15)
             builder.addDnsServer(InetAddress.getByName("198.19.0.53"))
             // 捕获 IPv6 流量，防止 Android 14/15/16 5G 蜂窝网络 IPv6 绕过 VPN 直连物理网卡被 GFW 阻断
-            if (TunConfigStore.isIpv6Enabled(this)) {
+            if (serviceConfig.ipv6Enabled) {
                 runCatching {
                     builder.addAddress("fdfe:dcba:9876::1", 128)
                     if (!bypassLan) {
@@ -350,7 +409,7 @@ class CoreService : VpnService() {
             // 供下方的自我排除判断该不该调用 addDisallowedApplication。
             var usedAllowList = false
             runCatching {
-                val filterConfig = com.mirage.android.core.AppFilterStore.getConfig(this)
+                val filterConfig = serviceConfig.appFilterConfig ?: com.mirage.android.core.AppFilterStore.getConfig(this)
                 val installedPackages = packageManager.getInstalledApplications(0).map { it.packageName }
                 when (filterConfig.mode) {
                     com.mirage.android.data.model.AppFilterMode.ALLOW -> {
@@ -432,24 +491,18 @@ class CoreService : VpnService() {
         // 注入规则、Geo 文件与 DNS 配置 (修复 M5: 自主完成全量注入，杜绝冷启动 AIDL 竞态)
         runCatching { GeoManager.loadGeoFilesToNative(this) }
         runCatching { MirageNative.setRules(RuleStore.toJson(this)) }
-        runCatching {
-            val routingPrefs = getSharedPreferences("mirage_routing_prefs", Context.MODE_PRIVATE)
-            val mode = routingPrefs.getInt("outbound_mode", 0)
-            MirageNative.setOutboundMode(mode)
-        }
-        runCatching {
-            val dnsPrefs = getSharedPreferences("mirage_dns_prefs", Context.MODE_PRIVATE)
-            val directDns = dnsPrefs.getString("direct_dns", "223.5.5.5") ?: "223.5.5.5"
-            val remoteDns = dnsPrefs.getString("remote_dns", "1.1.1.1") ?: "1.1.1.1"
-            MirageNative.setDnsServers(directDns, remoteDns)
-        }
-        runCatching {
-            val vpnPrefs = getSharedPreferences("mirage_vpn_prefs", Context.MODE_PRIVATE)
-            val blockQuic = vpnPrefs.getBoolean("block_quic", true)
-            MirageNative.setBlockQuic(blockQuic)
-        }
+        runCatching { MirageNative.setOutboundMode(serviceConfig.outboundMode) }
+        runCatching { MirageNative.setDnsServers(serviceConfig.directDns, serviceConfig.remoteDns) }
+        runCatching { MirageNative.setBlockQuic(serviceConfig.blockQuic) }
+        runCatching { MirageNative.setUdpMux(serviceConfig.udpMux) }
 
-        val poolSize = if (poolSizeOverride > 0) poolSizeOverride else NodeStore.getPoolSize(this)
+        val poolSize = if (poolSizeOverride > 0) {
+            poolSizeOverride
+        } else if (serviceConfig.poolSize > 0) {
+            serviceConfig.poolSize
+        } else {
+            NodeStore.getPoolSize(this)
+        }
         log("[core] 开始启动内核 (uri=${uri.take(30)}..., poolSize=$poolSize, mtu=$mtu)")
         val rc = MirageNative.start(rawFd, uri, poolSize, mtu)
         if (rc != 0) {
@@ -599,7 +652,7 @@ class CoreService : VpnService() {
         var consecutiveFailures = 0
         var failoverBackoffSec = 0L
         while (isActive) {
-            val baseInterval = SettingsStore.getCheckIntervalSec(this@CoreService).toLong().coerceAtLeast(5)
+            val baseInterval = serviceConfig.checkIntervalSec.toLong().coerceAtLeast(5)
             val interval = baseInterval + failoverBackoffSec
             delay(interval * 1000)
             if (currentPhysicalNetwork == null) continue
@@ -614,7 +667,7 @@ class CoreService : VpnService() {
 
             consecutiveFailures++
             LogStore.append("[failover] 检测到连接异常 (第 $consecutiveFailures 次)")
-            if (!SettingsStore.isAutoReconnect(this@CoreService)) continue
+            if (!serviceConfig.autoReconnect) continue
 
             // 连续 2 次异常才触发 failover (避免瞬时抖动)
             if (consecutiveFailures >= 2) {
@@ -632,7 +685,7 @@ class CoreService : VpnService() {
 
     /** failover: 测活选最优节点 (best) 或换下一个 (next), 然后热切换。返回是否成功选中可用节点。 */
     private suspend fun doFailover(): Boolean {
-        val nodes = NodeStore.getNodes(this)
+        val nodes = if (serviceConfig.nodes.isNotEmpty()) serviceConfig.nodes else NodeStore.getNodes(this)
         if (nodes.size <= 1) {
             // 单节点: 完整重启连接 (清 stale 隧道, 保持 TUN 避免明文泄露)
             LogStore.append("[failover] 仅一个节点, 重启连接 (保持 TUN)")
@@ -645,9 +698,9 @@ class CoreService : VpnService() {
             }
             return false // 修复 2.1: 单节点重连未能切换可用节点，返回 false 允许 failoverBackoffSec 递增退避
         }
-        val mode = SettingsStore.getFailoverMode(this)
+        val mode = serviceConfig.failoverMode
         LogStore.append("[failover] 触发节点切换 (mode=$mode, ${nodes.size} 个节点)")
-        val selectedUri = NodeStore.getSelectedUri(this)
+        val selectedUri = if (serviceConfig.uri.isNotBlank()) serviceConfig.uri else NodeStore.getSelectedUri(this)
         val sorted = if (mode == "best") {
             // 修复 M3: 并发并行测活 (各节点独立 3000ms 超时, 避免 N*5s 阻塞 watchdog 导致监控停摆)。
             // 每个 testNode 是完整协议握手 (引擎+拨号), 用信号量限流防 N 个并发握手同时打服务器
@@ -675,10 +728,11 @@ class CoreService : VpnService() {
         }
         if (best.first.uri != selectedUri) {
             LogStore.append("[failover] 切换到: ${best.first.displayName} (${best.second}ms)")
+            serviceConfig.uri = best.first.uri
             runCatching { MirageNative.setNode(best.first.uri) }
             val newIdx = nodes.indexOfFirst { it.uri == best.first.uri }
             if (newIdx >= 0) {
-                NodeStore.setSelected(this, newIdx)
+                // 修复 3.1: 删掉 NodeStore.setSelected(this, newIdx)，单向回流经 ICoreCallback 由 UI 进程落盘持久化
                 broadcast { it.onNodeChanged(newIdx, best.first.uri) }
             }
             return true
@@ -729,32 +783,44 @@ class CoreService : VpnService() {
     }
 
     fun setNodeInternal(uri: String): Boolean {
-        // 运行时热切换: 更新持久化 + 通知内核
-        val idx = NodeStore.getNodes(this).indexOfFirst { it.uri == uri }
-        if (idx >= 0) NodeStore.setSelected(this, idx)
+        serviceConfig.uri = uri
         return if (MirageNative.isRunning()) {
             runCatching { MirageNative.setNode(uri) }.getOrDefault(false)
         } else true
     }
 
     fun setPoolSizeInternal(poolSize: Int): Boolean {
-        NodeStore.setPoolSize(this, poolSize)
+        serviceConfig.poolSize = poolSize
         return if (MirageNative.isRunning()) {
             runCatching { MirageNative.setPoolSize(poolSize) }.getOrDefault(false)
         } else true
     }
 
     fun getPoolSizeInternal(): Int =
-        if (MirageNative.isRunning()) MirageNative.getPoolSize() else NodeStore.getPoolSize(this)
+        if (MirageNative.isRunning()) MirageNative.getPoolSize() else if (serviceConfig.poolSize > 0) serviceConfig.poolSize else NodeStore.getPoolSize(this)
 
     fun setRulesInternal(json: String): Boolean = MirageNative.setRules(json)
-    fun setBlockQuicInternal(block: Boolean): Boolean = MirageNative.setBlockQuic(block)
-    fun isBlockQuicInternal(): Boolean = MirageNative.isBlockQuic()
+    fun setBlockQuicInternal(block: Boolean): Boolean {
+        serviceConfig.blockQuic = block
+        return MirageNative.setBlockQuic(block)
+    }
+    fun isBlockQuicInternal(): Boolean =
+        if (MirageNative.isRunning()) MirageNative.isBlockQuic() else serviceConfig.blockQuic
+    fun setUdpMuxInternal(enabled: Boolean): Boolean {
+        log("[core] 切换 UDP Mux: $enabled")
+        serviceConfig.udpMux = enabled
+        return MirageNative.setUdpMux(enabled)
+    }
+    fun isUdpMuxInternal(): Boolean =
+        if (MirageNative.isRunning()) MirageNative.isUdpMux() else serviceConfig.udpMux
     fun clearDnsCacheInternal(): Boolean = MirageNative.clearDnsCache()
-    fun setDnsServersInternal(directDns: String, remoteDns: String): Boolean =
-        MirageNative.setDnsServers(directDns, remoteDns)
-    fun getDirectDnsInternal(): String = MirageNative.getDirectDns()
-    fun getRemoteDnsInternal(): String = MirageNative.getRemoteDns()
+    fun setDnsServersInternal(directDns: String, remoteDns: String): Boolean {
+        serviceConfig.directDns = directDns
+        serviceConfig.remoteDns = remoteDns
+        return MirageNative.setDnsServers(directDns, remoteDns)
+    }
+    fun getDirectDnsInternal(): String = serviceConfig.directDns
+    fun getRemoteDnsInternal(): String = serviceConfig.remoteDns
 
     fun isRunningInternal(): Boolean = MirageNative.isRunning()
     fun isHealthyInternal(): Boolean = MirageNative.isHealthy()
@@ -890,13 +956,6 @@ class CoreService : VpnService() {
         return MirageNative.setLogLevel(level)
     }
 
-    fun setUdpMuxInternal(enabled: Boolean): Boolean {
-        log("[core] 切换 UDP Mux: $enabled")
-        return MirageNative.setUdpMux(enabled)
-    }
-
-    fun isUdpMuxInternal(): Boolean = MirageNative.isUdpMux()
-
     override fun onRevoke() {
         log("[core] 系统任务栏/设置断开 VPN 连接 (onRevoke)")
         try {
@@ -984,20 +1043,39 @@ class CoreService : VpnService() {
         override fun closeAllConnections(): Int =
             runCatching { MirageNative.closeAllConnections() }.getOrDefault(0)
         override fun setOutboundMode(mode: Int): Boolean {
-            getSharedPreferences("mirage_routing_prefs", Context.MODE_PRIVATE)
-                .edit().putInt("outbound_mode", mode).apply()
+            serviceConfig.outboundMode = mode
             return runCatching { MirageNative.setOutboundMode(mode) }.getOrDefault(false)
         }
         override fun getOutboundMode(): Int {
             return if (MirageNative.isRunning()) {
                 MirageNative.getOutboundMode()
             } else {
-                getSharedPreferences("mirage_routing_prefs", Context.MODE_PRIVATE)
-                    .getInt("outbound_mode", 0)
+                serviceConfig.outboundMode
             }
         }
         override fun getRecentRequestsJson(): String =
             runCatching { MirageNative.getRecentRequestsJson() }.getOrDefault("[]")
+        override fun setAutoReconnect(enabled: Boolean): Boolean {
+            serviceConfig.autoReconnect = enabled
+            return true
+        }
+        override fun isAutoReconnect(): Boolean = serviceConfig.autoReconnect
+        override fun setCheckInterval(interval: Int): Boolean {
+            serviceConfig.checkIntervalSec = interval.coerceAtLeast(5)
+            return true
+        }
+        override fun getCheckInterval(): Int = serviceConfig.checkIntervalSec
+        override fun setFailoverMode(mode: String?): Boolean {
+            serviceConfig.failoverMode = mode ?: "best"
+            return true
+        }
+        override fun getFailoverMode(): String = serviceConfig.failoverMode
+        override fun updateNodes(nodesJson: String?): Boolean {
+            if (!nodesJson.isNullOrBlank()) {
+                serviceConfig.nodes = NodeStore.parseNodesJson(nodesJson)
+            }
+            return true
+        }
         override fun registerCallback(cb: ICoreCallback?) = registerCallbackInternal(cb)
         override fun unregisterCallback(cb: ICoreCallback?) = unregisterCallbackInternal(cb)
     }

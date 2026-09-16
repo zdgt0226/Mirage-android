@@ -400,6 +400,26 @@ pub fn record_conn_timings(id: u64, dns_ms: u32, connect_ms: u32, tls_ms: u32, t
     }
 }
 
+/// 异步回填连接的来源应用包名 (避免建连阻塞 Binder 调用)
+pub fn update_conn_app(id: u64, app: String) {
+    {
+        let mut lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(map) = lock.as_mut() {
+            if let Some(c) = map.get_mut(&id) {
+                c.source_app = Some(app.clone());
+            }
+        }
+    }
+    {
+        let mut q_lock = RECENT_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(q) = q_lock.as_mut() {
+            if let Some(r) = q.iter_mut().find(|r| r.id == id) {
+                r.source_app = Some(app);
+            }
+        }
+    }
+}
+
 /// 定向中断并关闭指定 ID 的活跃连接 (对齐 DELETE /connections/{id})
 pub fn close_connection(id: u64) -> bool {
     let lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());

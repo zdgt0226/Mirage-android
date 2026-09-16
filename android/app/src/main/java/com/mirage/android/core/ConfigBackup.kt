@@ -119,11 +119,11 @@ object ConfigBackup {
         // Geo 配置
         if (root.has("geosite_url")) {
             val u = root.optString("geosite_url", "")
-            if (u.isNotBlank()) GeoManager.setGeositeUrl(ctx, u)
+            if (u.isNotBlank() && u.startsWith("https://", ignoreCase = true)) GeoManager.setGeositeUrl(ctx, u)
         }
         if (root.has("geoip_url")) {
             val u = root.optString("geoip_url", "")
-            if (u.isNotBlank()) GeoManager.setGeoipUrl(ctx, u)
+            if (u.isNotBlank() && u.startsWith("https://", ignoreCase = true)) GeoManager.setGeoipUrl(ctx, u)
         }
         // TUN & 性能微调 (IPv6 / QUIC / UDP Mux)
         val vpnRepo = com.mirage.android.data.repository.VpnRepository.getInstance(ctx)

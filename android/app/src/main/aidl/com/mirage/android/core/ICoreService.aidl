@@ -51,6 +51,13 @@ interface ICoreService {
     boolean setOutboundMode(int mode);
     int getOutboundMode();
     String getRecentRequestsJson();
+    boolean setAutoReconnect(boolean enabled);
+    boolean isAutoReconnect();
+    boolean setCheckInterval(int interval);
+    int getCheckInterval();
+    boolean setFailoverMode(String mode);
+    String getFailoverMode();
+    boolean updateNodes(String nodesJson);
     void registerCallback(ICoreCallback cb);
     void unregisterCallback(ICoreCallback cb);
 }

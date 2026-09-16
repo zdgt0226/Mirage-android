@@ -307,8 +307,7 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
         return;
     };
     let src = stream.source();
-    let source_app = src.and_then(|s| crate::attribution::resolve_package(6, s.0, s.1, dst.0, dst.1));
-    debug!("[TUN-TCP] 新连接 → {} (来源应用: {:?})", format!("{}:{}", dst.0, dst.1), source_app);
+    debug!("[TUN-TCP] 新连接 → {}", format!("{}:{}", dst.0, dst.1));
 
     // 分流: fake-IP 反查域名 / 裸 IP 智能嗅探 (TLS SNI / HTTP Host)
     let mut direct_domain = stack.engine().fake_ip_reverse(&dst.0);
@@ -344,8 +343,19 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
             &dst.0.to_string(),
             &matched_rule,
             "BLOCK",
-            source_app,
+            None,
         );
+        if let Some(s) = src {
+            let s_ip = s.0;
+            let s_port = s.1;
+            let d_ip = dst.0;
+            let d_port = dst.1;
+            tokio::task::spawn_blocking(move || {
+                if let Some(pkg) = crate::attribution::resolve_package(6, s_ip, s_port, d_ip, d_port) {
+                    crate::monitor::update_conn_app(cid, pkg);
+                }
+            });
+        }
         crate::monitor::record_conn_close(cid, 0, 0, "Blocked");
         stream.close();
         debug!("[TUN-TCP] 规则拦截: 阻断连接 → {}:{}", target_name, dst.1);
@@ -353,11 +363,11 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
     }
 
     if action == crate::direct::RuleAction::Direct {
-        relay_direct(stack.clone(), stream, dst, direct_domain.clone(), initial_payload, matched_rule, source, source_app).await;
+        relay_direct(stack.clone(), stream, dst, direct_domain.clone(), initial_payload, matched_rule, source, src).await;
         return;
     }
 
-    relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule, source_app).await;
+    relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule, src).await;
 }
 
 /// 代理路径: smoltcp socket ⇄ Mirage 加密隧道
@@ -368,7 +378,7 @@ async fn relay_proxy(
     direct_domain: Option<String>,
     initial_payload: Vec<u8>,
     matched_rule: String,
-    source_app: Option<String>,
+    src: Option<(std::net::IpAddr, u16)>,
 ) {
     let connect_start = std::time::Instant::now();
     let tunnel = match connect_tunnel(&stack, dst, direct_domain.clone()).await {
@@ -396,8 +406,19 @@ async fn relay_proxy(
         &resolved_ip_display,
         &matched_rule,
         "PROXY",
-        source_app.clone(),
+        None,
     );
+    if let Some(s) = src {
+        let s_ip = s.0;
+        let s_port = s.1;
+        let d_ip = dst.0;
+        let d_port = dst.1;
+        tokio::task::spawn_blocking(move || {
+            if let Some(pkg) = crate::attribution::resolve_package(6, s_ip, s_port, d_ip, d_port) {
+                crate::monitor::update_conn_app(cid, pkg);
+            }
+        });
+    }
     crate::monitor::record_conn_timings(cid, 0, connect_ms, 0, 0);
 
     // 预读首包（若嗅探阶段未预读，且客户端已推流，用 60ms 快速预读，用于 0-RTT 首包写入和故障重试；数据到达即返，无额外开销）
@@ -455,7 +476,6 @@ async fn relay_proxy(
     let req_counter_up = request_count.clone();
     let srv_flag_up = server_has_downloaded.clone();
     let last_act_up = last_active.clone();
-    let app_for_up = source_app.clone();
     let upload = async move {
         let mut up_bytes: u64 = 0;
         let mut timed_out = false;
@@ -465,7 +485,7 @@ async fn relay_proxy(
             dst_port,
             dom_ref,
             false,
-            app_for_up.as_deref(),
+            None,
         );
         loop {
             match tokio::time::timeout(timeout_dur, local_rd.read(&mut buf)).await {
@@ -483,7 +503,7 @@ async fn relay_proxy(
                             dst_port,
                             dom_ref,
                             true,
-                            app_for_up.as_deref(),
+                            None,
                         );
                     }
                     up_bytes += n as u64;
@@ -518,7 +538,6 @@ async fn relay_proxy(
     let down_atomic = conn_down.clone();
     let srv_flag_down = server_has_downloaded.clone();
     let last_act_down = last_active.clone();
-    let app_for_down = source_app.clone();
     let download = async move {
         let mut down_bytes: u64 = 0;
         let mut timed_out = false;
@@ -527,7 +546,7 @@ async fn relay_proxy(
             dst_port,
             dom_ref,
             false,
-            app_for_down.as_deref(),
+            None,
         );
         loop {
             match tokio::time::timeout(timeout_dur, tun_reader.recv_data_to(&mut local_wr)).await {
@@ -540,7 +559,7 @@ async fn relay_proxy(
                             dst_port,
                             dom_ref,
                             true,
-                            app_for_down.as_deref(),
+                            None,
                         );
                     }
                     down_bytes += n as u64;
@@ -717,7 +736,7 @@ async fn relay_direct(
     initial_payload: Vec<u8>,
     matched_rule: String,
     source: crate::direct::DecisionSource,
-    source_app: Option<String>,
+    src: Option<(std::net::IpAddr, u16)>,
 ) {
     let engine = stack.engine();
     let is_fake = engine.is_fake_ip(&dst.0);
@@ -741,13 +760,24 @@ async fn relay_direct(
                     } else {
                         debug!("[TUN-TCP/direct] 直连域名 [{}] 真实解析失败或超时，自动平滑回退走隧道代理", dom);
                     }
-                    return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule, source_app).await;
+                    return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule, src).await;
                 }
                 DirectTarget::Drop => {
                     // 局域网域名解析不出私有地址: 转代理会把内网主机名发给远端且必然连不通，
                     // 直接关闭连接让上层应用快速失败。
                     let (cid, _, _, _) = crate::monitor::record_conn_start_with_app(
-                        "TCP", &format!("{}:{}", dom, dst.1), &dst.0.to_string(), &matched_rule, "DIRECT", source_app);
+                        "TCP", &format!("{}:{}", dom, dst.1), &dst.0.to_string(), &matched_rule, "DIRECT", None);
+                    if let Some(s) = src {
+                        let s_ip = s.0;
+                        let s_port = s.1;
+                        let d_ip = dst.0;
+                        let d_port = dst.1;
+                        tokio::task::spawn_blocking(move || {
+                            if let Some(pkg) = crate::attribution::resolve_package(6, s_ip, s_port, d_ip, d_port) {
+                                crate::monitor::update_conn_app(cid, pkg);
+                            }
+                        });
+                    }
                     crate::monitor::record_conn_close(cid, 0, 0, "LAN Domain Unresolved");
                     stream.close();
                     warn!("[TUN-TCP/direct] 局域网域名 [{}] 无法解析出私有地址，关闭连接 (禁止外发内网主机名)", dom);
@@ -770,7 +800,7 @@ async fn relay_direct(
         // 私有局域网 IP / 国内 IP 直连
     } else if is_fake {
         debug!("[TUN-TCP/direct] 方案D双重置信拦截: 域名 [{:?}] 本地解析 IP ({}) 属于非国内 IP，自动切换走隧道代理", direct_domain, target_ip);
-        return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule, source_app).await;
+        return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule, src).await;
     }
 
     let target_display = if let Some(ref dom) = direct_domain {
@@ -779,7 +809,18 @@ async fn relay_direct(
         format!("{}:{}", target_ip, dst.1)
     };
 
-    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start_with_app("TCP", &target_display, &target_ip.to_string(), &matched_rule, "DIRECT", source_app.clone());
+    let (cid, conn_up, conn_down, conn_abort) = crate::monitor::record_conn_start_with_app("TCP", &target_display, &target_ip.to_string(), &matched_rule, "DIRECT", None);
+    if let Some(s) = src {
+        let s_ip = s.0;
+        let s_port = s.1;
+        let d_ip = dst.0;
+        let d_port = dst.1;
+        tokio::task::spawn_blocking(move || {
+            if let Some(pkg) = crate::attribution::resolve_package(6, s_ip, s_port, d_ip, d_port) {
+                crate::monitor::update_conn_app(cid, pkg);
+            }
+        });
+    }
     use std::os::unix::io::AsRawFd;
     let addr = std::net::SocketAddr::new(target_ip, dst.1);
     let sock = match addr {
@@ -825,7 +866,7 @@ async fn relay_direct(
             }
             crate::monitor::record_conn_close(cid, 0, 0, "Connect Failed (Fallback Proxy)");
             debug!("[TUN-TCP/direct] 直连 {addr} 失败: {e}，自动回退走隧道代理");
-            return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule, source_app).await;
+            return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule, src).await;
         }
         Err(_) => {
             if is_raw_cn_ip || is_strict_cn {
@@ -835,7 +876,7 @@ async fn relay_direct(
             }
             crate::monitor::record_conn_close(cid, 0, 0, "Connect Timeout (Fallback Proxy)");
             debug!("[TUN-TCP/direct] 直连 {addr} 超时，自动回退走隧道代理");
-            return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule, source_app).await;
+            return relay_proxy(stack, stream, dst, direct_domain, initial_payload, matched_rule, src).await;
         }
     };
     let connect_ms = connect_start.elapsed().as_millis() as u32;
@@ -869,7 +910,6 @@ async fn relay_direct(
     let req_counter_to = request_count.clone();
     let srv_flag_to = server_has_downloaded.clone();
     let last_act_to = last_active.clone();
-    let app_for_to = source_app.clone();
     let to_tunnel = async move {
         let mut up_bytes: u64 = 0;
         let mut timed_out = false;
@@ -879,7 +919,7 @@ async fn relay_direct(
             dst_port,
             dom_ref,
             false,
-            app_for_to.as_deref(),
+            None,
         );
         loop {
             match tokio::time::timeout(timeout_dur, lr.read(&mut buf)).await {
@@ -892,7 +932,7 @@ async fn relay_direct(
                             dst_port,
                             dom_ref,
                             true,
-                            app_for_to.as_deref(),
+                            None,
                         );
                     }
                     up_bytes += n as u64;
@@ -921,7 +961,6 @@ async fn relay_direct(
     let down_atomic = conn_down.clone();
     let srv_flag_from = server_has_downloaded.clone();
     let last_act_from = last_active.clone();
-    let app_for_from = source_app.clone();
     let from_tunnel = async move {
         let mut down_bytes: u64 = 0;
         let mut timed_out = false;
@@ -931,7 +970,7 @@ async fn relay_direct(
             dst_port,
             dom_ref,
             false,
-            app_for_from.as_deref(),
+            None,
         );
         loop {
             match tokio::time::timeout(timeout_dur, rr.read(&mut buf)).await {
@@ -946,7 +985,7 @@ async fn relay_direct(
                             dst_port,
                             dom_ref,
                             true,
-                            app_for_from.as_deref(),
+                            None,
                         );
                     }
                     down_bytes += n as u64;

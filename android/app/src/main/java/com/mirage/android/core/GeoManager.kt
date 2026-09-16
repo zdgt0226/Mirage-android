@@ -1,6 +1,7 @@
 package com.mirage.android.core
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -8,6 +9,9 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -18,6 +22,7 @@ import java.util.Locale
  */
 object GeoManager {
 
+    private const val TAG = "GeoManager"
     private const val PREFS = "mirage_geo_config"
     private const val KEY_ACTIVE_SOURCE_ID = "active_source_id"
     private const val KEY_CUSTOM_SOURCES = "custom_sources_json"
@@ -125,7 +130,7 @@ object GeoManager {
 
     fun saveCustomSources(context: Context, customList: List<GeoSource>) {
         val arr = org.json.JSONArray()
-        for (s in customList.filter { !it.isBuiltin }) {
+        for (s in customList.filter { !it.isBuiltin && it.geositeUrl.startsWith("https://", ignoreCase = true) && it.geoipUrl.startsWith("https://", ignoreCase = true) }) {
             arr.put(org.json.JSONObject()
                 .put("id", s.id)
                 .put("name", s.name)
@@ -307,8 +312,13 @@ object GeoManager {
     }
 
     fun setGeositeUrl(context: Context, url: String) {
+        val trimmed = url.trim()
+        if (!trimmed.startsWith("https://", ignoreCase = true)) {
+            Log.w(TAG, "拒绝非 HTTPS 的 GeoSite URL: $trimmed")
+            return
+        }
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putString(KEY_GEOSITE_URL, url.trim()).apply()
+            .edit().putString(KEY_GEOSITE_URL, trimmed).apply()
     }
 
     fun getGeoipUrl(context: Context): String {
@@ -317,8 +327,13 @@ object GeoManager {
     }
 
     fun setGeoipUrl(context: Context, url: String) {
+        val trimmed = url.trim()
+        if (!trimmed.startsWith("https://", ignoreCase = true)) {
+            Log.w(TAG, "拒绝非 HTTPS 的 GeoIP URL: $trimmed")
+            return
+        }
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putString(KEY_GEOIP_URL, url.trim()).apply()
+            .edit().putString(KEY_GEOIP_URL, trimmed).apply()
     }
 
     fun resetDefaultUrls(context: Context) {
@@ -444,12 +459,12 @@ object GeoManager {
             siteUrl,
             "https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat",
             "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat"
-        ).distinct()
+        ).filter { it.startsWith("https://", ignoreCase = true) }.distinct()
         val ipMirrors = listOf(
             ipUrl,
             "https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat",
             "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geoip.dat"
-        ).distinct()
+        ).filter { it.startsWith("https://", ignoreCase = true) }.distinct()
 
         val siteFile = getGeositeFile(context)
         val ipFile = getGeoipFile(context)
@@ -478,15 +493,20 @@ object GeoManager {
             return@withContext GeoUpdateResult(false, "GeoIP 数据集下载失败，请检查网络或更换更新 URL")
         }
 
-        // 3. 原子替换
+        // 3. 原子替换与校验 (原子 move，捕获异常并正确传播失败)
         onProgress("正在校验与安装 Geo 数据文件…", 92)
-        if (siteTmp.exists()) {
-            siteFile.delete()
-            siteTmp.renameTo(siteFile)
-        }
-        if (ipTmp.exists()) {
-            ipFile.delete()
-            ipTmp.renameTo(ipFile)
+        try {
+            if (siteTmp.exists()) {
+                Files.move(siteTmp.toPath(), siteFile.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            }
+            if (ipTmp.exists()) {
+                Files.move(ipTmp.toPath(), ipFile.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            }
+        } catch (e: Exception) {
+            siteTmp.delete()
+            ipTmp.delete()
+            Log.e(TAG, "Geo 数据文件原子替换失败: ${e.message}", e)
+            return@withContext GeoUpdateResult(false, "安装 Geo 数据文件失败: ${e.message}")
         }
 
         // 4. 热加载到 Rust Core
@@ -520,24 +540,40 @@ object GeoManager {
         onProgress: (Int) -> Unit
     ): Boolean {
         for (url in mirrors) {
+            if (!url.startsWith("https://", ignoreCase = true)) continue
             try {
                 val ok = downloadFile(url, dest, onProgress)
                 if (ok && dest.exists() && dest.length() > 50 * 1024) {
+                    val expectedSha = fetchSha256("$url.sha256sum")
+                    if (expectedSha != null) {
+                        val actualSha = computeSha256(dest)
+                        if (!actualSha.equals(expectedSha, ignoreCase = true)) {
+                            Log.w(TAG, "SHA-256 校验不匹配 ($url): 期望=$expectedSha, 实际=$actualSha, 丢弃产物")
+                            dest.delete()
+                            continue
+                        }
+                        Log.d(TAG, "SHA-256 校验通过: $actualSha")
+                    }
                     return true
                 }
             } catch (e: Exception) {
-                // 尝试下一个镜像
+                Log.w(TAG, "镜像下载失败 $url: ${e.message}")
             }
         }
         return false
     }
 
     private fun downloadFile(urlStr: String, dest: File, onProgress: (Int) -> Unit): Boolean {
+        if (!urlStr.startsWith("https://", ignoreCase = true)) return false
         var connection: HttpURLConnection? = null
         try {
             var url = URL(urlStr)
             var redirects = 0
             while (redirects < 5) {
+                if (!url.protocol.equals("https", ignoreCase = true)) {
+                    Log.w(TAG, "重定向到非 HTTPS 地址，拒绝: $url")
+                    return false
+                }
                 connection = url.openConnection() as HttpURLConnection
                 connection.instanceFollowRedirects = false
                 connection.connectTimeout = 15000
@@ -584,5 +620,51 @@ object GeoManager {
         } finally {
             connection?.disconnect()
         }
+    }
+
+    fun computeSha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { fis ->
+            val buf = ByteArray(64 * 1024)
+            var n: Int
+            while (fis.read(buf).also { n = it } != -1) {
+                digest.update(buf, 0, n)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun fetchSha256(shaUrl: String): String? {
+        if (!shaUrl.startsWith("https://", ignoreCase = true)) return null
+        return runCatching {
+            var url = URL(shaUrl)
+            var redirects = 0
+            var conn: HttpURLConnection? = null
+            while (redirects < 5) {
+                if (!url.protocol.equals("https", ignoreCase = true)) return null
+                conn = url.openConnection() as HttpURLConnection
+                conn.instanceFollowRedirects = false
+                conn.connectTimeout = 10000
+                conn.readTimeout = 15000
+                conn.setRequestProperty("User-Agent", "Mirage-Android/0.2.1")
+                conn.connect()
+                val code = conn.responseCode
+                if (code in 300..399) {
+                    val loc = conn.getHeaderField("Location") ?: break
+                    url = URL(url, loc)
+                    conn.disconnect()
+                    redirects++
+                    continue
+                }
+                if (code == HttpURLConnection.HTTP_OK) {
+                    val text = conn.inputStream.bufferedReader().use { it.readText() }
+                    val match = Regex("^[a-fA-F0-9]{64}").find(text.trim())
+                    return@runCatching match?.value?.lowercase()
+                }
+                break
+            }
+            conn?.disconnect()
+            null
+        }.getOrNull()
     }
 }
