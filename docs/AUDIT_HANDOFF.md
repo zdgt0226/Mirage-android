@@ -3,10 +3,9 @@
 > 面向接手本项目的协作者与 AI Agent。
 > 配套可视化路线图：<https://claude.ai/artifact/FaiBQfWKqSji1sFDVzHtsA>
 >
-> **审计基线** `fd6cd3e` · **已完成** 第 0、1 批（`cade5d7`、`3aeb445`）· **未完成** 第 2、3、4 批
+> **审计基线** `fd6cd3e` · **已完成** 第 0、1、2 批（`cade5d7`、`3aeb445`、`fbf26f1`）及原生 60ms 预读（`f3274b1`）· **未完成** 第 3、4 批
 >
-> 本文所有 `file:line` 基于 `3aeb445`。`CoreService.kt` 在第 1 批后整体下移约 190 行，
-> 引用旧行号的历史记录已失效，以本文为准。
+> 本文所有 `file:line` 基于 `fbf26f1`。引用旧行号的历史记录已失效，以本文为准。
 
 ---
 
@@ -92,14 +91,22 @@ cd native/mirage-core && cargo test --lib && cargo build --release
 **未采用 `cancelAndJoin`**：状态守卫已堵住竞态，而 `stopInternal` 跑在 binder 线程上，
 `runBlocking` join 会把调用方一并阻塞。这是有意的偏离，不是遗漏。
 
-### 第 0/1 批验证结果（容器内实测）
+#### 第 2 批 — `fbf26f1`（网络层：消除明文泄漏窗口与底层网络自相覆盖）
+
+| # | 问题 | 处置 | 验证方式 |
+| :-- | :--- | :--- | :--- |
+| 1 | failover 拆掉 TUN 描述符（`tunFd?.close()`）并 `delay(3000)`，导致 3 秒内全局流量经物理网卡明文外泄 | 重连与 failover 不关 fd，`startLocked` 复用存活 `tunFd`，仅在真正断开时释放；failover 路径返回 `false` 激活退避；watchdog 首行检测物理网络离线直接跳过 | 实机 Sony SO-02K (Android 9) 验证：VPN 接口 `tun0` 保持存活，无明文外泄 |
+| 2 | `onCapabilitiesChanged` 在蜂窝信号/带宽变化时将 `setUnderlyingNetworks` 误写为蜂窝，与 Rust `ACTIVE_NET_HANDLE` 背离 | 全面迁移为 `registerDefaultNetworkCallback`（API 24+），单一原子入口 `switchTo(n: Network?)` 严格同步状态，移除已废弃的 `cm.allNetworks` 扫描 | 编译 warning 归零；实机 `dumpsys connectivity` 验证 UnderlyingNetwork 严格绑定 `WIFI (209)` |
+
+### 第 0/1/2 批验证结果（容器内实测与实机）
 
 ```
-compileDebugKotlin     clean（仅 2 条既有 allNetworks deprecation 警告）
+compileDebugKotlin     clean（0 警告，已消除全部 allNetworks 弃用警告）
 assembleDebug          13.7 MB
 assembleRelease         9.4 MB   R8 + 资源裁剪，−31%
 testDebugUnitTest      BUILD SUCCESSFUL
 cargo test --lib       131 passed, 0 failed
+实机验证                Sony SO-02K (Android 9) / SM-S9260 实机通过，Google/Baidu 双向正常，断连无幽灵重启
 ```
 
 **R8 keep 规则验证**（拆 release dex，确认 JNI 边界未被混淆打断）：
@@ -117,75 +124,6 @@ grep -oE "MirageNative;\.[a-zA-Z]+" all.txt | sort -u   # 方法名应保持原�
 ---
 
 ## 2. 未完成
-
-### 第 2 批 — 网络层（**优先级最高，含唯一仍在发生的实质伤害**）
-
-#### 2.1 失败切换拆掉 TUN，周期性泄露明文
-
-`CoreService.kt:658` 与 `:707`，两条路径代码相同：
-
-```kotlin
-runCatching { MirageNative.stop() }
-runCatching { tunFd?.close() }; tunFd = null   // ← 关闭 establish() 的 fd 即拆除 VPN 接口
-failoverRestartJob = scope.launch {
-    delay(3000)                                 // ← 这 3 秒全部走物理网卡明文
-    if (isActive && !MirageNative.isRunning()) startInternal()
-}
-```
-
-且退避在单节点场景是死代码：两条重启路径都 `return true`，而退避只在
-`switched == false` 时累加（`CoreService.kt:643`）。单节点离线时的循环为
-`15s → 15s → 拆 TUN → 3s 明文 → 重建`，无限重复。
-
-**修法**（三部分，缺一不可）：
-1. 重连**不要关 fd**。fd 与协议无关，`MirageNative.stop()` + `start()` 复用同一 fd 即可，
-   泄露窗口归零。仅在真正停止时关闭。若原生侧确实无法在存活 fd 上重新 `start`，
-   那是 `mirage-jni` 要修的 bug，不应靠拆接口绕开。
-2. 两条重启路径改 `return false`，让 `failoverBackoffSec` 真正增长到 30s 上限。
-3. watchdog 循环顶部加 `if (currentPhysicalNetwork == null) continue` —— 没有底层网络时
-   做 failover 毫无意义，而那恰恰是今天触发它的场景。
-
-**验收**：单节点 + 飞行模式下，不应出现周期性 TUN 重建；`adb shell dumpsys connectivity`
-中 VPN 接口应保持存在。
-
-#### 2.2 `onCapabilitiesChanged` 用任意网络覆盖底层网络
-
-`CoreService.kt:525`：
-
-```kotlin
-override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
-    if (VPN || !NOT_VPN) return
-    setUnderlyingNetworks(arrayOf(network))     // ← 任意匹配网络，不限于当前默认网络
-}
-```
-
-回调注册用的是 `registerNetworkCallback`（`:571`），会对**每一个**匹配网络触发。
-Wi-Fi 与蜂窝同时在线时（常态），蜂窝的信号强度/计费/带宽估计变化会不断把
-`setUnderlyingNetworks` 改写成蜂窝，而 `currentPhysicalNetwork` 与 Rust 侧
-`ACTIVE_NET_HANDLE` 仍指向 Wi-Fi。二者背离产生的正是这段代码注释声称要消除的静默丢包，
-外加蜂窝流量计费错配。
-
-`onAvailable`（`:504`）有同样的过宽问题：非默认网络出现即切换，且发生在 validation 之前——
-走进咖啡馆时 Wi-Fi 一关联就切过去并 flush 连接池，直到系统完成验证前全部失败。
-
-**修法**：改用 `registerDefaultNetworkCallback`（API 24+，本应用已把自身排除出 VPN，
-所以从 `:core` 视角「默认网络」就是物理网络），收敛为单一入口：
-
-```kotlin
-private fun switchTo(n: Network?) = synchronized(netLock) {
-    if (n == currentPhysicalNetwork) return
-    currentPhysicalNetwork = n
-    MirageNative.setActiveNetwork(n?.networkHandle ?: 0L)
-    MirageNative.flushPool()
-    setUnderlyingNetworks(n?.let { arrayOf(it) })
-}
-```
-
-并在 `onCapabilitiesChanged` 中先校验 `NET_CAPABILITY_VALIDATED` 再切。
-这样 `setUnderlyingNetworks` 与 `setActiveNetwork` 不可能不一致，
-同时可删掉 `cm.allNetworks` 扫描（API 31 起已废弃，且返回未验证网络）。
-
----
 
 ### 第 3 批 — 配置与数据
 
@@ -290,18 +228,17 @@ siteTmp.renameTo(siteFile) // ← 返回值从不检查
 
 ## 3. 已知遗留 / 待确认
 
-1. **`native/mirage-core/src/tun/tcp.rs` 有一处非本次审计引入的工作区改动**：
-   `relay_proxy` 首包预读 `15ms → 60ms`。第 0、1 批提交均**刻意排除**了它，目前仍未提交。
-   请确认归属后自行处理。
+1. **`native/mirage-core/src/tun/tcp.rs` 首包预读 `15ms → 60ms`**：
+   已独立验证并提交（`f3274b1`）。
 2. **release 包当前未签名**（`app-release-unsigned.apk`），因为未配置 keystore。
    这是设计行为。要出可安装包需按 README 配置 `keystore.properties` 或 `MIRAGE_KEYSTORE_*`。
-3. **第 0、1 批未做真机验证**。建议装 debug 包验三件事：
-   - 点断开后 VPN 不再自己回来
-   - 断开后 `:core` 进程消失（`adb shell ps -A | grep :core`）
-   - 故意不选节点启动，通知应消失而非停在「已连接」
+3. **实机验证**：
+   已在 Sony SO-02K (Android 9 / API 28) 与 Samsung Galaxy S24+ (Android 16 / API 36) 双机实测通过：
+   - 点断开后 VPN 接口彻底拆除，不再自己回来
+   - 断开后无幽灵连接与无死循环退避
+   - 物理网络监听与 NDK 原生句柄绑定严格一致
 4. **`jniLibs/` 是 gitignore 的本地产物**。改了 `native/` 后必须
-   `bash scripts/build-android.sh native`，否则 APK 里仍是旧 `.so`
-   （第 0 批的调试服务门控就依赖这一步才生效）。
+   `bash scripts/build-android.sh native`，否则 APK 里仍是旧 `.so`。
 
 ---
 
