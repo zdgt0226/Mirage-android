@@ -52,7 +52,51 @@ class CoreService : VpnService() {
      * 于是用户点了断开、VPN 却自己回来。这里用显式状态在同一把锁内判定,
      * Stopping 一旦置位, 任何排队中的 startInternal 立即放弃。
      */
-    private enum class ServiceState { Stopped, Starting, Running, Stopping }
+    internal enum class ServiceState { Stopped, Starting, Running, Stopping }
+
+    /** [startInternal] 的入口裁决结果。 */
+    internal sealed interface StartVerdict {
+        /** 继续执行启动流程。 */
+        object Proceed : StartVerdict
+        /** 已在运行且原生内核确认存活，直接返回 0。 */
+        object AlreadyRunning : StartVerdict
+        /** 停止流程进行中，放弃本次启动并返回 [RC_REJECTED_WHILE_STOPPING]。 */
+        object RejectStopping : StartVerdict
+    }
+
+    /**
+     * 服务状态机的纯裁决逻辑。
+     *
+     * 与 IO、Context、原生库全部解耦，因此可以直接被单元测试覆盖 —— 三处守卫
+     * （onStartCommand 重入、startInternal 入口、stopInternal 入口）都只调用这里，
+     * 测试断言的就是生产路径本身，而不是在测试里重写一遍同样的条件。
+     */
+    internal object StateMachine {
+
+        /** onStartCommand 是否接受这次启动请求。Starting/Running 时拒绝重入。 */
+        fun acceptsStartCommand(state: ServiceState): Boolean =
+            state == ServiceState.Stopped || state == ServiceState.Stopping
+
+        /**
+         * startInternal 的入口裁决。
+         *
+         * [nativeRunning] 只在 [ServiceState.Running] 下参与判断：原生原子量在停止
+         * 流程中途会短暂为 false，单凭它判断会让排队中的启动请求复活已被用户停止的 VPN。
+         */
+        fun verdictForStart(state: ServiceState, nativeRunning: Boolean): StartVerdict = when {
+            state == ServiceState.Stopping -> StartVerdict.RejectStopping
+            state == ServiceState.Running && nativeRunning -> StartVerdict.AlreadyRunning
+            else -> StartVerdict.Proceed
+        }
+
+        /** stopInternal 是否需要真正执行拆除。已停止或正在停止时为 false。 */
+        fun shouldRunStop(state: ServiceState): Boolean =
+            state != ServiceState.Stopping && state != ServiceState.Stopped
+
+        /** 启动结束后应进入的状态。 */
+        fun stateAfterStart(rc: Int): ServiceState =
+            if (rc == 0) ServiceState.Running else ServiceState.Stopped
+    }
 
     data class ServiceConfig(
         var uri: String = "",
@@ -189,7 +233,7 @@ class CoreService : VpnService() {
             return START_NOT_STICKY
         }
         // 启动中/已运行时不重入 (meow BaseService 的 onStartCommand 守卫同理)
-        if (serviceState == ServiceState.Starting || serviceState == ServiceState.Running) {
+        if (!StateMachine.acceptsStartCommand(serviceState)) {
             log("[core] 已在运行或启动中, 忽略重复启动请求")
             return START_NOT_STICKY
         }
@@ -304,16 +348,20 @@ class CoreService : VpnService() {
         // 停止流程进行中 (可能正持锁或刚释放锁): 放弃本次启动。
         // 这是「用户点断开后 VPN 自己回来」的根因守卫 —— failoverRestartJob 的
         // cancel() 是协作式的, 不保证已 join, 它可能已经越过 isActive 检查在此排队。
-        if (serviceState == ServiceState.Stopping) {
-            log("[core] 正在停止中, 忽略本次启动请求")
-            return -6
+        val nativeRunning = runCatching { MirageNative.isRunning() }.getOrDefault(false)
+        when (StateMachine.verdictForStart(serviceState, nativeRunning)) {
+            StartVerdict.RejectStopping -> {
+                log("[core] 正在停止中, 忽略本次启动请求")
+                return RC_REJECTED_WHILE_STOPPING
+            }
+            StartVerdict.AlreadyRunning -> {
+                setActive(this)
+                notifyState()
+                return 0
+            }
+            StartVerdict.Proceed -> Unit
         }
         setActive(this)
-        if (serviceState == ServiceState.Running &&
-            runCatching { MirageNative.isRunning() }.getOrDefault(false)) {
-            notifyState()
-            return 0
-        }
         serviceState = ServiceState.Starting
         // failover 重启路径不经过 stopInternal, 必须在此清掉上一轮的周期任务,
         // 否则每次重启都叠加一套, watchdog 会成倍增长。
@@ -329,12 +377,10 @@ class CoreService : VpnService() {
             -7
         }
 
-        if (rc == 0) {
-            serviceState = ServiceState.Running
-        } else {
+        serviceState = StateMachine.stateAfterStart(rc)
+        if (rc != 0) {
             // 任何失败都必须回到干净状态: 否则服务会带着「已连接」的前台通知
             // 和零隧道继续驻留, 用户以为自己受保护。
-            serviceState = ServiceState.Stopped
             cancelPeriodicJobs()
             runCatching { MirageNative.stop() }
             tunFd?.let { runCatching { it.close() } }
@@ -751,7 +797,7 @@ class CoreService : VpnService() {
     }
 
     fun stopInternal(): Unit = synchronized(stateLock) {
-        if (serviceState == ServiceState.Stopping || serviceState == ServiceState.Stopped) {
+        if (!StateMachine.shouldRunStop(serviceState)) {
             return
         }
         // 在锁内、且在做任何实际拆除之前置位: 排队中的 startInternal 拿到锁后
@@ -1099,6 +1145,9 @@ class CoreService : VpnService() {
         const val ACTION_STOP = "com.mirage.android.STOP"
         const val ACTION_VPN_STOPPED = "com.mirage.android.VPN_STOPPED"
         const val ACTION_VPN_STARTED = "com.mirage.android.VPN_STARTED"
+
+        /** startInternal: 停止流程进行中，本次启动请求被拒绝。 */
+        const val RC_REJECTED_WHILE_STOPPING = -6
 
         /** 当前活跃实例 (Rust protect 回调用: VpnService.protect 防隧道环路)。 */
         @Volatile

@@ -213,15 +213,45 @@ class VpnRepository(private val context: Context) {
             putExtra("auto_reconnect", com.mirage.android.core.SettingsStore.isAutoReconnect(context))
             putExtra("check_interval", com.mirage.android.core.SettingsStore.getCheckIntervalSec(context))
             putExtra("failover_mode", com.mirage.android.core.SettingsStore.getFailoverMode(context))
-            putExtra("nodes_json", com.mirage.android.core.NodeStore.getNodesJson(context))
             putExtra("outbound_mode", _outboundMode.value)
+            // 注意: 节点全表不走 Intent, 见下方 pushNodesToCore 的说明。
         }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             context.startForegroundService(intent)
         } else {
             context.startService(intent)
         }
+        pushNodesToCore()
         startTelemetry()
+    }
+
+    /**
+     * 把节点全表推送给 :core（failover 选优需要）。
+     *
+     * 刻意不放进启动 Intent:
+     * 1. 体积无上限。订阅动辄数百个节点, 序列化后可达上百 KB, 而启动 Intent 走
+     *    Binder 事务并由 ActivityManager 持有, 大订阅下会抛 TransactionTooLargeException,
+     *    直接表现为 VPN 启动失败。
+     * 2. 节点 URI 含明文密码, 放在 Intent 里会随 ActivityManager 状态进入 dumpsys
+     *    与 bugreport。走 AIDL 则只在两个进程之间点对点传递。
+     *
+     * 启动 Intent 仍携带 `uri`（当前选中节点）, 因此内核在本次推送到达之前
+     * 就已具备建连所需的全部信息, 不存在时序依赖。
+     */
+    private fun pushNodesToCore() {
+        scope.launch(Dispatchers.IO) {
+            val json = runCatching {
+                com.mirage.android.core.NodeStore.getNodesJson(context)
+            }.getOrNull() ?: return@launch
+            // :core 刚被拉起, binder 可能尚未就绪, 重试几次
+            repeat(10) {
+                if (runCatching { CoreController.updateNodes(json) }.getOrDefault(false)) {
+                    return@launch
+                }
+                delay(300)
+            }
+            android.util.Log.w("VpnRepository", "节点列表推送失败, failover 将回退到 :core 本地读取")
+        }
     }
 
     fun stopVpn() {
