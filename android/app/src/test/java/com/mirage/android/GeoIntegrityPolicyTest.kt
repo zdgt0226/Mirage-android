@@ -78,6 +78,41 @@ class GeoIntegrityPolicyTest {
         assertFalse(GeoManager.isBuiltinUrl(""))
     }
 
+    /**
+     * 匹配必须大小写敏感。
+     *
+     * GitHub / jsDelivr 路径本身区分大小写，折叠比较会把拼写变体判成内置源，
+     * 强制走校验后两个 URL 双双 404，变成本可避免的硬失败。
+     * 这些变体属于用户自建的自定义源，应落在宽松分支。
+     */
+    @Test
+    fun builtinMatchIsCaseSensitive() {
+        // 路径大小写变体 (小写 loyalsoldier)
+        assertFalse(
+            GeoManager.isBuiltinUrl(
+                "https://raw.githubusercontent.com/loyalsoldier/v2ray-rules-dat/release/geosite.dat"
+            )
+        )
+        // 文件名大小写变体
+        assertFalse(
+            GeoManager.isBuiltinUrl(
+                "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/GeoSite.dat"
+            )
+        )
+        // scheme 大小写变体
+        assertFalse(
+            GeoManager.isBuiltinUrl(
+                "HTTPS://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat"
+            )
+        )
+        // 原样仍必须命中
+        assertTrue(
+            GeoManager.isBuiltinUrl(
+                "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/geosite.dat"
+            )
+        )
+    }
+
     @Test
     fun builtinUrlMatchIgnoresSurroundingWhitespace() {
         // 用户从剪贴板粘贴常带首尾空白，不应因此丢失内置源的强制校验

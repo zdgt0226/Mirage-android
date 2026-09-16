@@ -311,13 +311,21 @@ object GeoManager {
     /**
      * 该 URL 是否属于内置源（含内置回退镜像），内置源强制要求 SHA-256 校验。
      *
-     * 判定依据是完整 URL 相等，不做前缀或域名匹配 —— 自定义源即使指向同一域名
-     * 也不会被误认为内置源而继承其信任级别。
+     * 判定依据是完整 URL 逐字节相等，不做前缀、域名或大小写折叠匹配 —— 自定义源
+     * 即使指向同一域名也不会被误认为内置源而继承其信任级别。
+     *
+     * 刻意不用 ignoreCase: GitHub 与 jsDelivr 的路径是大小写敏感的, 折叠比较会把
+     * 拼写变体 (如小写 loyalsoldier) 判成内置源, 进而强制走校验、两个 URL 双双 404,
+     * 变成本可避免的硬失败。
+     *
+     * 方向性说明: 这里 true 是严格分支 (必须校验), false 是宽松分支。因此假阴性
+     * 才是危险方向, 而它不可能发生 —— 镜像列表里的内置 URL 与本集合来自同一批
+     * 编译期字面量, 必然逐字节相等。大小写变体只可能出现在用户自建的自定义源里,
+     * 那本来就属于宽松分支。
      */
-    @JvmStatic
     internal fun isBuiltinUrl(url: String): Boolean {
         val u = url.trim()
-        return BUILTIN_MIRROR_URLS.any { it.equals(u, ignoreCase = true) }
+        return u in BUILTIN_MIRROR_URLS
     }
 
     /** 内置源与内置回退镜像的全部 URL。 */

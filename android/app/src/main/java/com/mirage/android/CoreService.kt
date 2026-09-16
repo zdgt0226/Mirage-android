@@ -796,13 +796,28 @@ class CoreService : VpnService() {
         }
     }
 
-    fun stopInternal(): Unit = synchronized(stateLock) {
-        if (!StateMachine.shouldRunStop(serviceState)) {
-            return
+    /**
+     * 停止引擎并释放 TUN。
+     *
+     * 锁的划分是这里的关键, 不是实现细节。
+     *
+     * 早前版本把「置 Stopping → 拆除 → 置 Stopped」整段放在一个 synchronized 块里,
+     * 期望排队中的 startInternal 拿到锁时看到 Stopping 而放弃。那是无效的:
+     * 临界区内没有任何挂起点, 按 JMM 的 monitor happens-before, 阻塞在同一把锁上的
+     * 线程重新获得锁时观测到的必然已经是 Stopped —— Stopping 对外永不可见,
+     * 守卫形同虚设, failoverRestartJob 排队的重启照样会复活用户刚停掉的 VPN。
+     *
+     * 现在 Stopping 在一把短锁里提交并立即释放, 拆除在锁外进行。这样排队者能真正
+     * 观测到 Stopping 并在守卫处退出。锁外拆除是安全的: 此刻任何 startInternal
+     * 都会被 Stopping 挡住, 不存在与 startLocked 并发的可能。
+     */
+    fun stopInternal() {
+        synchronized(stateLock) {
+            if (!StateMachine.shouldRunStop(serviceState)) {
+                return
+            }
+            serviceState = ServiceState.Stopping
         }
-        // 在锁内、且在做任何实际拆除之前置位: 排队中的 startInternal 拿到锁后
-        // 会看到 Stopping 并放弃, 这样「断开后又自己连上」的竞态就不存在了。
-        serviceState = ServiceState.Stopping
         log("[core] stop()")
         clearActive(this)
         cancelAllJobs()
@@ -820,7 +835,7 @@ class CoreService : VpnService() {
             }
         }
         runCatching { getSystemService(NotificationManager::class.java)?.cancel(1) }
-        serviceState = ServiceState.Stopped
+        synchronized(stateLock) { serviceState = ServiceState.Stopped }
         notifyState()
         runCatching { sendBroadcast(Intent(ACTION_VPN_STOPPED).setPackage(packageName)) }
         // 服务是用 startForegroundService 起的, 属于 started service —— 不调 stopSelf
@@ -1023,15 +1038,15 @@ class CoreService : VpnService() {
     override fun onDestroy() {
         clearActive(this)
         log("[core] onDestroy()")
-        synchronized(stateLock) {
-            serviceState = ServiceState.Stopping
-            cancelAllJobs()
-            flushLogsAndStats()
-            runCatching { MirageNative.stop() }
-            runCatching { tunFd?.close() }
-            tunFd = null
-            serviceState = ServiceState.Stopped
-        }
+        // 与 stopInternal 同样的锁划分: Stopping 必须在短锁内提交并释放,
+        // 否则排队中的 startInternal 永远观测不到它。
+        synchronized(stateLock) { serviceState = ServiceState.Stopping }
+        cancelAllJobs()
+        flushLogsAndStats()
+        runCatching { MirageNative.stop() }
+        runCatching { tunFd?.close() }
+        tunFd = null
+        synchronized(stateLock) { serviceState = ServiceState.Stopped }
         // 解除所有 binder death recipient, 否则注册表随服务对象一起泄漏
         runCatching { synchronized(callbacks) { callbacks.kill() } }
         scope.cancel()

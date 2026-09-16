@@ -188,3 +188,29 @@ Mirage-Android 架构审计与工程基线（第 0、1、2、3、4 批）现已�
 - `mirage_routing_prefs` 双写被标为 HIGH，实际该文件仅一个键，无现患，下调为 MEDIUM。
 - `crypto/aead.rs` 的 `pop().unwrap()` 看似可从网络输入触发 panic，
   但紧邻上方有 `if self.buffer.is_empty() { return Err(...) }` 守卫，可证安全——**未计入缺陷**。
+
+### 5.1 测试有效性规则
+
+**测试必须调用生产函数，不得在测试内重写同一份判断逻辑。**
+
+反例（本项目真实出现过四次）：
+
+```kotlin
+// 声称覆盖 GeoManager 的 https 校验，实际在测 Kotlin 标准库
+assertTrue(validHttps.startsWith("https://", ignoreCase = true))
+```
+
+改坏 `GeoManager` 的校验，这条断言照样绿——等于没有防线。
+
+正确做法是让生产代码把判断暴露成可测的纯函数，测试直接断言它：
+
+```kotlin
+assertFalse(GeoManager.isBuiltinUrl("https://raw.githubusercontent.com/attacker/..."))
+```
+
+若逻辑散在 `Context`/IO/原生依赖之间无法直接触达，**先抽成纯函数再测**
+（参见 `CoreService.StateMachine`、`tun/tcp.rs` 的 `may_query_upstream`），
+而不是退而求其次在测试里复述条件。
+
+**新增或修改测试后做一次变异验证**：把被测逻辑改坏，确认对应用例变红；
+不变红就说明该用例没有防护力。本文档记录的每条测试改动都经过这一步。

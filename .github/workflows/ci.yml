@@ -56,10 +56,14 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install NDK
+      - name: Install NDK and build-tools
         run: |
-          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;26.3.11579264"
+          # yes 而非 echo "y": 后者只答一次, 多张许可时第二个提示拿到 EOF 视为拒绝
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+            "ndk;26.3.11579264" "build-tools;34.0.0"
           echo "ndk.dir=$ANDROID_HOME/ndk/26.3.11579264" >> android/local.properties
+          # local.properties 只有 Gradle/AGP 读, cargo-ndk 不读 —— 必须显式导出
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> $GITHUB_ENV
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -75,9 +79,20 @@ jobs:
         with:
           targets: aarch64-linux-android
 
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/mirage-jni/target
+          key: ndk-${{ runner.os }}-${{ hashFiles('native/*/Cargo.lock') }}
+
       - name: Build native library (arm64-v8a)
         run: |
-          cargo install cargo-ndk --locked
+          # 固定版本: --locked 只锁依赖树, 不锁 cargo-ndk 自身版本
+          cargo install cargo-ndk --locked --version 3.5.4 || true
           cd native/mirage-jni
           cargo ndk -t arm64-v8a -o ../../android/app/src/main/jniLibs build --release
 
@@ -87,10 +102,14 @@ jobs:
 
       # JNI 边界回归门禁。
       #
-      # mirage-jni 按字符串反查 MirageNative 并按方法名调用 protectFd /
+      # mirage-jni 按字符串反查 MirageNative 并按方法名调 protectFd /
       # resolveConnectionOwner（native/mirage-jni/src/lib.rs）。R8 一旦把它们
       # 重命名或裁掉，隧道 socket 不再被 protect，会被路由回 TUN 形成自环——
-      # 表现为「显示已连接但零吞吐」，静默且极难排查。keep 规则失效必须在这里拦住。
+      # 表现为「显示已连接但零吞吐」，静默且极难排查。
+      #
+      # 断言必须用全限定名: CoreService 里有一个同名的 protectFd 转发方法，
+      # 由另一条独立的 keep 规则保护。未限定的 grep 会被它掩护——实测削弱
+      # MirageNative 的成员保留后，未限定断言仍返回 2 而判通过，新断言返回 0 并失败。
       - name: Assert JNI surface survived R8
         working-directory: android
         run: |
@@ -99,30 +118,50 @@ jobs:
           echo "检查 $APK"
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           WORK=$(mktemp -d)
-          unzip -q -o "$APK" 'classes*.dex' -d "$WORK"
+          unzip -q -o "$APK" 'classes*.dex' 'lib/*/*.so' -d "$WORK"
           for d in "$WORK"/classes*.dex; do "$BT/dexdump" -d "$d"; done > "$WORK/all.txt"
+          SO="$WORK/lib/arm64-v8a/libmirage_jni.so"
           fail=0
-          for sym in \
-            "Lcom/mirage/android/core/MirageNative;" \
-            "protectFd" \
-            "resolveConnectionOwner" \
-            "Lcom/mirage/android/core/ICoreService"
+
+          # 1. Rust 按名反查的两个 Kotlin 方法（全限定，含签名）
+          for q in \
+            "com.mirage.android.core.MirageNative.protectFd:(I)V" \
+            "com.mirage.android.core.MirageNative.resolveConnectionOwner:"
           do
-            n=$(grep -c -- "$sym" "$WORK/all.txt" || true)
-            printf '%-46s %s\n' "$sym" "$n"
+            n=$(grep -cF -- "$q" "$WORK/all.txt" || true)
+            printf '%-58s %s\n' "$q" "$n"
             if [ "$n" -eq 0 ]; then
-              echo "::error::R8 裁剪或重命名了 JNI 必需符号: $sym —— keep 规则已失效"
+              echo "::error::R8 重命名或裁剪了 $q —— keep 规则已失效"
               fail=1
             fi
           done
-          # 原生库的动态导出表也必须完好（strip 只应去掉调试符号）
-          unzip -q -o "$APK" 'lib/*/*.so' -d "$WORK"
-          exports=$(nm -D --defined-only "$WORK"/lib/arm64-v8a/libmirage_jni.so | grep -c "Java_com_mirage" || true)
-          echo "Java_com_mirage 导出符号: $exports"
-          if [ "$exports" -eq 0 ]; then
-            echo "::error::libmirage_jni.so 未导出任何 JNI 符号"
+
+          # 2. MirageNative 的 native 方法数必须与 .so 导出的 JNI 符号数相等。
+          #    任一侧被裁剪或重命名都会破坏等式。
+          dex_native=$(awk '
+            /Class descriptor  : .Lcom\/mirage\/android\/core\/MirageNative;./ {inclass=1; next}
+            inclass && /Class descriptor  :/ {exit}
+            inclass && /NATIVE/ {n++}
+            END {print n+0}' "$WORK/all.txt")
+          so_exports=$(nm -D --defined-only "$SO" | grep -c "Java_com_mirage" || true)
+          printf '%-58s %s\n' "dex 内 MirageNative native 方法数" "$dex_native"
+          printf '%-58s %s\n' ".so 导出 Java_com_mirage 符号数" "$so_exports"
+          if [ "$dex_native" -eq 0 ] || [ "$so_exports" -eq 0 ]; then
+            echo "::error::JNI 方法表为空 (dex=$dex_native so=$so_exports)"
+            fail=1
+          elif [ "$dex_native" -ne "$so_exports" ]; then
+            echo "::error::JNI 方法数不匹配: dex=$dex_native so=$so_exports"
             fail=1
           fi
+
+          # 3. AIDL 接口
+          n=$(grep -c "Lcom/mirage/android/core/ICoreService" "$WORK/all.txt" || true)
+          printf '%-58s %s\n' "ICoreService 类描述符" "$n"
+          if [ "$n" -eq 0 ]; then
+            echo "::error::ICoreService 被裁剪"
+            fail=1
+          fi
+
           exit $fail
 
       - name: Upload Test Reports

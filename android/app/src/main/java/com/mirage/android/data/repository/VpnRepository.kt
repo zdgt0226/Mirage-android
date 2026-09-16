@@ -238,8 +238,14 @@ class VpnRepository(private val context: Context) {
      * 启动 Intent 仍携带 `uri`（当前选中节点）, 因此内核在本次推送到达之前
      * 就已具备建连所需的全部信息, 不存在时序依赖。
      */
+    @Volatile
+    private var pushNodesJob: Job? = null
+
     private fun pushNodesToCore() {
-        scope.launch(Dispatchers.IO) {
+        // 取消上一次未完成的推送: 每次推送携带的是启动时刻的节点快照, 若两次推送
+        // 并存, 慢的那次会用更旧的快照覆盖新的 (updateNodes 是无版本号的盲写)。
+        pushNodesJob?.cancel()
+        pushNodesJob = scope.launch(Dispatchers.IO) {
             val json = runCatching {
                 com.mirage.android.core.NodeStore.getNodesJson(context)
             }.getOrNull() ?: return@launch
@@ -255,6 +261,10 @@ class VpnRepository(private val context: Context) {
     }
 
     fun stopVpn() {
+        // 停止后推送不再有意义, 且 :core 实例跨停止/启动存活, 迟到的推送会污染
+        // 下一次连接的 serviceConfig。
+        pushNodesJob?.cancel()
+        pushNodesJob = null
         _vpnState.value = VpnState.Stopping
         runCatching { CoreController.clearDnsCache() }
         runCatching { CoreController.stop() }
