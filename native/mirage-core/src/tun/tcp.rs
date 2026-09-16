@@ -400,11 +400,11 @@ async fn relay_proxy(
     );
     crate::monitor::record_conn_timings(cid, 0, connect_ms, 0, 0);
 
-    // 预读首包（若嗅探阶段未预读，且客户端已推流，用 15ms 快速预读，用于 0-RTT 首包写入和故障重试）
+    // 预读首包（若嗅探阶段未预读，且客户端已推流，用 60ms 快速预读，用于 0-RTT 首包写入和故障重试；数据到达即返，无额外开销）
     let mut initial_data = initial_payload;
     if initial_data.is_empty() {
         let mut buf = [0u8; 16384];
-        if let Ok(Ok(n)) = tokio::time::timeout(std::time::Duration::from_millis(15), stream.read(&mut buf)).await {
+        if let Ok(Ok(n)) = tokio::time::timeout(std::time::Duration::from_millis(60), stream.read(&mut buf)).await {
             if n > 0 {
                 initial_data.extend_from_slice(&buf[..n]);
             }
