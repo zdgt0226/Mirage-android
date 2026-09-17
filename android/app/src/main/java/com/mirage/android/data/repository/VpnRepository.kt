@@ -75,15 +75,34 @@ class VpnRepository(private val context: Context) {
     init {
         (context.applicationContext as? Application)?.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityStarted(activity: Activity) {
-                if (startedActivities.incrementAndGet() > 0) {
-                    isAppForeground.set(true)
-                    telemetryWakeChannel.trySend(Unit)
-                }
+                startedActivities.incrementAndGet()
+                isAppForeground.set(true)
+                // 无条件调用: bind() 自身幂等 (bindRequested 守卫)。
+                //
+                // 不能写成「计数从 0 变 1 时才绑定」—— 本仓库是懒构造的
+                // (ViewModel 首次访问时), 注册生命周期回调时首个 Activity 的
+                // onStart 往往已经过去, 计数从一开始就少算一次。真机实测该偏差
+                // 会让回前台时 incrementAndGet() 得 0、条件不成立, 绑定永不恢复,
+                // 于是 CoreController.stop() 静默失效 —— 用户点断开没有反应。
+                CoreController.bind(context)
+                telemetryWakeChannel.trySend(Unit)
             }
             override fun onActivityStopped(activity: Activity) {
-                if (startedActivities.decrementAndGet() <= 0) {
-                    startedActivities.set(0)
+                // 钳位到 0: 计数可能因上述偏差而偏低, 不钳位会变负并再也回不到 0
+                val remaining = startedActivities.updateAndGet { (it - 1).coerceAtLeast(0) }
+                if (remaining == 0) {
                     isAppForeground.set(false)
+                    // 最后一个 Activity 不可见时解绑。
+                    //
+                    // 此前 bind 在 init 里、且 VpnRepository 是进程级单例, 于是
+                    // BIND_AUTO_CREATE 这条引用与 UI 进程同寿, :core 永不退出 ——
+                    // 真机实测: 断开 VPN 后 stopSelf 已生效 (dumpsys 无 started=true),
+                    // 进程却仍被 AppBindRecord 吊着。这正是 :core 的 SharedPreferences
+                    // 缓存永不刷新的根因。
+                    //
+                    // 解绑不影响运行中的 VPN: CoreService 是 started foreground service,
+                    // 只有 stopSelf/stopService 能终止它。
+                    CoreController.unbind(context)
                 }
             }
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
@@ -157,7 +176,14 @@ class VpnRepository(private val context: Context) {
     }
 
     init {
+        // 初次绑定兜底: 本仓库若在某个 Activity 已 onStart 之后才被构造
+        // (ViewModel 懒初始化), 就错过了那一次 onActivityStarted。此处补一次。
+        //
+        // 这不会退回「进程级常驻绑定」—— 关键不变式由 onActivityStopped 保证:
+        // 最后一个 Activity 不可见时必定解绑, 之后再进前台才重新绑定。
         CoreController.bind(context)
+        // registerCallback 与绑定时机解耦: CoreController 缓存回调集合,
+        // 并在每次 onServiceConnected 时重新注册。
         CoreController.registerCallback(callback)
         val filter = android.content.IntentFilter().apply {
             addAction(CoreService.ACTION_VPN_STOPPED)
@@ -173,8 +199,19 @@ class VpnRepository(private val context: Context) {
 
 
     fun checkCurrentState() {
+        // 未绑定时不要改状态。
+        //
+        // 绑定改为跟随 Activity 可见性后, 每次回前台都有一段 bindService 到
+        // onServiceConnected 的异步窗口 (真机实测约 120–170ms)。窗口内
+        // CoreController.isRunning() 恒为 false, 若照写就会把正在连接的 VPN
+        // 显示成已断开, 闪一下再被 onServiceConnected 的状态同步纠正。
+        // 绑定就绪后 CoreController 会主动推一次真实状态, 这里直接跳过即可。
+        if (!CoreController.isBound()) {
+            android.util.Log.d("Mirage", "[vpn] checkCurrentState: 尚未绑定, 等待 onServiceConnected 同步")
+            return
+        }
         val isRunning = CoreController.isRunning()
-        android.util.Log.d("Mirage", "[vpn] checkCurrentState: isRunning=$isRunning bound=${com.mirage.android.core.CoreController.isBound()}")
+        android.util.Log.d("Mirage", "[vpn] checkCurrentState: isRunning=$isRunning")
         if (isRunning) {
             _vpnState.value = VpnState.Connected(nodeRepo.getSelectedNode())
             startTelemetry()

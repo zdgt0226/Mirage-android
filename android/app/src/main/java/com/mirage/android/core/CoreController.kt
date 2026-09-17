@@ -65,6 +65,7 @@ object CoreController {
                 callbacks.forEach { cb -> runCatching { cb.onStateChanged(isRun) } }
             }
 
+            android.util.Log.d("CoreController", "onServiceConnected")
             // 补跑绑定期间入队的动作
             if (pendingOnConnect.isNotEmpty()) {
                 val actions = pendingOnConnect.entries.toList()
@@ -86,20 +87,52 @@ object CoreController {
         }
     }
 
-    /** 绑定 core 进程服务 (每次进入 UI 时调用)。 */
+    /**
+     * 是否已发起过 bindService (与 [bound] 不同: 后者表示 onServiceConnected 已回调)。
+     *
+     * unbindService 对未绑定的 connection 会抛 IllegalArgumentException, 因此必须
+     * 单独记录「已请求绑定」这个事实, 不能复用 bound。
+     */
+    private var bindRequested = false
+
+    /**
+     * 绑定 :core 进程服务。
+     *
+     * 绑定生命周期跟随 **Activity 可见性**, 不再跟随进程 —— 见 [unbind] 的说明。
+     */
     fun bind(context: Context) {
-        if (bound && service != null) return
+        if (bindRequested) return
         ctx = context.applicationContext
         val intent = Intent(context, Class.forName("com.mirage.android.CoreService"))
-        context.bindService(intent, conn, Context.BIND_AUTO_CREATE)
+        val ok = runCatching {
+            context.applicationContext.bindService(intent, conn, Context.BIND_AUTO_CREATE)
+        }.getOrDefault(false)
+        bindRequested = ok
+        android.util.Log.d("CoreController", "bind() -> requested=$ok")
     }
 
+    /**
+     * 解绑 :core。
+     *
+     * 关键点: 这**不会**停掉正在运行的 VPN。CoreService 是用 startForegroundService
+     * 起的 started service, 只有 stopSelf/stopService 能终止它; 解绑只撤掉
+     * BIND_AUTO_CREATE 这条「保活」引用。
+     *
+     * 因此:
+     * - VPN 运行中 → 解绑后服务照常运行, 隧道不受影响
+     * - VPN 已停止 → 解绑后没有任何引用, :core 进程随之退出, 其 SharedPreferences
+     *   进程内缓存一并释放 (这正是跨进程配置陈旧问题的根因)
+     */
     fun unbind(context: Context) {
-        if (bound) {
-            context.unbindService(conn)
-            bound = false
-            service = null
-        }
+        if (!bindRequested) return
+        runCatching { context.applicationContext.unbindService(conn) }
+            .onFailure { android.util.Log.w("CoreController", "unbindService 失败: ${it.message}") }
+        bindRequested = false
+        android.util.Log.d("CoreController", "unbind() 完成")
+        runCatching { currentBinder?.unlinkToDeath(deathRecipient, 0) }
+        currentBinder = null
+        service = null
+        bound = false
     }
 
     fun isBound(): Boolean = bound && service != null
