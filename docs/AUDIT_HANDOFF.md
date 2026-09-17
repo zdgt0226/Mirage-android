@@ -16,7 +16,10 @@
 > 六项回归在 Sony SO-02K 上实跑，查出 4 项容器测试无法触及的缺陷，
 > 并完成了绑定生命周期的架构改动。详见 [§1.6](#16-第三轮真机回归查出的问题)。
 >
-> 本文所有 `file:line` 基于 `05536ed`。引用旧行号的历史记录已失效，以本文为准。
+> **第四轮（CI 首跑）** `d7f628c`。CI 自建立起从未通过过，两处失败均在 workflow
+> 本身。详见 [§1.7](#17-第四轮ci-首次通过)。
+>
+> 本文所有 `file:line` 基于 `d7f628c`。引用旧行号的历史记录已失效，以本文为准。
 
 ---
 
@@ -66,6 +69,12 @@ systemd-nspawn -D /var/lib/machines/android-builder --as-pid2 -q \
 ```bash
 cd native/mirage-core && cargo test --lib && cargo build --release
 ```
+
+**工具链版本固定在仓库根的 `rust-toolchain.toml`（当前 `1.95.0`）**，crate 级不放副本
+——rustup 就近优先，crate 级文件会静默覆盖根目录设置。升级 rustc 是一次显式改动：
+改版本号 → 本地跑通 `clippy -D warnings` / `fmt --check` / `test` → 提交。
+不要改回 `channel = "stable"`：CI 跑 `-D warnings`，浮动 channel 意味着上游发版即 CI 红
+（§1.7 实测踩过）。
 
 ### 真机
 
@@ -226,6 +235,51 @@ Activity stop**。做真机时序测量前务必 `svc power stayon usb`，否则
 **陈旧副本**（当次 dump 其实失败了），按旧坐标点击自然打空。dump 后必须校验
 文件是本次新生成的。
 
+### 1.7 第四轮：CI 首次通过
+
+`.github/workflows/ci.yml` 自加入以来 **8 次推送全部失败**，且都在 27s–1m 内结束 ——
+从未跑到任何构建步骤。两处失败都在 workflow 配置，不在代码。
+
+| | 失败点 | 根因 | 处置 |
+| :-- | :--- | :--- | :--- |
+| 1 | `Set up Android SDK` | `android-actions/setup-android@v3` 默认安装 `tools` 包，cmdline-tools 16.0 已移除它：`Failed to find package 'tools'` → sdkmanager 退出 1 | 传 `packages: ''` 跳过默认安装。本项目需要的 NDK 与 build-tools 已在下一步显式安装 |
+| 2 | `Cargo clippy (mirage-core)` | CI 的 stable 解析到 **1.98.0**、本地是 **1.95.0**，1.98 新增 `chunks_exact_to_as_chunks`，命中 `handshake_cache.rs:409` 与 `udp.rs:614`。配合 `-D warnings`，**上游发版即 CI 红，我们一行代码没动** | 见下方工具链决定；两处 lint 也改用 `as_chunks::<2>()` 一并修掉 |
+
+#### 工具链固定：单一来源 + 具体版本
+
+第 4 批加的 `rust-toolchain.toml` 只钉了 **channel**，那不等于钉版本。现在：
+
+- 根目录 `rust-toolchain.toml` 写死 `channel = "1.95.0"`，并声明自己的
+  `components` 与 `targets`
+- **删掉两个 crate 级副本**（`native/mirage-core/`、`native/mirage-jni/`）——
+  rustup 就近优先，crate 级那两份会**静默覆盖**根目录的设置
+- workflow 两处不再指定版本，改跑 `rustup show` 让文件说了算
+
+升级 rustc 从此是一次显式改动：改这里的版本号 → 本地跑通 clippy/fmt/test → 提交。
+
+#### JNI 门禁在真实 runner 上的首次输出
+
+这道闸此前只在本地对好/坏产物双向验过。CI 实跑结果：
+
+```
+com.mirage.android.core.MirageNative.protectFd:(I)V        1
+com.mirage.android.core.MirageNative.resolveConnectionOwner: 1
+dex 内 MirageNative native 方法数                      43
+.so 导出 Java_com_mirage 符号数                       43
+ICoreService 类描述符                                  396
+```
+
+此前标为「只有首跑才知道」的三处 —— `cargo-ndk` 安装、
+`$ANDROID_HOME/build-tools` 版本选取、`nm` 读 aarch64 `.so` —— 全部正常工作。
+
+#### 已记录但未处理的弃用警告
+
+不影响当前通过，但会在某次 runner 升级后变成失败：
+
+- `actions/setup-java@v4` 已弃用，官方建议迁 `v5`
+- `checkout@v4` / `cache@v4` / `setup-android@v3` / `setup-gradle@v4` 仍以
+  Node 20 为目标，runner 正强制用 Node 24 运行
+
 ### 全量验证结果汇总（容器内实测与实机）
 
 第一轮完成时（`7b822f1`）：
@@ -249,6 +303,13 @@ cargo fmt --check      clean
 cargo test --lib       131 passed
 ```
 
+第四轮（`d7f628c`，GitHub Actions 首次绿灯，run 35252575218，6m42s）：
+
+```
+Rust (Format, Clippy & Tests)                    success 1m04s
+Android (Build, Unit Tests & JNI Surface Gate)   success 6m38s
+```
+
 > **实机验证状态**：第二轮的三个提交已于第三轮在 Sony SO-02K (Android 9 / API 28)
 > 上补做真机回归，六项全部跑通，并因此查出 4 项新缺陷（见 §1.6）。
 > 第一轮记录的 Galaxy S24+ (Android 16 / API 36) 结论仍来自第一轮执行者，未复现。
@@ -257,8 +318,8 @@ cargo test --lib       131 passed
 
 ## 2. 后续建议与展望
 
-三轮均已落地：计划内的第 0–4 批、第二轮多模型复审返工、第三轮真机回归返工。
-**闭环范围**：静态审计 + 容器内构建与单元测试 + 变异验证 + Android 9 真机回归。
+四轮均已落地：计划内的第 0–4 批、第二轮多模型复审返工、第三轮真机回归返工、第四轮 CI 首跑。
+**闭环范围**：静态审计 + 容器内构建与单元测试 + 变异验证 + Android 9 真机回归 + CI 绿灯。
 
 按价值排序的后续项：
 
@@ -269,9 +330,10 @@ cargo test --lib       131 passed
    防不住控制了下载源的攻击者（摘要与产物同源）。要真正解决需要内置签名公钥
    （Ed25519 / minisign）校验摘要签名，前提是上游发布签名文件。跨源取摘要不是可行替代，
    原因见 §1.5 F5。
-3. **CI 首次运行验证**。`.github/workflows/ci.yml` 从未在真实 runner 上跑过 ——
-   `cargo-ndk` 安装、`$ANDROID_HOME/build-tools` 版本选取、`nm` 读 aarch64 `.so`
-   这些只有首跑才知道。JNI 门禁脚本本身已在本地对好/坏产物双向验证过。
+3. **CI action 弃用警告**。当前通过，但会在某次 runner 升级后变成失败：
+   `actions/setup-java@v4` 已弃用（官方建议迁 `v5`）；`checkout@v4` / `cache@v4` /
+   `setup-android@v3` / `setup-gradle@v4` 仍以 Node 20 为目标，runner 正强制用
+   Node 24 运行。建议主动升级而非等它变红。
 4. **正式签名发布**：配置 `keystore.properties` 或 CI Secrets (`MIRAGE_KEYSTORE_*`)。
 5. **Android Lint 尚未纳入门禁**。CI 目前只有 Kotlin 编译 + 单元测试 + R8 门禁，
    `./gradlew lint` 能发现清单与资源层面的问题，Kotlin 编译发现不了。
