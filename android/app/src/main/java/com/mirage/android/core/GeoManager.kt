@@ -3,6 +3,8 @@ package com.mirage.android.core
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
@@ -157,6 +159,18 @@ object GeoManager {
             .apply()
     }
 
+    /**
+     * 更新互斥。
+     *
+     * 两次 updateGeoFiles 并发时，它们共用同一组固定的 .tmp 路径：B 校验完
+     * geosite.dat.tmp 后 A 把同一文件截断重写，B 的 Files.move 装的是 A 的字节
+     * 却报告 verified = true —— 完整性校验被整个架空。
+     *
+     * 并发是真实可达的：checkGeoInitialization 在 onCreate 里发起且无重入保护，
+     * 旋转屏幕即可在首次下载途中再进一次；用户也可以同时在 Geo 资产页点更新。
+     */
+    private val updateMutex = Mutex()
+
     @Volatile
     private var cachedTagsDetail: GeoDetailResponse? = null
 
@@ -284,7 +298,13 @@ object GeoManager {
         /** 当前在盘数据是否通过 SHA-256 校验。false 需常驻可见，不能只靠一次性 Toast。 */
         val verified: Boolean = true
     ) {
-        val isReady: Boolean get() = geositeExists || geoipExists
+        /**
+         * 两个文件都就绪才算就绪。
+         *
+         * 用 || 时半装状态 (只有一个文件) 会被判为就绪, 从而抑制
+         * checkGeoInitialization 的首启重试, 让用户停在一个残缺的规则集上。
+         */
+        val isReady: Boolean get() = geositeExists && geoipExists
         val displaySummary: String
             get() = if (isReady) {
                 val mark = if (verified) "" else "（未校验）"
@@ -530,6 +550,20 @@ object GeoManager {
         allowUnverified: Boolean = false,
         onProgress: (String, Int) -> Unit
     ): GeoUpdateResult = withContext(Dispatchers.IO) {
+        // 已有更新在跑就直接返回, 不排队再下一遍 (旋转屏幕重入 checkGeoInitialization
+        // 是最常见的触发方式)。
+        if (updateMutex.isLocked) {
+            Log.i(TAG, "已有 Geo 更新在进行中，忽略本次请求")
+            return@withContext GeoUpdateResult(false, "Geo 更新已在进行中")
+        }
+        updateMutex.withLock { updateGeoFilesLocked(context, allowUnverified, onProgress) }
+    }
+
+    private suspend fun updateGeoFilesLocked(
+        context: Context,
+        allowUnverified: Boolean,
+        onProgress: (String, Int) -> Unit
+    ): GeoUpdateResult {
         val activeSource = getActiveSource(context)
         val siteUrl = activeSource.geositeUrl
         val ipUrl = activeSource.geoipUrl
@@ -548,8 +582,11 @@ object GeoManager {
         val siteFile = getGeositeFile(context)
         val ipFile = getGeoipFile(context)
 
-        val siteTmp = File(siteFile.parentFile, "geosite.dat.tmp")
-        val ipTmp = File(ipFile.parentFile, "geoip.dat.tmp")
+        // 每次运行用独立的临时文件。固定名会让并发的两次运行写同一个 inode ——
+        // 即便有互斥, 上次异常退出残留的 .tmp 也可能被误当成本次产物。
+        val geoDir = siteFile.parentFile ?: getGeoDir(context)
+        val siteTmp = File.createTempFile("geosite", ".dat.tmp", geoDir)
+        val ipTmp = File.createTempFile("geoip", ".dat.tmp", geoDir)
 
         // 1. 下载 geosite.dat
         onProgress("正在从「${activeSource.name}」下载 GeoSite 数据集…", 15)
@@ -558,7 +595,7 @@ object GeoManager {
         }
         if (!siteOutcome.ok || siteTmp.length() < 50 * 1024) {
             siteTmp.delete()
-            return@withContext GeoUpdateResult(false, describeFailure("GeoSite 数据集", siteOutcome.failure))
+            return GeoUpdateResult(false, describeFailure("GeoSite 数据集", siteOutcome.failure))
         }
 
         // 2. 下载 geoip.dat
@@ -569,7 +606,7 @@ object GeoManager {
         if (!ipOutcome.ok || ipTmp.length() < 50 * 1024) {
             siteTmp.delete()
             ipTmp.delete()
-            return@withContext GeoUpdateResult(false, describeFailure("GeoIP 数据集", ipOutcome.failure))
+            return GeoUpdateResult(false, describeFailure("GeoIP 数据集", ipOutcome.failure))
         }
 
         // 两个数据集里只要有一个未经校验，整体即视为未校验
@@ -581,7 +618,7 @@ object GeoManager {
             siteTmp.delete()
             ipTmp.delete()
             Log.w(TAG, "产物未通过 SHA-256 校验且当前路径不允许未校验安装，已丢弃")
-            return@withContext GeoUpdateResult(
+            return GeoUpdateResult(
                 success = false,
                 message = "该数据源未提供可校验的 SHA-256 摘要，已拒绝自动安装。" +
                     "如确认信任该源，请在「Geo 资产」页手动发起更新并确认。",
@@ -589,20 +626,29 @@ object GeoManager {
             )
         }
 
-        // 3. 原子替换与校验 (原子 move，捕获异常并正确传播失败)
+        // 3. 安装。
+        //
+        // 单个 Files.move 对目标是原子的, 但这里要装两个文件, 两次 move 之间失败会
+        // 留下「新 geosite + 旧 geoip」的错配组合。所以先把旧文件挪到 .bak,
+        // 任一步失败就整体回滚, 保证盘上要么全新要么全旧。
         onProgress("正在校验与安装 Geo 数据文件…", 92)
+        val siteBak = File(geoDir, "geosite.dat.bak")
+        val ipBak = File(geoDir, "geoip.dat.bak")
         try {
-            if (siteTmp.exists()) {
-                Files.move(siteTmp.toPath(), siteFile.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-            }
-            if (ipTmp.exists()) {
-                Files.move(ipTmp.toPath(), ipFile.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-            }
+            if (siteFile.exists()) Files.move(siteFile.toPath(), siteBak.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            if (ipFile.exists()) Files.move(ipFile.toPath(), ipBak.toPath(), StandardCopyOption.REPLACE_EXISTING)
+
+            Files.move(siteTmp.toPath(), siteFile.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            Files.move(ipTmp.toPath(), ipFile.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+
+            siteBak.delete()
+            ipBak.delete()
         } catch (e: Exception) {
-            siteTmp.delete()
-            ipTmp.delete()
-            Log.e(TAG, "Geo 数据文件原子替换失败: ${e.message}", e)
-            return@withContext GeoUpdateResult(false, "安装 Geo 数据文件失败: ${e.message}")
+            Log.e(TAG, "Geo 数据文件安装失败, 回滚: ${e.message}", e)
+            // 回滚: 把还在 .bak 的旧文件放回去。已成功 move 的新文件会被覆盖。
+            runCatching { if (siteBak.exists()) Files.move(siteBak.toPath(), siteFile.toPath(), StandardCopyOption.REPLACE_EXISTING) }
+            runCatching { if (ipBak.exists()) Files.move(ipBak.toPath(), ipFile.toPath(), StandardCopyOption.REPLACE_EXISTING) }
+            return GeoUpdateResult(false, "安装 Geo 数据文件失败: ${e.message}")
         }
 
         // 4. 热加载到 Rust Core
@@ -623,7 +669,7 @@ object GeoManager {
             .apply()
 
         onProgress(if (verified) "Geo 数据集更新成功！" else "Geo 数据集已更新（未校验）", 100)
-        GeoUpdateResult(
+        return GeoUpdateResult(
             success = true,
             message = buildString {
                 append("成功更新 Geo 规则集: $siteCount 个 Site 标签, $ipCount 个 IP 分类")
@@ -712,6 +758,7 @@ object GeoManager {
         try {
             var url = URL(urlStr)
             var redirects = 0
+            var ok = false
             while (redirects < 5) {
                 if (!url.protocol.equals("https", ignoreCase = true)) {
                     Log.w(TAG, "重定向到非 HTTPS 地址，拒绝: $url")
@@ -726,17 +773,25 @@ object GeoManager {
 
                 val code = connection.responseCode
                 if (code in 300..399) {
-                    val loc = connection.getHeaderField("Location") ?: break
+                    // 没有 Location 的 3xx 无处可跳。此前这里 break, 带着活着的 3xx
+                    // 连接掉到下面, 把重定向响应体当成产物写进 dest。
+                    val loc = connection.getHeaderField("Location") ?: return false
                     url = URL(url, loc)
+                    // 重定向目标同样必须是 https, 否则可被降级到明文
+                    if (!url.protocol.equals("https", ignoreCase = true)) return false
                     connection.disconnect()
+                    connection = null
                     redirects++
                     continue
                 }
                 if (code != HttpURLConnection.HTTP_OK) {
                     return false
                 }
+                ok = true
                 break
             }
+            // 循环因次数耗尽而退出: 此时手上只有一个已 disconnect 的 3xx 连接
+            if (!ok) return false
 
             val total = connection?.contentLength ?: -1
             dest.parentFile?.mkdirs()
@@ -799,6 +854,17 @@ object GeoManager {
 
     /**
      * 获取 `<artifact>.sha256sum`，瞬时失败自动重试。
+     *
+     * **能力边界（重要，勿误读为真实性保证）**：摘要与产物来自同一来源，
+     * 因此本校验只能防住「产物被截断 / 下载损坏 / 镜像内容与上游不一致 / 单侧被阻断」，
+     * **防不住控制了该来源的攻击者** —— 他可以同时提供伪造的产物与匹配的摘要。
+     *
+     * 曾考虑跨源取摘要（产物走 fastly、摘要走 raw.githubusercontent）来获得两条
+     * 独立信任路径，但 `raw.githubusercontent.com` 正是目标网络中被封锁的 host：
+     * 在墙内会让 fail-closed 必然触发，把可用性问题重新制造出来。故不采用。
+     *
+     * 要获得真实性，正确做法是内置签名公钥（Ed25519/minisign）并校验摘要的签名，
+     * 那需要上游配合发布签名文件。记录在 docs/AUDIT_HANDOFF.md 的后续项里。
      *
      * 404/410 直接判定 [DigestResult.Absent] 且不重试 —— 上游不提供，重试无意义。
      */
