@@ -1,3 +1,11 @@
+# 固定到具体版本, 不用 "stable"。
+#
+# clippy 每个 rustc 版本都会新增 lint, 而 CI 跑的是 `-D warnings`。浮动 channel
+# 意味着上游发版即 CI 红 —— 本仓库实测踩过: 本地 1.95.0 全绿, CI 的 stable 已是
+# 1.98.0, 新增的 chunks_exact_to_as_chunks 让两处代码直接失败。
+#
+# 升级 rustc 应当是一次显式改动: 改这里的版本号, 本地跑通 clippy/fmt/test 再提交。
 [toolchain]
-channel = "stable"
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]
 targets = ["aarch64-linux-android"]

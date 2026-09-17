@@ -611,11 +611,13 @@ pub fn checksum_public(data: &[u8]) -> u16 {
 
 fn checksum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
-    let mut chunks = data.chunks_exact(2);
-    for c in &mut chunks {
-        sum += u16::from_be_bytes([c[0], c[1]]) as u32;
+    // as_chunks 而非 chunks_exact(2): 块大小是常量, 直接拿到 &[[u8; 2]] 与余数,
+    // 省掉迭代器的长度检查 (clippy::chunks_exact_to_as_chunks)
+    let (pairs, rest) = data.as_chunks::<2>();
+    for c in pairs {
+        sum += u16::from_be_bytes(*c) as u32;
     }
-    if let [b] = chunks.remainder() {
+    if let [b] = rest {
         sum += (*b as u32) << 8;
     }
     while sum >> 16 != 0 {

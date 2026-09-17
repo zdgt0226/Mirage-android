@@ -15,10 +15,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      # 不指定版本: 由仓库根的 rust-toolchain.toml 驱动 (channel/components/targets
+      # 都在那里声明)。rustup show 会据此把工具链落地。指定版本会与该文件冲突,
+      # 且让「升级 rustc」变成要同时改两处。
+      - name: Set up Rust (from rust-toolchain.toml)
+        run: rustup show
 
       - name: Cargo fmt check (mirage-core)
         working-directory: native/mirage-core
@@ -53,8 +54,13 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      # packages: '' 是必需的。该 action 默认会装 'tools' 包, 而 cmdline-tools 16.0
+      # 起已移除它 —— sdkmanager 报 "Failed to find package 'tools'" 并以 1 退出,
+      # 整个 job 在此挂掉 (CI 首跑实测)。NDK 与 build-tools 由下一步显式安装。
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: ''
 
       - name: Install NDK and build-tools
         run: |
@@ -74,10 +80,8 @@ jobs:
 
       # assembleRelease 需要 jniLibs（.gitignore，不入库），故在 CI 现编一份 arm64 .so。
       # 没有这一步就无法运行 R8，而 R8 正是下面那道断言要保护的东西。
-      - name: Set up Rust for Android target
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android
+      - name: Set up Rust for Android target (from rust-toolchain.toml)
+        run: rustup show
 
       - name: Cache cargo
         uses: actions/cache@v4
