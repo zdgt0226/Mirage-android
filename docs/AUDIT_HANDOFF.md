@@ -12,7 +12,11 @@
 > 复审在第一轮「已闭环」的成果里查出 11 项缺陷，其中 7 项是第一轮修复自身引入的。
 > 详见 [§1.5](#15-第二轮多模型复审对第一轮成果的返工)。
 >
-> 本文所有 `file:line` 基于 `be44e31`。引用旧行号的历史记录已失效，以本文为准。
+> **第三轮（真机回归与返工）** `1f91fc8`、`05536ed`。
+> 六项回归在 Sony SO-02K 上实跑，查出 4 项容器测试无法触及的缺陷，
+> 并完成了绑定生命周期的架构改动。详见 [§1.6](#16-第三轮真机回归查出的问题)。
+>
+> 本文所有 `file:line` 基于 `05536ed`。引用旧行号的历史记录已失效，以本文为准。
 
 ---
 
@@ -169,6 +173,59 @@ GitHub release 资产 CDN 确实会抖，这正是必须重试与三态化的实
 | F | `downloadFile` 对无 `Location` 的 3xx 执行 `?: break`，带着活连接掉进写盘块，把重定向响应体当产物；重定向次数耗尽时也只是碰巧失败 | 两处改显式 `return false`；重定向目标复查 https 防降级 |
 | F5 | 摘要与产物同源，防不住控制该源的攻击者 | **刻意不修**。建议的跨源取摘要方案要用 `raw.githubusercontent.com`，而它正是墙内被封的 host —— 会让 fail-closed 必然触发，把 B 项刚修完的可用性问题重造一遍。已在 `fetchSha256` 文档注释中写明能力边界，真实性保证列为后续项 |
 
+### 1.6 第三轮：真机回归查出的问题
+
+在 Sony SO-02K (Android 9 / API 28) 上实跑 §3 列的六项回归。
+六项全部通过，但过程中查出 **4 项容器测试无法触及的缺陷**。
+
+#### 第三轮第 1 批 — `1f91fc8`
+
+| | 问题 | 处置 |
+| :-- | :--- | :--- |
+| 1 | **节点推送在冷启动下必失败**。`:core` 是独立进程，`startForegroundService` 后还要冷启动并加载数 MB 原生库。设备日志：推送在 `09:03:34.236` 耗尽 10×300ms，`:core` 在 `09:03:34.866` 才「内核已启动」，晚 0.63 秒。回落到 `:core` 本地陈旧读取 —— 正是整条线要消除的东西 | 轮询本身是错的形状（预算给多少都是猜）。改为 `CoreController.runWhenConnected`：已绑定立即执行，否则挂 `onServiceConnected`。同 key 覆盖保留最新快照，`stopVpn` 撤销待办 |
+| 2 | **暂存文件泄漏**。两个 tmp 在前面一次性创建，而 GeoSite 下载失败的早退只删 `siteTmp`，`ipTmp` 泄漏成 0 字节孤儿；唯一命名意味着只增不减 | staged 主体抽成独立函数 + `try/finally` 统一清理。真机随即暴露 `finally` 覆盖不到的情况：被 `force-stop` 杀掉的运行会留下 tmp（设备上已累积 3 个），故又加了启动清扫（持 `updateMutex`，不会误删并发运行的文件） |
+| 3 | **CDN 偏斜被误报为篡改**。默认源 `fastly_cdn` 实测不匹配：期望 `cc45cb…`、实得 `e6563d…`。jsDelivr 把产物与摘要当两个独立缓存对象，而 `@release` 是可变 ref，上游重建后边缘失步。回退到 `raw.githubusercontent` 后校验通过、更新成功，但文案把日常现象说成攻击 | 文案改为以缓存未同步为首要解释、篡改作为持续不符时的可能；内置镜像不匹配时先带缓存绕过重取一次摘要再判死（几十字节，很便宜） |
+
+> 第 3 项此前被审计模型标为「机制推断、未实测」。**第三轮在默认源上实测到了**，
+> 且发生在改动上线数小时内 —— 说明这不是边缘情况。
+
+#### 第三轮第 2 批 — `05536ed`（绑定生命周期，架构改动）
+
+`CoreController.bind` 原先在 `VpnRepository.init` 调用，而该仓库是进程级单例，
+于是 `BIND_AUTO_CREATE` 这条引用与 UI 进程同寿。真机实测：断开 VPN 后 `stopSelf`
+已生效（dumpsys 无 `started=true`），进程却仍被 `AppBindRecord` 吊着。
+**这正是 `:core` 的 SharedPreferences 缓存永不刷新的根因**，也是第 3 批那套
+`ServiceConfig` + AIDL 绕行之所以必需的原因。
+
+改为跟随 Activity 可见性绑定/解绑。解绑不影响运行中的 VPN ——
+`CoreService` 是 started foreground service，只有 `stopSelf`/`stopService` 能终止它。
+
+| 场景 | `:core` 实测状态 |
+| :--- | :--- |
+| VPN 运行中 + 退后台 | `oom_score_adj=100`，隧道 HTTP 204 通，tun0 增量 3375 字节 |
+| VPN 已断开 + 退后台 | `cch-empty`（不持有任何组件，随时可回收） |
+
+验证该改动时又撞出两个缺陷，同批修掉：
+
+| | 问题 | 处置 |
+| :-- | :--- | :--- |
+| 4 | **Activity 计数失步导致断开按钮静默失效**。`VpnRepository` 懒构造（ViewModel 首次访问），注册生命周期回调时首个 Activity 的 `onStart` 已过去，计数从一开始少一。用 `incrementAndGet() > 0` 作绑定条件，回前台得 0、条件不成立 → 绑定永不恢复 → `CoreController.stop()` 走 `call{}` 返回 null → **用户点断开毫无反应**，日志里只有一行 `bound=false` | `bind()` 改为无条件调用（自身幂等），递减钳位到 0 |
+| 5 | **回前台闪一次错误状态**。绑定随可见性后，每次回前台有 120–170ms 异步窗口，窗口内 `isRunning()` 恒 false，`checkCurrentState` 会把连着的 VPN 写成 Disconnected | 未绑定时直接返回，交由 `onServiceConnected` 推真实状态 |
+
+顺带把 `unbind` 做安全：单独跟踪 `bindRequested`（`unbindService` 对未绑定的
+connection 会抛异常），并解开 death recipient。
+
+#### 一个测量教训
+
+中途观察到 `unbind` 紧跟 `onServiceConnected` 12ms 后触发，一度判为逻辑缺陷。
+实际是此前执行 `adb shell svc power stayon false` 关掉了常亮，**屏幕休眠导致
+Activity stop**。做真机时序测量前务必 `svc power stayon usb`，否则测的是自己
+造出来的现象。
+
+同类教训还有一次：用 `uiautomator dump` 定位控件时读到了 `/sdcard/ui.xml` 的
+**陈旧副本**（当次 dump 其实失败了），按旧坐标点击自然打空。dump 后必须校验
+文件是本次新生成的。
+
 ### 全量验证结果汇总（容器内实测与实机）
 
 第一轮完成时（`7b822f1`）：
@@ -192,32 +249,35 @@ cargo fmt --check      clean
 cargo test --lib       131 passed
 ```
 
-> ⚠️ **实机验证的归属**：§3 记录的 Sony SO-02K / Galaxy S24+ 实测结论来自第一轮执行者，
-> 本文撰写者未能复现（手边仅 `R5CX21FD9PX`）。**第二轮的三个提交完全没有做过真机验证**，
-> 只做了容器内构建、单元测试与变异验证。落地前请补真机回归，重点见 §3。
+> **实机验证状态**：第二轮的三个提交已于第三轮在 Sony SO-02K (Android 9 / API 28)
+> 上补做真机回归，六项全部跑通，并因此查出 4 项新缺陷（见 §1.6）。
+> 第一轮记录的 Galaxy S24+ (Android 16 / API 36) 结论仍来自第一轮执行者，未复现。
 
 ---
 
 ## 2. 后续建议与展望
 
-计划内的第 0–4 批与第二轮返工均已落地。**「闭环」只到「静态审计 + 容器内验证」为止** ——
-第二轮三个提交尚未真机回归（见 §3）。
+三轮均已落地：计划内的第 0–4 批、第二轮多模型复审返工、第三轮真机回归返工。
+**闭环范围**：静态审计 + 容器内构建与单元测试 + 变异验证 + Android 9 真机回归。
 
 按价值排序的后续项：
 
-1. **Geo 数据的真实性保证**。当前的 SHA-256 只能防截断、损坏、镜像不一致与单侧阻断，
+1. **高版本机型回归**。真机验证目前只覆盖 Android 9 (API 28)。Android 14+ 的
+   前台服务类型规则与后台限制差异大（本项目在 API 29+ 才走 `startForeground(type)`
+   分支，API 34+ 才用 `SPECIAL_USE`），建议在 API 34+ 机型上复跑 §3 的前两项。
+2. **Geo 数据的真实性保证**。当前的 SHA-256 只能防截断、损坏、镜像不一致与单侧阻断，
    防不住控制了下载源的攻击者（摘要与产物同源）。要真正解决需要内置签名公钥
    （Ed25519 / minisign）校验摘要签名，前提是上游发布签名文件。跨源取摘要不是可行替代，
    原因见 §1.5 F5。
-2. **CI 首次运行验证**。`.github/workflows/ci.yml` 从未在真实 runner 上跑过 ——
+3. **CI 首次运行验证**。`.github/workflows/ci.yml` 从未在真实 runner 上跑过 ——
    `cargo-ndk` 安装、`$ANDROID_HOME/build-tools` 版本选取、`nm` 读 aarch64 `.so`
    这些只有首跑才知道。JNI 门禁脚本本身已在本地对好/坏产物双向验证过。
-3. **正式签名发布**：配置 `keystore.properties` 或 CI Secrets (`MIRAGE_KEYSTORE_*`)。
-4. **Android Lint 尚未纳入门禁**。CI 目前只有 Kotlin 编译 + 单元测试 + R8 门禁，
+4. **正式签名发布**：配置 `keystore.properties` 或 CI Secrets (`MIRAGE_KEYSTORE_*`)。
+5. **Android Lint 尚未纳入门禁**。CI 目前只有 Kotlin 编译 + 单元测试 + R8 门禁，
    `./gradlew lint` 能发现清单与资源层面的问题，Kotlin 编译发现不了。
-5. **多架构扩充**：当前默认仅编译 `arm64-v8a`，如需模拟器或 32 位设备支持，
+6. **多架构扩充**：当前默认仅编译 `arm64-v8a`，如需模拟器或 32 位设备支持，
    在 `build-android.sh` 与 `abiFilters` 中扩展 `x86_64` / `armeabi-v7a`。
-6. **`nodes_json` 的 Intent 残留读取**（`CoreService.kt` 内 `intent.getStringExtra("nodes_json")`）
+7. **`nodes_json` 的 Intent 残留读取**（`CoreService.kt` 内 `intent.getStringExtra("nodes_json")`）
    现已是死代码（推送改走 AIDL `updateNodes`），保留为无害回退，可择机清理。
 
 
@@ -229,21 +289,26 @@ cargo test --lib       131 passed
    已独立验证并提交（`f3274b1`）。
 2. **release 包当前未签名**（`app-release-unsigned.apk`），因为未配置 keystore。
    这是设计行为。要出可安装包需按 README 配置 `keystore.properties` 或 `MIRAGE_KEYSTORE_*`。
-3. **实机验证 —— 注意归属与覆盖范围**：
-   下列结论由**第一轮**执行者在 Sony SO-02K (Android 9 / API 28) 与
-   Samsung Galaxy S24+ (Android 16 / API 36) 上得出，本文撰写者未能复现：
-   - 点断开后 VPN 接口彻底拆除，不再自己回来
-   - 断开后无幽灵连接与无死循环退避
-   - 物理网络监听与 NDK 原生句柄绑定严格一致
+3. **实机验证状态**：
 
-   **第二轮的三个提交（`d3474a5`、`938a7cd`、`be44e31`）完全未做真机验证。**
-   落地前建议补以下回归，它们对应第二轮改动面最大的几处：
-   - 连接 → 立刻断开 → 等 5 秒：VPN 不得自己回来（C 项，锁划分改动）
-   - 连接 → 3 秒内断开 → 再连接：节点列表不得被上一次的旧快照覆盖（D 项）
-   - Geo 资产页手动更新一次内置源：应成功且无「未校验」对话框（A/B 项）
-   - 首启（清数据后）自定义源：应拒绝安装并在日志留下原因，而非静默装入（A 项）
-   - 更新途中旋转屏幕：不得出现两次下载，第二次应立即返回「已在进行中」（E 项）
-   - release 包装机后连通性正常：证明 R8 未打断 `protectFd`
+   第二轮的三个提交已于第三轮在 **Sony SO-02K (Android 9 / API 28)** 上补做回归，
+   六项全部通过（过程与查出的 4 项缺陷见 §1.6）：
+
+   | 回归项 | 实测证据 |
+   | :--- | :--- |
+   | 连接 → 断开 → 等 5s 不得自己回来 | tun0 在 T=2s 归零并保持，内核启动次数 = 1 |
+   | 快速连断连，节点列表不被旧快照覆盖 | 推送失败计数 0（修复前冷启动必失败） |
+   | 内置 Geo 源更新 | `SHA-256 校验通过`，`last_update_verified=true` 落盘 |
+   | 自定义源在自动路径应拒绝安装 | 日志逐条命中，无 `.dat` 落盘 |
+   | 更新途中旋转不得双下载 | `已有 Geo 更新在进行中` × 2，tmp 未增殖 |
+   | release 包连通性（R8 未打断 `protectFd`） | HTTP 204 穿透，tun0 增量 8856 字节，protect 失败 0 |
+
+   第三轮的绑定改动另有三项实测：断开 + 退后台 → `:core` 降为 `cch-empty`；
+   VPN 运行中退后台 → `adj=100` 且隧道存活；回前台 ~170ms 重新绑定且状态不闪断。
+
+   仍未复现的：第一轮记录的 **Samsung Galaxy S24+ (Android 16 / API 36)** 结论。
+   Android 14+ 的 FGS 类型规则与 Android 9 差异较大（本项目在 API 29+ 才走
+   `startForeground(type)` 分支），建议在高版本机型上至少复跑前两项。
 4. **`jniLibs/` 是 gitignore 的本地产物**。改了 `native/` 后必须
    `bash scripts/build-android.sh native`，否则 APK 里仍是旧 `.so`。
 
