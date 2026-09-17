@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 不指定版本: 由仓库根的 rust-toolchain.toml 驱动 (channel/components/targets
       # 都在那里声明)。rustup show 会据此把工具链落地。指定版本会与该文件冲突,
@@ -46,33 +46,42 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17
 
-      # packages: '' 是必需的。该 action 默认会装 'tools' 包, 而 cmdline-tools 16.0
-      # 起已移除它 —— sdkmanager 报 "Failed to find package 'tools'" 并以 1 退出,
-      # 整个 job 在此挂掉 (CI 首跑实测)。NDK 与 build-tools 由下一步显式安装。
+      # packages: '' —— 不装该 action 的默认包 (v4 默认是 platform-tools, 本项目
+      # 不需要 adb/fastboot)。NDK 与 build-tools 由下一步显式安装。
+      #
+      # 历史: v3 的默认包是 'tools', 而 cmdline-tools 16.0 起已移除它 —— sdkmanager
+      # 报 "Failed to find package 'tools'" 并以 1 退出, 整个 job 挂在这里 (CI 首跑
+      # 实测)。v4 已在 action 内部过滤掉 'tools', 该失败不会再复现。
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
         with:
           packages: ''
 
       - name: Install NDK and build-tools
         run: |
           # yes 而非 echo "y": 后者只答一次, 多张许可时第二个提示拿到 EOF 视为拒绝
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
-            "ndk;26.3.11579264" "build-tools;34.0.0"
+          # 走 PATH 而非 $ANDROID_HOME/cmdline-tools/latest/bin —— setup-android v4
+          # 把 cmdline-tools 装到 cmdline-tools/<版本> (如 20.0), 只有命中预装且版本
+          # 相符时才用 latest。该 action 会把实际所在目录 addPath, 故 PATH 是稳的。
+          yes | sdkmanager "ndk;26.3.11579264" "build-tools;34.0.0"
           echo "ndk.dir=$ANDROID_HOME/ndk/26.3.11579264" >> android/local.properties
           # local.properties 只有 Gradle/AGP 读, cargo-ndk 不读 —— 必须显式导出
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> $GITHUB_ENV
 
+      # 停在 v5 是刻意的, 不是漏升。gradle/actions@v6 把缓存逻辑抽成闭源的
+      # gradle-actions-caching 组件, 用它即视为接受 Gradle 的商业条款
+      # (https://gradle.com/legal/terms-of-use/)。v5 仍是 MIT 且已跑 node 24。
+      # 要升 v6 需要先有人决定接受那份条款。
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
 
       - name: Run Kotlin Compile & Unit Tests
         working-directory: android
@@ -84,7 +93,7 @@ jobs:
         run: rustup show
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin
@@ -170,7 +179,7 @@ jobs:
 
       - name: Upload Test Reports
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: unit-test-reports
           path: android/app/build/reports/tests/
