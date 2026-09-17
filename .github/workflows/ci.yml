@@ -72,8 +72,11 @@ jobs:
           # 把 cmdline-tools 装到 cmdline-tools/<版本> (如 20.0), 只有命中预装且版本
           # 相符时才用 latest。该 action 会把实际所在目录 addPath, 故 PATH 是稳的。
           yes | sdkmanager "ndk;26.3.11579264" "build-tools;34.0.0"
-          echo "ndk.dir=$ANDROID_HOME/ndk/26.3.11579264" >> android/local.properties
-          # local.properties 只有 Gradle/AGP 读, cargo-ndk 不读 —— 必须显式导出
+          # 不写 local.properties 的 ndk.dir。AGP 已弃用该方式 ([CXX5106]), 且它优先级
+          # 高于 ndkVersion —— app/build.gradle.kts 里的 ndkVersion 才是唯一来源,
+          # AGP 会据此在 $ANDROID_HOME/ndk/<版本> 找, 正是上面装进去的位置。
+          #
+          # cargo-ndk 不读 Gradle 的任何配置, 必须单独给它一个环境变量。
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> $GITHUB_ENV
 
       # 停在 v5 是刻意的, 不是漏升。gradle/actions@v6 把缓存逻辑抽成闭源的
