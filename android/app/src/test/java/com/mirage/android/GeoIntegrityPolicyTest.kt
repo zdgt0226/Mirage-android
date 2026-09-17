@@ -146,6 +146,13 @@ class GeoIntegrityPolicyTest {
         // 篡改与不可用不能混为一谈
         assertTrue(msgs[GeoManager.FailureReason.MISMATCH]!!.contains("篡改"))
         assertFalse(msgs[GeoManager.FailureReason.DIGEST_UNAVAILABLE]!!.contains("篡改"))
+        // 但 MISMATCH 不得把篡改说成唯一解释: 真机实测最常见的成因是 CDN 缓存
+        // 与上游失步 (jsDelivr 把产物与摘要当两个独立缓存对象, @release 又是可变 ref)。
+        // 把日常现象报成攻击, 用户既会被吓到也学不会该做什么。
+        assertTrue(
+            "MISMATCH 文案必须提示缓存同步这一常见成因",
+            msgs[GeoManager.FailureReason.MISMATCH]!!.contains("同步")
+        )
         // 不可用应提示重试, 上游不提供则不该提示重试
         assertTrue(msgs[GeoManager.FailureReason.DIGEST_UNAVAILABLE]!!.contains("重试"))
         assertFalse(msgs[GeoManager.FailureReason.DIGEST_ABSENT]!!.contains("重试"))

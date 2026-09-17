@@ -351,7 +351,8 @@ object GeoManager {
     /** 把失败原因翻译成用户可读的说法。 */
     internal fun describeFailure(what: String, reason: FailureReason): String = when (reason) {
         FailureReason.DOWNLOAD -> "$what 下载失败，请检查网络或更换更新 URL"
-        FailureReason.MISMATCH -> "$what 完整性校验不通过（内容与上游摘要不符，疑似被篡改或镜像不一致），已拒绝安装"
+        FailureReason.MISMATCH -> "$what 的内容与上游 SHA-256 摘要不符，已拒绝安装。" +
+            "常见原因是镜像缓存尚未与上游同步（稍后重试通常即可恢复）；若持续不符，则可能是内容被篡改"
         FailureReason.DIGEST_ABSENT -> "$what 的上游未提供 SHA-256 摘要，内置源要求强制校验，已拒绝安装"
         FailureReason.DIGEST_UNAVAILABLE -> "$what 无法获取 SHA-256 摘要（网络或镜像暂时不可用），已拒绝安装；请稍后重试"
     }
@@ -585,16 +586,57 @@ object GeoManager {
         // 每次运行用独立的临时文件。固定名会让并发的两次运行写同一个 inode ——
         // 即便有互斥, 上次异常退出残留的 .tmp 也可能被误当成本次产物。
         val geoDir = siteFile.parentFile ?: getGeoDir(context)
+
+        // 清扫历史残留的暂存文件。
+        //
+        // finally 能覆盖正常返回与异常, 但覆盖不了进程被杀 (force-stop / LMK / 崩溃) ——
+        // 真机实测确认这类残留会留下 0 字节孤儿, 而唯一命名意味着它们只增不减。
+        // 本函数持有 updateMutex, 因此不存在删掉其他运行正在写的暂存文件的风险。
+        runCatching {
+            geoDir.listFiles { f -> f.isFile && f.name.endsWith(".dat.tmp") }
+                ?.forEach { stale ->
+                    if (stale.delete()) Log.d(TAG, "清理残留暂存文件: ${stale.name}")
+                }
+        }
+
         val siteTmp = File.createTempFile("geosite", ".dat.tmp", geoDir)
         val ipTmp = File.createTempFile("geoip", ".dat.tmp", geoDir)
 
+        // 两个暂存文件在此一次性创建, 因此清理必须由 finally 统一兜底 ——
+        // 靠每条早退路径各自记得删是不可靠的: 真机实测 GeoSite 下载失败的早退只删了
+        // siteTmp, ipTmp 泄漏成 0 字节孤儿, 而唯一命名意味着它会持续累积。
+        try {
+            return updateGeoFilesStaged(
+                context, allowUnverified, onProgress,
+                activeSource, siteMirrors, ipMirrors,
+                siteFile, ipFile, geoDir, siteTmp, ipTmp
+            )
+        } finally {
+            runCatching { if (siteTmp.exists()) siteTmp.delete() }
+            runCatching { if (ipTmp.exists()) ipTmp.delete() }
+        }
+    }
+
+    @Suppress("LongParameterList")
+    private suspend fun updateGeoFilesStaged(
+        context: Context,
+        allowUnverified: Boolean,
+        onProgress: (String, Int) -> Unit,
+        activeSource: GeoSource,
+        siteMirrors: List<String>,
+        ipMirrors: List<String>,
+        siteFile: File,
+        ipFile: File,
+        geoDir: File,
+        siteTmp: File,
+        ipTmp: File
+    ): GeoUpdateResult {
         // 1. 下载 geosite.dat
         onProgress("正在从「${activeSource.name}」下载 GeoSite 数据集…", 15)
         val siteOutcome = downloadWithMirrors(siteMirrors, siteTmp) { progress ->
             onProgress("正在下载 GeoSite 数据集 (${progress}%)…", (15 + progress * 0.35).toInt())
         }
         if (!siteOutcome.ok || siteTmp.length() < 50 * 1024) {
-            siteTmp.delete()
             return GeoUpdateResult(false, describeFailure("GeoSite 数据集", siteOutcome.failure))
         }
 
@@ -604,8 +646,6 @@ object GeoManager {
             onProgress("正在下载 GeoIP 数据集 (${progress}%)…", (55 + progress * 0.35).toInt())
         }
         if (!ipOutcome.ok || ipTmp.length() < 50 * 1024) {
-            siteTmp.delete()
-            ipTmp.delete()
             return GeoUpdateResult(false, describeFailure("GeoIP 数据集", ipOutcome.failure))
         }
 
@@ -615,8 +655,6 @@ object GeoManager {
         // 拒绝在自动路径上安装未校验产物。必须在原子替换之前判断 —— 一旦 move 完成
         // 就会被 loadGeoFilesToNative 热加载进 :core，再回滚已无意义。
         if (!verified && !allowUnverified) {
-            siteTmp.delete()
-            ipTmp.delete()
             Log.w(TAG, "产物未通过 SHA-256 校验且当前路径不允许未校验安装，已丢弃")
             return GeoUpdateResult(
                 success = false,
@@ -708,14 +746,25 @@ object GeoManager {
                     when (val digest = fetchSha256("$url.sha256sum")) {
                         is DigestResult.Found -> {
                             val actual = computeSha256(dest)
-                            if (!actual.equals(digest.hex, ignoreCase = true)) {
-                                Log.w(TAG, "SHA-256 不匹配 ($url): 期望=${digest.hex}, 实际=$actual, 丢弃产物")
-                                dest.delete()
-                                lastFailure = FailureReason.MISMATCH
-                                continue
+                            if (actual.equals(digest.hex, ignoreCase = true)) {
+                                Log.d(TAG, "SHA-256 校验通过: $actual")
+                                return DownloadOutcome(ok = true, verified = true)
                             }
-                            Log.d(TAG, "SHA-256 校验通过: $actual")
-                            return DownloadOutcome(ok = true, verified = true)
+                            // 不匹配未必是篡改。jsDelivr 这类 CDN 把产物与摘要当作两个
+                            // 独立缓存对象, 而 @release 是可变 ref —— 上游重建后边缘上
+                            // 两者会短暂失步 (真机实测: 拿到旧产物配新摘要)。
+                            // 摘要只有几十字节, 判死前带缓存绕过重取一次。
+                            val fresh = fetchSha256("$url.sha256sum?_=${System.currentTimeMillis()}")
+                            if (fresh is DigestResult.Found &&
+                                actual.equals(fresh.hex, ignoreCase = true)
+                            ) {
+                                Log.i(TAG, "首次摘要为 CDN 陈旧副本, 绕过缓存后校验通过: $actual")
+                                return DownloadOutcome(ok = true, verified = true)
+                            }
+                            Log.w(TAG, "SHA-256 不匹配 ($url): 期望=${digest.hex}, 实际=$actual, 丢弃产物")
+                            dest.delete()
+                            lastFailure = FailureReason.MISMATCH
+                            continue
                         }
                         DigestResult.Absent -> {
                             // 上游确实不发布摘要。内置源 fail-closed: 能阻断 .dat 的对手

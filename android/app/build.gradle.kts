@@ -54,7 +54,10 @@ android {
     signingConfigs {
         if (hasReleaseSigning) {
             create("release") {
-                storeFile = file(ksPath!!)
+                // rootProject.file 解析 keystore.properties (项目根), 但 android {} 块内的
+                // file() 是相对模块目录 (app/) 解析的。两者基准不一致会让
+                // storeFile=ks.jks 被找成 app/ks.jks —— 统一按项目根解析。
+                storeFile = rootProject.file(ksPath!!)
                 storePassword = ksPass
                 keyAlias = ksAlias
                 keyPassword = ksAliasPass

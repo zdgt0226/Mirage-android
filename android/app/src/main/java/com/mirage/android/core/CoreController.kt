@@ -20,6 +20,18 @@ object CoreController {
     private val callbacks = CopyOnWriteArraySet<ICoreCallback>()
     private var currentBinder: IBinder? = null
 
+    /**
+     * 绑定就绪后要补跑的动作。
+     *
+     * `:core` 是独立进程, `startForegroundService` 之后它还要冷启动、加载数 MB 原生库,
+     * 期间 binder 尚不可用。对这种情况轮询重试是错的 —— 预算给小了必然失败
+     * (真机实测: 推送在 :core 起来前 0.63 秒就耗尽了 10×300ms), 给大了又平白拖延。
+     * 正确做法是挂在 onServiceConnected 上, 由绑定事件驱动。
+     *
+     * 同一 key 的动作后者覆盖前者: 重复入队只保留最新意图 (如最新的节点快照)。
+     */
+    private val pendingOnConnect = java.util.concurrent.ConcurrentHashMap<String, () -> Unit>()
+
     private val deathRecipient: IBinder.DeathRecipient = object : IBinder.DeathRecipient {
         override fun binderDied() {
             currentBinder?.unlinkToDeath(this, 0)
@@ -52,6 +64,16 @@ object CoreController {
                 running.value = isRun
                 callbacks.forEach { cb -> runCatching { cb.onStateChanged(isRun) } }
             }
+
+            // 补跑绑定期间入队的动作
+            if (pendingOnConnect.isNotEmpty()) {
+                val actions = pendingOnConnect.entries.toList()
+                pendingOnConnect.clear()
+                actions.forEach { (key, action) ->
+                    runCatching { action() }
+                        .onFailure { android.util.Log.w("CoreController", "待执行动作 $key 失败: ${it.message}") }
+                }
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -81,6 +103,25 @@ object CoreController {
     }
 
     fun isBound(): Boolean = bound && service != null
+
+    /**
+     * 绑定就绪时执行 [action]; 若已就绪则立即执行。
+     *
+     * [key] 相同的重复调用只保留最后一次 —— 避免连点连接时堆积多个陈旧动作。
+     */
+    fun runWhenConnected(key: String, action: () -> Unit) {
+        if (isBound()) {
+            runCatching { action() }
+                .onFailure { android.util.Log.w("CoreController", "动作 $key 失败: ${it.message}") }
+            return
+        }
+        pendingOnConnect[key] = action
+    }
+
+    /** 撤销尚未执行的待办动作 (如用户已停止, 推送不再有意义)。 */
+    fun cancelPending(key: String) {
+        pendingOnConnect.remove(key)
+    }
 
     private inline fun <T> call(block: (ICoreService) -> T): T? {
         val s = service ?: return null

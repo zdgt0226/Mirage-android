@@ -241,22 +241,37 @@ class VpnRepository(private val context: Context) {
     @Volatile
     private var pushNodesJob: Job? = null
 
+    /**
+     * 把节点全表推送给 :core（failover 选优需要）。
+     *
+     * 刻意不放进启动 Intent:
+     * 1. 体积无上限。订阅动辄数百个节点, 序列化后可达上百 KB, 而启动 Intent 走
+     *    Binder 事务并由 ActivityManager 持有, 大订阅下会抛 TransactionTooLargeException,
+     *    直接表现为 VPN 启动失败。
+     * 2. 节点 URI 含明文密码, 放在 Intent 里会随 ActivityManager 状态进入 dumpsys
+     *    与 bugreport。走 AIDL 则只在两个进程之间点对点传递。
+     *
+     * 推送时机由**绑定事件**驱动而非轮询重试: `:core` 是独立进程, startForegroundService
+     * 之后它还要冷启动并加载数 MB 原生库。真机实测推送在 :core 起来前 0.63 秒就把
+     * 10×300ms 的重试预算耗尽了, 回落到 :core 侧的陈旧 SharedPreferences 读取 ——
+     * 正是这套改动想消除的东西。CoreController.runWhenConnected 在已绑定时立即执行,
+     * 否则挂到 onServiceConnected 上, 不存在预算给多少的问题。
+     *
+     * 启动 Intent 仍携带 `uri`（当前选中节点）, 因此内核在本次推送到达之前
+     * 就已具备建连所需的全部信息, 不存在时序依赖。
+     */
     private fun pushNodesToCore() {
-        // 取消上一次未完成的推送: 每次推送携带的是启动时刻的节点快照, 若两次推送
-        // 并存, 慢的那次会用更旧的快照覆盖新的 (updateNodes 是无版本号的盲写)。
         pushNodesJob?.cancel()
         pushNodesJob = scope.launch(Dispatchers.IO) {
             val json = runCatching {
                 com.mirage.android.core.NodeStore.getNodesJson(context)
             }.getOrNull() ?: return@launch
-            // :core 刚被拉起, binder 可能尚未就绪, 重试几次
-            repeat(10) {
-                if (runCatching { CoreController.updateNodes(json) }.getOrDefault(false)) {
-                    return@launch
+            // 同 key 覆盖: 连点连接时只保留最新快照, 避免旧快照后到覆盖新的
+            CoreController.runWhenConnected(PENDING_PUSH_NODES) {
+                if (!CoreController.updateNodes(json)) {
+                    android.util.Log.w("VpnRepository", "节点列表推送被 :core 拒绝")
                 }
-                delay(300)
             }
-            android.util.Log.w("VpnRepository", "节点列表推送失败, failover 将回退到 :core 本地读取")
         }
     }
 
@@ -265,6 +280,7 @@ class VpnRepository(private val context: Context) {
         // 下一次连接的 serviceConfig。
         pushNodesJob?.cancel()
         pushNodesJob = null
+        CoreController.cancelPending(PENDING_PUSH_NODES)
         _vpnState.value = VpnState.Stopping
         runCatching { CoreController.clearDnsCache() }
         runCatching { CoreController.stop() }
@@ -460,6 +476,8 @@ class VpnRepository(private val context: Context) {
     }
 
     companion object {
+        /** CoreController 待办动作的 key: 节点全表推送。同 key 覆盖, 只保留最新快照。 */
+        private const val PENDING_PUSH_NODES = "pushNodes"
         @Volatile
         private var instance: VpnRepository? = null
 
