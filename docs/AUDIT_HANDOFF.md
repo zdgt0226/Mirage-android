@@ -3,9 +3,16 @@
 > 面向接手本项目的协作者与 AI Agent。
 > 配套可视化路线图：<https://claude.ai/artifact/FaiBQfWKqSji1sFDVzHtsA>
 >
-> **审计基线** `fd6cd3e` · **已完成** 第 0、1、2、3、4 批（`cade5d7`、`3aeb445`、`fbf26f1`、`d9e3280` 及第 4 批工程基线）及原生 60ms 预读（`f3274b1`）· **全量计划审计与工程加固已闭环**
+> **审计基线** `fd6cd3e`
 >
-> 本文所有 `file:line` 基于 `d9e3280`。引用旧行号的历史记录已失效，以本文为准。
+> **第一轮（计划内）** 第 0–4 批：`cade5d7`、`3aeb445`、`fbf26f1`、`d9e3280`、`7b822f1`，
+> 外加原生 60ms 预读 `f3274b1`。
+>
+> **第二轮（对第一轮的多模型复审与修复）** `d3474a5`、`938a7cd`、`be44e31`。
+> 复审在第一轮「已闭环」的成果里查出 11 项缺陷，其中 7 项是第一轮修复自身引入的。
+> 详见 [§1.5](#15-第二轮多模型复审对第一轮成果的返工)。
+>
+> 本文所有 `file:line` 基于 `be44e31`。引用旧行号的历史记录已失效，以本文为准。
 
 ---
 
@@ -88,8 +95,9 @@ cd native/mirage-core && cargo test --lib && cargo build --release
 附带修复：通知文案启动期为「正在连接…」，成功后才改「已连接」；`NativeLoader.load()` 返回值检查；
 `notifyState()` 的 `isRunning()` 加 `runCatching`（原生库加载失败时它抛 `Error`）。
 
-**未采用 `cancelAndJoin`**：状态守卫已堵住竞态，而 `stopInternal` 跑在 binder 线程上，
-`runBlocking` join 会把调用方一并阻塞。这是有意的偏离，不是遗漏。
+> ⚠️ **本批当时的论断已被推翻**：原文写「未采用 `cancelAndJoin`，因为状态守卫已堵住竞态」。
+> 守卫当时并未生效 —— `stopInternal` 全程持锁，`Stopping` 对其他线程永不可见。
+> 见 §1.5 的 C 项。上表 `CoreService.kt` 行号也因后续改动失效，以现文件为准。
 
 #### 第 2 批 — `fbf26f1`（网络层：消除明文泄漏窗口与底层网络自相覆盖）
 
@@ -119,25 +127,98 @@ cd native/mirage-core && cargo test --lib && cargo build --release
 | 5 | 构建依赖硬编码、缺乏 Gradle Wrapper、缺少 CI 自动化检查 | 迁移至 `gradle/libs.versions.toml` 统一管理版本；显式声明 `ndkVersion`；生成 Gradle 8.9 wrapper 并改造构建脚本；新增 `.github/workflows/ci.yml` 覆盖 Rust 与 Android 全质量门禁 | 容器内 `./gradlew :app:compileDebugKotlin :app:testDebugUnitTest` 成功；CI 配置完备 |
 | 6 | Kotlin 单元测试薄弱（原仅 1 个文件） | 新增 `CoreServiceStateTest.kt`（状态机流转）、`NodeStoreTest.kt`（URI 解析与存储），引入 `org.json` JVM 测试实现 | 容器内 14 个测试全量 SUCCESS (3m 47s) |
 
+### 1.5 第二轮：多模型复审对第一轮成果的返工
+
+第一轮宣告「全量闭环」后，对第 0–4 批的产出做了一次多模型对抗审计
+（三个模型分领 Geo 完整性 / 状态机与并发 / CI 与测试质量三个正交切面，
+结论由主审逐条回源核实）。查出 **11 项缺陷，其中 7 项由第一轮的修复自身引入**。
+
+修复分三批落地。
+
+#### 第二轮第 1 批 — `d3474a5`
+
+| | 问题 | 处置 |
+| :-- | :--- | :--- |
+| C | **状态机守卫从未生效**。`stopInternal` 在一个 synchronized 块内走完「置 Stopping → 拆除 → 置 Stopped」且无挂起点，按 JMM monitor happens-before，阻塞在同一把锁上的线程重新获得锁时看到的必然是 `Stopped`。守卫不可达，「断开后自己重连」的竞态**从未闭合** | 拆成三段：短锁提交 `Stopping` 并释放 → 锁外拆除 → 再取锁置 `Stopped`。锁外拆除安全，因为此刻任何 `startInternal` 都会在守卫处退出。`onDestroy` 同样处理 |
+| H | **CI 的 JNI 门禁有假阴性**。`protectFd` 声明于两处（`MirageNative.kt` 与 `CoreService.kt`），各由独立 keep 规则保护，未限定类的 `grep -c protectFd` 会被后者掩护 | 断言改全限定名 + 签名；新增强不变式：dex 内 `MirageNative` 的 NATIVE 方法数必须等于 `.so` 的 `Java_com_mirage` 导出数 |
+| D | `pushNodesToCore` 丢弃 Job，`scope` 为进程级且停止时不取消。两次推送各持启动时快照，慢的后到覆盖快的；停止后推送仍落地 | 跟踪 Job，启动时 cancel-and-replace，`stopVpn` 时取消 |
+| G | `isBuiltinUrl` 用 `ignoreCase`，与自身「完整 URL 相等」的注释不符。GitHub/jsDelivr 路径大小写敏感，拼写变体被判成内置源后强制校验、双双 404、本可避免的硬失败 | 改为逐字节相等，注释写明方向性（true 是严格分支，假阴性才危险且不可能发生） |
+| I | CI：`ANDROID_NDK_HOME` 未导出给 cargo-ndk（`local.properties` 只有 Gradle 读）；`echo "y"` 只答一次许可；build-tools 依赖 AGP 隐式下载；cargo-ndk 未固定版本；无缓存 | 逐项补齐 |
+| J | 两次提交都引用了 §5 里并不存在的「测试必须调用生产函数」规则 | 补写 §5.1，使引用成立 |
+
+**H 的变异验证**：移除 `MirageNative` keep 规则的 `{ *; }` 后重建 release ——
+旧断言返回 2 判通过，新断言返回 0 且 native 数 40≠43，失败。双向都验过。
+
+#### 第二轮第 2 批 — `938a7cd`
+
+| | 问题 | 处置 |
+| :-- | :--- | :--- |
+| A | **`verified` 是死代码**。`GeoUpdateResult.verified` 在 `GeoManager` 之外零消费点，`MainActivity.checkGeoInitialization` 连返回值都不接。首启用户的未校验数据被静默装进持有 TUN 的 `:core`。第一轮提交信息声称「UI 会明示」，那只对手动路径成立 | `updateGeoFiles` 加 `allowUnverified`（默认 false），判断置于原子替换**之前**；自动路径拒绝安装；手动路径弹阻塞式对话框；`verified` 持久化并进入 `displaySummary`（「已就绪（未校验）」） |
+| B | **fail-closed 撞上默认源单镜像**。默认 `fastly_cdn` 的镜像列表 `distinct()` 后仅 2 个，另一个是墙内被封的 `raw.githubusercontent.com`。`fetchSha256` 无重试且不分 404 与 5xx，一次瞬时故障即拒绝整次更新。威胁模型也反了：断不了几 MB `.dat` 的对手，断得了几十字节的 `.sha256sum` | `fetchSha256` 三态化（`Found`/`Absent`/`Unavailable`）+ 对 `Unavailable` 退避重试；失败原因分级传到用户面前，「疑似被篡改」与「网络暂时不可用，请稍后重试」不再是同一句话；摘要响应加 4096 字符读取上限 |
+
+**联网实测**：六个内置源 `.sha256sum` 全部存在，fail-closed 不会破坏正常更新。
+但 v2fly 的 `geoip.dat.sha256sum` 曾连续 4 次返回 500、随后连续 10 次 200 ——
+GitHub release 资产 CDN 确实会抖，这正是必须重试与三态化的实证依据。
+
+#### 第二轮第 3 批 — `be44e31`（原有缺陷，非第一轮引入）
+
+| | 问题 | 处置 |
+| :-- | :--- | :--- |
+| E | **并发架空完整性校验**。`updateGeoFiles` 零互斥且暂存路径固定。B 校验完，A 截断重写同一文件，B 的 `Files.move` 装 A 的字节却报 `verified = true`。旋转屏幕重入 `checkGeoInitialization` 即可触发，无需攻击者 | `Mutex` 串行化，第二个调用方立即返回而非排队重下；每次运行用 `File.createTempFile` 独立暂存 |
+| F8 | 两次 `Files.move` 之间失败留下「新 geosite + 旧 geoip」错配，而 `isReady` 是 `\|\|`，该状态还会被判为就绪、抑制首启重试 | 旧文件先挪 `.bak`，任一步失败整体回滚；`isReady` 改 `&&` |
+| F | `downloadFile` 对无 `Location` 的 3xx 执行 `?: break`，带着活连接掉进写盘块，把重定向响应体当产物；重定向次数耗尽时也只是碰巧失败 | 两处改显式 `return false`；重定向目标复查 https 防降级 |
+| F5 | 摘要与产物同源，防不住控制该源的攻击者 | **刻意不修**。建议的跨源取摘要方案要用 `raw.githubusercontent.com`，而它正是墙内被封的 host —— 会让 fail-closed 必然触发，把 B 项刚修完的可用性问题重造一遍。已在 `fetchSha256` 文档注释中写明能力边界，真实性保证列为后续项 |
+
 ### 全量验证结果汇总（容器内实测与实机）
 
+第一轮完成时（`7b822f1`）：
+
 ```
-compileDebugKotlin     clean（0 错误）
-testDebugUnitTest      14 passed, 0 failed (BUILD SUCCESSFUL)
-cargo clippy           0 warnings (-D warnings)
-cargo fmt --check      clean (0 diff)
-cargo test --lib       131 passed, 0 failed
-实机安装与连接          Sony SO-02K (Android 9 / BH905W2A9G) 实测通过：10MB 瘦身包秒装、前台服务正常、隧道流量吞吐平稳
+testDebugUnitTest      14 passed
+cargo clippy           0 (-D warnings)
+cargo fmt --check      clean
+cargo test --lib       131 passed
 ```
+
+第二轮完成后（`be44e31`，本文撰写时实测）：
+
+```
+compileDebugKotlin     clean
+testDebugUnitTest      27 passed  (CoreServiceState 10 / GeoIntegrityPolicy 6 / NodeStore 6 / PerAppFilter 5)
+assembleRelease        BUILD SUCCESSFUL
+JNI 门禁               退出码 0 (protectFd 1 · resolveConnectionOwner 1 · dex 43 = .so 43)
+cargo clippy           0 (-D warnings)
+cargo fmt --check      clean
+cargo test --lib       131 passed
+```
+
+> ⚠️ **实机验证的归属**：§3 记录的 Sony SO-02K / Galaxy S24+ 实测结论来自第一轮执行者，
+> 本文撰写者未能复现（手边仅 `R5CX21FD9PX`）。**第二轮的三个提交完全没有做过真机验证**，
+> 只做了容器内构建、单元测试与变异验证。落地前请补真机回归，重点见 §3。
 
 ---
 
 ## 2. 后续建议与展望
 
-Mirage-Android 架构审计与工程基线（第 0、1、2、3、4 批）现已全部闭环。
-后续可关注的增强点：
-1. **正式签名发布**：配置 `keystore.properties` 或 CI Secrets (`MIRAGE_KEYSTORE_*`) 产出可签名的 Release APK。
-2. **多架构扩充**：当前默认仅编译 `arm64-v8a`，如需支持模拟器或 32 位老旧设备，可在 `build-android.sh` 中扩展 `x86_64` / `armeabi-v7a`。
+计划内的第 0–4 批与第二轮返工均已落地。**「闭环」只到「静态审计 + 容器内验证」为止** ——
+第二轮三个提交尚未真机回归（见 §3）。
+
+按价值排序的后续项：
+
+1. **Geo 数据的真实性保证**。当前的 SHA-256 只能防截断、损坏、镜像不一致与单侧阻断，
+   防不住控制了下载源的攻击者（摘要与产物同源）。要真正解决需要内置签名公钥
+   （Ed25519 / minisign）校验摘要签名，前提是上游发布签名文件。跨源取摘要不是可行替代，
+   原因见 §1.5 F5。
+2. **CI 首次运行验证**。`.github/workflows/ci.yml` 从未在真实 runner 上跑过 ——
+   `cargo-ndk` 安装、`$ANDROID_HOME/build-tools` 版本选取、`nm` 读 aarch64 `.so`
+   这些只有首跑才知道。JNI 门禁脚本本身已在本地对好/坏产物双向验证过。
+3. **正式签名发布**：配置 `keystore.properties` 或 CI Secrets (`MIRAGE_KEYSTORE_*`)。
+4. **Android Lint 尚未纳入门禁**。CI 目前只有 Kotlin 编译 + 单元测试 + R8 门禁，
+   `./gradlew lint` 能发现清单与资源层面的问题，Kotlin 编译发现不了。
+5. **多架构扩充**：当前默认仅编译 `arm64-v8a`，如需模拟器或 32 位设备支持，
+   在 `build-android.sh` 与 `abiFilters` 中扩展 `x86_64` / `armeabi-v7a`。
+6. **`nodes_json` 的 Intent 残留读取**（`CoreService.kt` 内 `intent.getStringExtra("nodes_json")`）
+   现已是死代码（推送改走 AIDL `updateNodes`），保留为无害回退，可择机清理。
 
 
 ---
@@ -148,11 +229,21 @@ Mirage-Android 架构审计与工程基线（第 0、1、2、3、4 批）现已�
    已独立验证并提交（`f3274b1`）。
 2. **release 包当前未签名**（`app-release-unsigned.apk`），因为未配置 keystore。
    这是设计行为。要出可安装包需按 README 配置 `keystore.properties` 或 `MIRAGE_KEYSTORE_*`。
-3. **实机验证**：
-   已在 Sony SO-02K (Android 9 / API 28) 与 Samsung Galaxy S24+ (Android 16 / API 36) 双机实测通过：
+3. **实机验证 —— 注意归属与覆盖范围**：
+   下列结论由**第一轮**执行者在 Sony SO-02K (Android 9 / API 28) 与
+   Samsung Galaxy S24+ (Android 16 / API 36) 上得出，本文撰写者未能复现：
    - 点断开后 VPN 接口彻底拆除，不再自己回来
    - 断开后无幽灵连接与无死循环退避
    - 物理网络监听与 NDK 原生句柄绑定严格一致
+
+   **第二轮的三个提交（`d3474a5`、`938a7cd`、`be44e31`）完全未做真机验证。**
+   落地前建议补以下回归，它们对应第二轮改动面最大的几处：
+   - 连接 → 立刻断开 → 等 5 秒：VPN 不得自己回来（C 项，锁划分改动）
+   - 连接 → 3 秒内断开 → 再连接：节点列表不得被上一次的旧快照覆盖（D 项）
+   - Geo 资产页手动更新一次内置源：应成功且无「未校验」对话框（A/B 项）
+   - 首启（清数据后）自定义源：应拒绝安装并在日志留下原因，而非静默装入（A 项）
+   - 更新途中旋转屏幕：不得出现两次下载，第二次应立即返回「已在进行中」（E 项）
+   - release 包装机后连通性正常：证明 R8 未打断 `protectFd`
 4. **`jniLibs/` 是 gitignore 的本地产物**。改了 `native/` 后必须
    `bash scripts/build-android.sh native`，否则 APK 里仍是旧 `.so`。
 
