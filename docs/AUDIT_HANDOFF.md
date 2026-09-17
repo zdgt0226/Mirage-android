@@ -16,8 +16,9 @@
 > 六项回归在 Sony SO-02K 上实跑，查出 4 项容器测试无法触及的缺陷，
 > 并完成了绑定生命周期的架构改动。详见 [§1.6](#16-第三轮真机回归查出的问题)。
 >
-> **第四轮（CI 首跑）** `d7f628c`。CI 自建立起从未通过过，两处失败均在 workflow
-> 本身。详见 [§1.7](#17-第四轮ci-首次通过)。
+> **第四轮（CI 首跑与 action 升级）** `d7f628c`、`974da07`。CI 自建立起从未通过过，
+> 两处失败均在 workflow 本身；随后六个 action 全部升离 Node 20。
+> 详见 [§1.7](#17-第四轮ci-首次通过)。
 >
 > 本文所有 `file:line` 基于 `d7f628c`。引用旧行号的历史记录已失效，以本文为准。
 
@@ -272,13 +273,36 @@ ICoreService 类描述符                                  396
 此前标为「只有首跑才知道」的三处 —— `cargo-ndk` 安装、
 `$ANDROID_HOME/build-tools` 版本选取、`nm` 读 aarch64 `.so` —— 全部正常工作。
 
-#### 已记录但未处理的弃用警告
+#### action 全量升级（`974da07`）
 
-不影响当前通过，但会在某次 runner 升级后变成失败：
+首绿那次六个 action 全部停在以 Node 20 为目标的大版本，而 runner 已强制 Node 24
+——不影响当时通过，但会在某次 runner 升级后集体变红。逐个读过 release note 再升：
 
-- `actions/setup-java@v4` 已弃用，官方建议迁 `v5`
-- `checkout@v4` / `cache@v4` / `setup-android@v3` / `setup-gradle@v4` 仍以
-  Node 20 为目标，runner 正强制用 Node 24 运行
+| action | 版本 | 影响本 workflow 的变化 |
+| :--- | :--- | :--- |
+| `actions/checkout` | v4 → v7 | v7 禁止在 `pull_request_target` / `workflow_run` 下检出 fork PR；本 workflow 只用 `pull_request` |
+| `actions/setup-java` | v4 → v6 | 无（v5 = Node 24，v6 = ESM 重构，官方明示非用户可见破坏） |
+| `android-actions/setup-android` | v3 → v4 | **有，见下** |
+| `gradle/actions/setup-gradle` | v4 → **v5** | **刻意停在 v5，见下** |
+| `actions/cache` | v4 → v6 | 无（Node 24 + ESM） |
+| `actions/upload-artifact` | v4 → v7 | 无（v7 新增 `archive` 入参，不影响现用法） |
+
+**setup-android v4 改了 cmdline-tools 的落地路径。** v4 装到
+`cmdline-tools/<版本>`（默认 `20.0`），只有预装副本的 `Pkg.Revision` 相符时才用
+`cmdline-tools/latest`。原先硬编码的
+`$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager` 会扑空。该 action 会把
+sdkmanager 实际所在目录 `addPath`，故改走 PATH —— 两个大版本下都成立。
+v4 还在 action 内部把 `tools` 从 `packages` 里过滤掉了，首次那个失败不会再复现；
+`packages: ''` 仍然保留，因为 v4 的默认包是 `platform-tools`，本项目不需要
+adb/fastboot。
+
+**setup-gradle 停在 v5 是决定，不是漏升。** `gradle/actions@v6` 把缓存逻辑抽成
+闭源的 `gradle-actions-caching` 组件，**启用缓存即视为接受 Gradle 的商业条款**
+（<https://gradle.com/legal/terms-of-use/>）。v5 仍是 MIT 且已跑 Node 24，能清掉
+弃用又不牵涉授权。要升 v6 得先有人决定接受那份条款 —— 那是授权决策，不是维护动作。
+
+实测结果：`run 35255691604` success **4m40s**（首绿是 6m42s），
+**GitHub 侧注解数 0** —— 升级前那批弃用注解全部消失。
 
 ### 全量验证结果汇总（容器内实测与实机）
 
@@ -310,6 +334,14 @@ Rust (Format, Clippy & Tests)                    success 1m04s
 Android (Build, Unit Tests & JNI Surface Gate)   success 6m38s
 ```
 
+action 全量升级后（`974da07`，run 35255691604）：
+
+```
+整体                   success 4m40s   (升级前 6m42s)
+GitHub 注解            0               (升级前: 一批 Node 20 / setup-java 弃用注解)
+JNI 门禁               protectFd 1 · resolveConnectionOwner 1 · dex 43 = .so 43
+```
+
 > **实机验证状态**：第二轮的三个提交已于第三轮在 Sony SO-02K (Android 9 / API 28)
 > 上补做真机回归，六项全部跑通，并因此查出 4 项新缺陷（见 §1.6）。
 > 第一轮记录的 Galaxy S24+ (Android 16 / API 36) 结论仍来自第一轮执行者，未复现。
@@ -330,16 +362,17 @@ Android (Build, Unit Tests & JNI Surface Gate)   success 6m38s
    防不住控制了下载源的攻击者（摘要与产物同源）。要真正解决需要内置签名公钥
    （Ed25519 / minisign）校验摘要签名，前提是上游发布签名文件。跨源取摘要不是可行替代，
    原因见 §1.5 F5。
-3. **CI action 弃用警告**。当前通过，但会在某次 runner 升级后变成失败：
-   `actions/setup-java@v4` 已弃用（官方建议迁 `v5`）；`checkout@v4` / `cache@v4` /
-   `setup-android@v3` / `setup-gradle@v4` 仍以 Node 20 为目标，runner 正强制用
-   Node 24 运行。建议主动升级而非等它变红。
-4. **正式签名发布**：配置 `keystore.properties` 或 CI Secrets (`MIRAGE_KEYSTORE_*`)。
-5. **Android Lint 尚未纳入门禁**。CI 目前只有 Kotlin 编译 + 单元测试 + R8 门禁，
+3. **`gradle/actions` v6 的授权决策**。v6 的缓存组件闭源且需接受 Gradle 商业条款，
+   因此本仓库停在 v5（见 §1.7）。v5 不会永远维护，届时要么接受条款升 v6，
+   要么关掉 setup-gradle 的缓存自己用 `actions/cache` 缓 `~/.gradle`。
+4. **`ndk.dir` 已被 AGP 标记弃用**（`[CXX5106]`，CI 实测告警）。
+   应删掉 `local.properties` 里的 `ndk.dir`，改在模块里设 `android.ndkVersion`。
+5. **正式签名发布**：配置 `keystore.properties` 或 CI Secrets (`MIRAGE_KEYSTORE_*`)。
+6. **Android Lint 尚未纳入门禁**。CI 目前只有 Kotlin 编译 + 单元测试 + R8 门禁，
    `./gradlew lint` 能发现清单与资源层面的问题，Kotlin 编译发现不了。
-6. **多架构扩充**：当前默认仅编译 `arm64-v8a`，如需模拟器或 32 位设备支持，
+7. **多架构扩充**：当前默认仅编译 `arm64-v8a`，如需模拟器或 32 位设备支持，
    在 `build-android.sh` 与 `abiFilters` 中扩展 `x86_64` / `armeabi-v7a`。
-7. **`nodes_json` 的 Intent 残留读取**（`CoreService.kt` 内 `intent.getStringExtra("nodes_json")`）
+8. **`nodes_json` 的 Intent 残留读取**（`CoreService.kt` 内 `intent.getStringExtra("nodes_json")`）
    现已是死代码（推送改走 AIDL `updateNodes`），保留为无害回退，可择机清理。
 
 
