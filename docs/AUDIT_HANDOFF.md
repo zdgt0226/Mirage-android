@@ -304,6 +304,25 @@ adb/fastboot。
 实测结果：`run 35255691604` success **4m40s**（首绿是 6m42s），
 **GitHub 侧注解数 0** —— 升级前那批弃用注解全部消失。
 
+#### 顺带清掉 `ndk.dir`（`8a8e178`）
+
+升级那次的日志里还有一条一直没人看的 AGP 告警：
+
+```
+[CXX5106] NDK was located by using ndk.dir property.
+This method is deprecated and will be removed in a future release.
+```
+
+`app/build.gradle.kts:21` 本来就声明了 `ndkVersion = "26.3.11579264"`，AGP 会据此
+去 `$ANDROID_HOME/ndk/<版本>` 找 —— 正是 sdkmanager 装进去的位置。workflow 里那行
+`echo "ndk.dir=… >> android/local.properties"` 纯属冗余，而且**`ndk.dir` 优先级高于
+`ndkVersion`**，AGP 实际看的一直是它，告警因此每次都报。删掉即可。
+
+`ANDROID_NDK_HOME` 保留：cargo-ndk 不读 Gradle 的任何配置，必须单独给它环境变量。
+
+复测 `run 35256942284` success，`NDK was located by using ndk.dir` 计数 0，
+JNI 门禁 43 = 43。
+
 ### 全量验证结果汇总（容器内实测与实机）
 
 第一轮完成时（`7b822f1`）：
@@ -365,14 +384,12 @@ JNI 门禁               protectFd 1 · resolveConnectionOwner 1 · dex 43 = .so
 3. **`gradle/actions` v6 的授权决策**。v6 的缓存组件闭源且需接受 Gradle 商业条款，
    因此本仓库停在 v5（见 §1.7）。v5 不会永远维护，届时要么接受条款升 v6，
    要么关掉 setup-gradle 的缓存自己用 `actions/cache` 缓 `~/.gradle`。
-4. **`ndk.dir` 已被 AGP 标记弃用**（`[CXX5106]`，CI 实测告警）。
-   应删掉 `local.properties` 里的 `ndk.dir`，改在模块里设 `android.ndkVersion`。
-5. **正式签名发布**：配置 `keystore.properties` 或 CI Secrets (`MIRAGE_KEYSTORE_*`)。
-6. **Android Lint 尚未纳入门禁**。CI 目前只有 Kotlin 编译 + 单元测试 + R8 门禁，
+4. **正式签名发布**：配置 `keystore.properties` 或 CI Secrets (`MIRAGE_KEYSTORE_*`)。
+5. **Android Lint 尚未纳入门禁**。CI 目前只有 Kotlin 编译 + 单元测试 + R8 门禁，
    `./gradlew lint` 能发现清单与资源层面的问题，Kotlin 编译发现不了。
-7. **多架构扩充**：当前默认仅编译 `arm64-v8a`，如需模拟器或 32 位设备支持，
+6. **多架构扩充**：当前默认仅编译 `arm64-v8a`，如需模拟器或 32 位设备支持，
    在 `build-android.sh` 与 `abiFilters` 中扩展 `x86_64` / `armeabi-v7a`。
-8. **`nodes_json` 的 Intent 残留读取**（`CoreService.kt` 内 `intent.getStringExtra("nodes_json")`）
+7. **`nodes_json` 的 Intent 残留读取**（`CoreService.kt` 内 `intent.getStringExtra("nodes_json")`）
    现已是死代码（推送改走 AIDL `updateNodes`），保留为无害回退，可择机清理。
 
 
