@@ -71,6 +71,10 @@ systemd-nspawn -D /var/lib/machines/android-builder --as-pid2 -q \
 cd native/mirage-core && cargo test --lib && cargo build --release
 ```
 
+**NDK 版本的唯一来源是 `android/gradle/libs.versions.toml` 的 `[versions] ndk`。**
+改它一处即可，`build.gradle.kts` / CI / `build-android.sh` 都从那里取；
+不要在任何地方写第二份（原因见 §1.7）。
+
 **工具链版本固定在仓库根的 `rust-toolchain.toml`（当前 `1.95.0`）**，crate 级不放副本
 ——rustup 就近优先，crate 级文件会静默覆盖根目录设置。升级 rustc 是一次显式改动：
 改版本号 → 本地跑通 `clippy -D warnings` / `fmt --check` / `test` → 提交。
@@ -322,6 +326,42 @@ This method is deprecated and will be removed in a future release.
 
 复测 `run 35256942284` success，`NDK was located by using ndk.dir` 计数 0，
 JNI 门禁 43 = 43。
+
+#### NDK 版本收成单一来源，以及它顺带暴露的一个静默失败（`250e11d`）
+
+版本号原本写在四处：`app/build.gradle.kts`、CI 的 sdkmanager 调用、CI 的
+`ANDROID_NDK_HOME`、`scripts/build-android.sh` 两处。现在只在
+`android/gradle/libs.versions.toml` 的 `[versions] ndk` 里：
+
+```kotlin
+ndkVersion = libs.versions.ndk.get()        // build.gradle.kts
+```
+```bash
+NDK_VERSION=$(sed -n 's/^ndk = "\(.*\)"$/\1/p' android/gradle/libs.versions.toml)
+```
+
+**但光收单一来源不够。** 按本仓库的规矩做变异验证——把版本改成
+`99.9.99999999` 在容器内跑 `assembleRelease`：
+
+```
+> Task :app:stripReleaseDebugSymbols
+Unable to strip the following libraries, packaging them as they are: libmirage_jni.so.
+BUILD SUCCESSFUL in 6m 40s
+```
+
+**AGP 找不到 `ndkVersion` 指定的 NDK 时不会失败**，只是跳过 strip 继续走。
+版本写错的唯一症状是产物带着符号发出去，没有任何红灯。`sdkmanager` 同样靠不住：
+未知包名只是告警，退出码仍是 0。
+
+因此补了两道断言：
+- 安装后检查 `$ANDROID_HOME/ndk/$NDK_VERSION` 目录存在
+- `assembleRelease` 的输出里出现 `Unable to strip` 即失败
+
+复测 `run 35301832360` success，日志确认版本取自 toml，无 `Unable to strip`。
+
+> 这条值得单独记：**「构建成功」不等于「构建做了它该做的事」**。
+> 本轮之前 `ndkVersion` 事实上是装饰性配置——本项目没有 `externalNativeBuild`，
+> jniLibs 是预编译的，AGP 唯一用到 NDK 的地方就是 strip，而 strip 失败不致命。
 
 ### 全量验证结果汇总（容器内实测与实机）
 
