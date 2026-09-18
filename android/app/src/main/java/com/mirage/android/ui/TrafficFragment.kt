@@ -244,6 +244,7 @@ class TrafficFragment : Fragment() {
                     Color.parseColor("#FF6B6B")
                 upper.contains("WARN") || upper.contains("WARNING") ->
                     Color.parseColor("#FFD166")
+                // i18n-exempt: 匹配内核日志原文, 不随界面语言变化
                 upper.contains("OK=TRUE") || upper.contains("已启动") || upper.contains("成功") ->
                     Color.parseColor("#06D6A0")
                 upper.contains("[CORE]") || upper.contains("[ROUTER]") || upper.contains("[TUN-") ->

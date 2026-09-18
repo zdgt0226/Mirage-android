@@ -38,7 +38,7 @@ class RuleAdapter(
         fun bind(rule: Rule, position: Int) {
             binding.tvPriorityIndex.text = "#${position + 1}"
             binding.tvPattern.text = rule.displayName
-            binding.tvKind.text = rule.summaryText
+            binding.tvKind.text = rule.summaryText(binding.root.context)
 
             if (rule.isComposite) {
                 binding.tvLogicBadge.visibility = View.VISIBLE
@@ -47,7 +47,7 @@ class RuleAdapter(
                 binding.tvLogicBadge.visibility = View.GONE
             }
 
-            binding.tvAction.text = rule.actionDisplayName
+            binding.tvAction.text = binding.root.context.getString(rule.actionDisplayNameRes)
             if (rule.hits > 0) {
                 binding.tvHits.visibility = View.VISIBLE
                 binding.tvHits.text = binding.root.context.getString(R.string.rule_hits_fmt, rule.hits)

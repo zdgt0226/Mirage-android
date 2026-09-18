@@ -206,9 +206,9 @@ class RulesFragment : Fragment() {
         val status = GeoManager.getGeoStatus(ctx)
         val source = GeoManager.getActiveSource(ctx)
         binding.tvGeoStatusSummary.text = if (status.isReady) {
-            "源: ${source.name} · ${status.geositeTagCount} Sites / ${status.geoipCodeCount} IPs · ${status.lastUpdateTime}"
+            getString(R.string.rules_geo_summary_ready, source.name, status.geositeTagCount, status.geoipCodeCount, status.lastUpdateTime)
         } else {
-            "未就绪 · 点击进入资产中心在线下载 Geo 规则库"
+            getString(R.string.rules_geo_summary_notready)
         }
     }
 
@@ -257,16 +257,16 @@ class RulesFragment : Fragment() {
     private fun showQuickGeoPresetDialog() {
         val ctx = requireContext()
         val templateNames = arrayOf(
-            "🌟 经典国内外分流 + 去广告 (推荐)",
-            "🇨🇳 白名单模式 (国内直连，其余走代理)",
-            "🛡️ 黑名单模式 (被阻断走代理，其余直连)",
-            "🚫 仅去广告模式 (全直连 + 强效广告拦截)"
+            getString(R.string.tpl_classic),
+            getString(R.string.tpl_whitelist),
+            getString(R.string.tpl_blacklist),
+            getString(R.string.tpl_adsonly)
         )
         val templateDescriptions = arrayOf(
-            "包含: 局域网放行 + 广告/统计拦截 + 海外AI(OpenAI/Claude/Gemini)加速 + 流媒体(YouTube/Netflix/TG)加速 + 国内(GeoSite/GeoIP CN)直连 + 默认代理",
-            "包含: 局域网直连 + 广告拦截 + 国内域名/IP 直连 + 默认走代理 (适合国外未知站点一律加速)",
-            "包含: 广告拦截 + AI 专区代理 + GFWList/海外被墙域名代理 + 默认直连 (适合只翻被墙站点，省流量)",
-            "包含: 全局广告与隐私追踪 SDK 强力丢弃 + 默认直连 (不耗费任何代理流量)"
+            getString(R.string.tpl_classic_desc),
+            getString(R.string.tpl_whitelist_desc),
+            getString(R.string.tpl_blacklist_desc),
+            getString(R.string.tpl_adsonly_desc)
         )
 
         val layout = LinearLayout(ctx).apply {
@@ -275,7 +275,7 @@ class RulesFragment : Fragment() {
         }
 
         val tvDesc = TextView(ctx).apply {
-            text = "支持一键应用 Shadowrocket 级经典规则模板，或单独添加 Geo 标签规则："
+            text = getString(R.string.rules_preset_intro)
             textSize = 13f
             setTextColor(ContextCompat.getColor(ctx, R.color.meow_ink))
             setPadding(0, 0, 0, 16)
@@ -289,7 +289,7 @@ class RulesFragment : Fragment() {
             setPadding(0, 16, 0, 16)
         }
         layout.addView(TextView(ctx).apply {
-            text = "单条规则快速添加 (选择 Tag):"
+            text = getString(R.string.rules_preset_pick_tag)
             textSize = 12f
             setTextColor(ContextCompat.getColor(ctx, R.color.meow_ink_secondary))
         })
@@ -310,7 +310,7 @@ class RulesFragment : Fragment() {
             setPadding(0, 16, 0, 16)
         }
         layout.addView(TextView(ctx).apply {
-            text = "路由动作:"
+            text = getString(R.string.rules_route_action)
             textSize = 12f
             setTextColor(ContextCompat.getColor(ctx, R.color.meow_ink_secondary))
         })
@@ -400,15 +400,15 @@ class RulesFragment : Fragment() {
         }
 
         val conditionTypes = arrayOf(
-            "GEOSITE (域名集标签，如 google, cn)",
-            "GEOIP (IP分类/代码，如 cn, telegram)",
-            "DOMAIN-SUFFIX (域名后缀，如 google.com)",
-            "DOMAIN (完整域名精确匹配)",
-            "DOMAIN-KEYWORD (域名关键词包含)",
-            "DOMAIN-REGEX (正则表达式)",
-            "IP-CIDR (IP/掩码，如 192.168.0.0/16)",
-            "PORT (目标端口，如 443 或 8000-8888)",
-            "PROTOCOL (传输协议，如 tcp / udp)"
+            getString(R.string.cond_geosite),
+            getString(R.string.cond_geoip),
+            getString(R.string.cond_domain_suffix),
+            getString(R.string.cond_domain),
+            getString(R.string.cond_domain_keyword),
+            getString(R.string.cond_domain_regex),
+            getString(R.string.cond_ip_cidr),
+            getString(R.string.cond_port),
+            getString(R.string.cond_protocol)
         )
         val conditionTypeKeys = arrayOf(
             "geosite", "geoip", "domain_suffix", "domain_exact", "domain_keyword",

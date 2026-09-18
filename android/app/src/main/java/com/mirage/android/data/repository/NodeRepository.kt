@@ -12,6 +12,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.InetSocketAddress
 import java.net.Socket
+import com.mirage.android.R
 
 /**
  * 节点数据仓库 (单例 / 统一管理持久化、测活与并发测速)。
@@ -263,7 +264,7 @@ class NodeRepository(private val context: Context) {
                 list[index] = list[index].copy(
                     latencyMs = if (latency >= 0) latency else null,
                     isTesting = false,
-                    testError = if (latency < 0) "不可用" else null
+                    testError = if (latency < 0) context.getString(R.string.node_unreachable) else null
                 )
                 _nodes.value = list
             }
@@ -276,7 +277,7 @@ class NodeRepository(private val context: Context) {
             list[index] = list[index].copy(
                 latencyMs = if (latency >= 0) latency else null,
                 isTesting = false,
-                testError = if (latency < 0) "不可用" else null
+                testError = if (latency < 0) context.getString(R.string.node_unreachable) else null
             )
             _nodes.value = list
         }

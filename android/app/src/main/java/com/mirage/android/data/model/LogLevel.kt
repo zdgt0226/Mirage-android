@@ -10,6 +10,7 @@ package com.mirage.android.data.model
  * - ERROR (4): 仅输出致命错误与异常 (ERROR)
  */
 enum class LogLevel(val label: String, val severity: Int) {
+    // i18n-exempt: label 不用于显示 (筛选芯片文案在 layout 里), 仅作枚举标识
     ALL("全部", -1),
     TRACE("TRACE", 0),
     DEBUG("DEBUG", 1),
@@ -21,7 +22,7 @@ enum class LogLevel(val label: String, val severity: Int) {
         fun parseSeverity(line: String): Int {
             val upper = line.uppercase()
             return when {
-                upper.contains(" ERROR ") || upper.contains("[ERROR]") || upper.contains("FATAL") || upper.contains("EXCEPTION") || upper.contains("FAILED") || upper.contains("失败") -> 4
+                upper.contains(" ERROR ") || upper.contains("[ERROR]") || upper.contains("FATAL") || upper.contains("EXCEPTION") || upper.contains("FAILED") || upper.contains("失败") -> 4 // i18n-exempt: 匹配内核日志原文
                 upper.contains(" WARN ") || upper.contains("[WARN]") || upper.contains("WARNING") -> 3
                 upper.contains(" TRACE ") || upper.contains("[TRACE]") -> 0
                 upper.contains(" DEBUG ") || upper.contains("[DEBUG]") || upper.contains("[TUN-") -> 1

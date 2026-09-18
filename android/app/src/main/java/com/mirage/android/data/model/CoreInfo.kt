@@ -19,6 +19,7 @@ data class CoreInfo(
     val file: File? get() = filePath?.let { File(it) }
 
     val formattedSize: String get() {
+        // i18n-exempt: 内置内核的标识串, 同时进 JSON 持久化; 随语言变化会破坏已存记录
         if (isBuiltin || fileSize <= 0) return "内置 (ROM)"
         return when {
             fileSize >= 1 shl 20 -> "%.2f MB".format(fileSize.toDouble() / (1 shl 20))
@@ -32,12 +33,13 @@ data class CoreInfo(
     companion object {
         const val BUILTIN_ID = "builtin"
 
+        // i18n-exempt: 同上, builtin() 的这几个字段是持久化标识而非界面文案
         fun builtin(version: String = "v0.10.4 (内置)"): CoreInfo {
             return CoreInfo(
                 id = BUILTIN_ID,
-                name = "内置默认内核",
+                name = "内置默认内核", // i18n-exempt
                 version = version,
-                abi = "系统原生",
+                abi = "系统原生", // i18n-exempt
                 filePath = null,
                 sha256 = null,
                 isBuiltin = true

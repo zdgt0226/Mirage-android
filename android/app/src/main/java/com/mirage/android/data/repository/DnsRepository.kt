@@ -29,11 +29,11 @@ class DnsRepository private constructor(context: Context) {
         const val DEFAULT_REMOTE_DNS = "1.1.1.1"
 
         val DOMESTIC_PRESETS = listOf(
-            DnsPreset("阿里 DNS", "223.5.5.5"),
-            DnsPreset("腾讯 DNSPod", "119.29.29.29"),
+            DnsPreset("阿里 DNS", "223.5.5.5"), // i18n-exempt: 无界面使用点, DNS 对话框的预设在 layout 里
+            DnsPreset("腾讯 DNSPod", "119.29.29.29"), // i18n-exempt: 无界面使用点, DNS 对话框的预设在 layout 里
             DnsPreset("114 DNS", "114.114.114.114"),
-            DnsPreset("百度 DNS", "180.76.76.76"),
-            DnsPreset("火山 DNS", "180.184.1.1")
+            DnsPreset("百度 DNS", "180.76.76.76"), // i18n-exempt: 无界面使用点, DNS 对话框的预设在 layout 里
+            DnsPreset("火山 DNS", "180.184.1.1") // i18n-exempt: 无界面使用点, DNS 对话框的预设在 layout 里
         )
 
         val FOREIGN_PRESETS = listOf(

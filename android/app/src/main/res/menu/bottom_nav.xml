@@ -3,17 +3,17 @@
     <item
         android:id="@+id/nav_home"
         android:icon="@drawable/ic_nav_home"
-        android:title="首页" />
+        android:title="@string/nav_home_title" />
     <item
         android:id="@+id/nav_nodes"
         android:icon="@drawable/ic_nav_nodes"
-        android:title="节点" />
+        android:title="@string/nav_nodes_title" />
     <item
         android:id="@+id/nav_rules"
         android:icon="@drawable/ic_nav_rules"
-        android:title="规则" />
+        android:title="@string/nav_rules_title" />
     <item
         android:id="@+id/nav_traffic"
         android:icon="@drawable/ic_nav_traffic"
-        android:title="监控" />
+        android:title="@string/nav_traffic_title" />
 </menu>

@@ -1,5 +1,8 @@
 package com.mirage.android.data.model
 
+import android.content.Context
+import androidx.annotation.StringRes
+import com.mirage.android.R
 import java.util.UUID
 
 /**
@@ -10,19 +13,24 @@ data class RuleCondition(
     val type: String = "domain_suffix",
     val pattern: String = "",
 ) {
-    val typeDisplayName: String get() = when (type.lowercase()) {
-        "geosite" -> "GEOSITE 规则集"
-        "geoip" -> "GEOIP 国家/IP集"
-        "exact", "domain_exact" -> "DOMAIN 精确"
-        "keyword", "domain_keyword" -> "DOMAIN 关键词"
-        "regex", "domain_regex" -> "DOMAIN 正则"
-        "cidr", "ip_cidr" -> "IP-CIDR 段"
-        "port" -> "目标端口"
-        "protocol" -> "传输协议"
-        else -> "DOMAIN 后缀"
+    /**
+     * 返回资源 id 而不是字符串: 这个类没有 Context, 拿不到 getString。
+     * 调用方 (RuleAdapter) 负责解析。
+     */
+    @get:StringRes
+    val typeDisplayNameRes: Int get() = when (type.lowercase()) {
+        "geosite" -> R.string.cond_kind_geosite
+        "geoip" -> R.string.cond_kind_geoip
+        "exact", "domain_exact" -> R.string.cond_kind_domain_exact
+        "keyword", "domain_keyword" -> R.string.cond_kind_domain_keyword
+        "regex", "domain_regex" -> R.string.cond_kind_domain_regex
+        "cidr", "ip_cidr" -> R.string.cond_kind_ip_cidr
+        "port" -> R.string.cond_kind_port
+        "protocol" -> R.string.cond_kind_protocol
+        else -> R.string.cond_kind_domain_suffix
     }
 
-    val displayString: String get() = "$typeDisplayName: $pattern"
+    fun displayString(ctx: Context): String = "${ctx.getString(typeDisplayNameRes)}: $pattern"
 }
 
 /**
@@ -72,32 +80,33 @@ data class Rule(
         if (name.isNotBlank()) name
         else if (pattern.isNotBlank()) pattern
         else if (effectiveConditions.isNotEmpty()) effectiveConditions.first().pattern
+        // displayName 同时用作 RuleRepository 的去重键与 RuleStore 持久化的 name 字段,
+        // 必须与语言无关 —— 一旦随 locale 变化, 切语言就会产生重复规则。
+        // i18n-exempt: 见上
         else "未命名规则"
 
-    val summaryText: String get() =
+    fun summaryText(ctx: Context): String =
         if (effectiveConditions.size <= 1) {
             val first = effectiveConditions.firstOrNull()
-            if (first != null) "${first.typeDisplayName} · ${first.pattern}" else displayName
+            if (first != null) {
+                ctx.getString(R.string.rule_summary_single, ctx.getString(first.typeDisplayNameRes), first.pattern)
+            } else {
+                displayName
+            }
         } else {
-            val op = if (logic.equals("AND", ignoreCase = true)) " 且 " else " 或 "
-            effectiveConditions.joinToString(op) { "${it.typeDisplayName}(${it.pattern})" }
+            // 空格放在代码里: aapt 会剥掉资源值两端的空白, 资源里只存 "且" / "或"
+            val op = " " + ctx.getString(
+                if (logic.equals("AND", ignoreCase = true)) R.string.rule_logic_and_sep else R.string.rule_logic_or_sep
+            ) + " "
+            effectiveConditions.joinToString(op) {
+                ctx.getString(R.string.rule_summary_condition, ctx.getString(it.typeDisplayNameRes), it.pattern)
+            }
         }
 
-    val actionDisplayName: String get() = when (action.lowercase()) {
-        "direct" -> "直连"
-        "block", "reject" -> "拦截"
-        else -> "代理"
-    }
-
-    val kindDisplayName: String get() = when (kind.lowercase()) {
-        "geosite" -> "GEOSITE 规则集"
-        "geoip" -> "GEOIP 国家/IP集"
-        "exact" -> "DOMAIN 精确"
-        "keyword" -> "DOMAIN 关键词"
-        "regex" -> "DOMAIN 正则"
-        "cidr" -> "IP-CIDR 段"
-        "port" -> "目标端口"
-        "protocol" -> "协议"
-        else -> "DOMAIN 后缀"
+    @get:StringRes
+    val actionDisplayNameRes: Int get() = when (action.lowercase()) {
+        "direct" -> R.string.action_direct
+        "block", "reject" -> R.string.action_block
+        else -> R.string.action_proxy
     }
 }

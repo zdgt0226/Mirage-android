@@ -243,10 +243,10 @@ class GeoAssetActivity : AppCompatActivity() {
                 }
 
                 binding.tvGeoDetails.text = buildString {
-                    appendLine("• 当前规则源: ${source.name}")
-                    appendLine("• GeoSite 域名集: ${siteMb} MB (${status.geositeTagCount} 个标签)")
-                    appendLine("• GeoIP 地址集: ${ipMb} MB (${status.geoipCodeCount} 个网段代码)")
-                    appendLine("• 最近更新: ${status.lastUpdateTime}")
+                    appendLine(getString(R.string.geo_stat_source, source.name))
+                    appendLine(getString(R.string.geo_stat_site, siteMb, status.geositeTagCount))
+                    appendLine(getString(R.string.geo_stat_ip, ipMb, status.geoipCodeCount))
+                    appendLine(getString(R.string.geo_stat_updated, status.lastUpdateTime))
                 }
             }
         }
@@ -289,13 +289,13 @@ class GeoAssetActivity : AppCompatActivity() {
             tagAdapter.submitList(currentDisplayList.toList())
 
             val statusText = if (query.isNotEmpty()) {
-                "搜索「$query」共匹配 ${fullFilteredPool.size} 个标签"
+                getString(R.string.geo_search_result, query, fullFilteredPool.size)
             } else when {
-                isFeatured -> "已展示 ${currentDisplayList.size} 个精选高频标签 (可搜索全量 ${allTagList.size} 个)"
-                isChina -> "国内常用标签 (${currentDisplayList.size} 个)"
-                isOverseas -> "境外流行服务标签 (${currentDisplayList.size} 个)"
-                isAds -> "广告拦截与隐私标签 (${currentDisplayList.size} 个)"
-                else -> "全量标签: 已载入 ${currentDisplayList.size}/${fullFilteredPool.size} 个 (向下滑动加载更多)"
+                isFeatured -> getString(R.string.geo_tag_curated, currentDisplayList.size, allTagList.size)
+                isChina -> getString(R.string.geo_tag_cn_n, currentDisplayList.size)
+                isOverseas -> getString(R.string.geo_tag_oversea_n, currentDisplayList.size)
+                isAds -> getString(R.string.geo_tag_ads_n, currentDisplayList.size)
+                else -> getString(R.string.geo_tag_loaded, currentDisplayList.size, fullFilteredPool.size)
             }
             binding.tvTagMatchCount.text = statusText
         }

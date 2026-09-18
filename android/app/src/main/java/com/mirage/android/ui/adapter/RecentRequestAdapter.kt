@@ -67,13 +67,13 @@ class RecentRequestAdapter(
 
             binding.tvOutboundBadge.text = item.outbound
             when (item.outbound.uppercase()) {
-                "PROXY", "隧道代理" -> {
+                "PROXY", "隧道代理" -> { // i18n-exempt: 匹配内核给出的 outbound 取值
                     binding.tvOutboundBadge.setTextColor(Color.parseColor("#007AFF"))
                 }
-                "DIRECT", "直连" -> {
+                "DIRECT", "直连" -> { // i18n-exempt: 匹配内核给出的 outbound 取值
                     binding.tvOutboundBadge.setTextColor(Color.parseColor("#FF9500"))
                 }
-                "BLOCK", "拦截" -> {
+                "BLOCK", "拦截" -> { // i18n-exempt: 匹配内核给出的 outbound 取值
                     binding.tvOutboundBadge.setTextColor(Color.parseColor("#FF3B30"))
                 }
                 else -> {
@@ -90,6 +90,7 @@ class RecentRequestAdapter(
             binding.tvTrafficBytes.text = "↑${item.upFormatted} ↓${item.downFormatted}"
 
             // 状态小圆点
+            // i18n-exempt: 匹配内核给出的 status 取值
             if (item.status.startsWith("Active", ignoreCase = true) || item.status.contains("已连接")) {
                 binding.tvStatusDot.setBackgroundColor(Color.parseColor("#34C759"))
             } else if (item.status.contains("Block", ignoreCase = true) || item.status.contains("Timeout", ignoreCase = true) || item.status.contains("Fail", ignoreCase = true)) {

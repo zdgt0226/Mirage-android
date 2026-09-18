@@ -123,9 +123,9 @@ class HomeFragment : Fragment() {
                 launch {
                     viewModel.selectedNode.collect { node ->
                         binding.currentNode.text = if (node != null) {
-                            "节点: ${node.displayName}"
+                            getString(R.string.home_node_fmt, node.displayName)
                         } else {
-                            "节点: (无) → 点击添加"
+                            getString(R.string.home_no_node)
                         }
                     }
                 }
@@ -134,14 +134,17 @@ class HomeFragment : Fragment() {
                         binding.upRate.text = stats.upRateFormatted
                         binding.downRate.text = stats.downRateFormatted
                         binding.totalFlow.text =
-                            "累计: ↑${stats.upTotalFormatted} / ↓${stats.downTotalFormatted}"
+                            getString(R.string.home_total_fmt, stats.upTotalFormatted, stats.downTotalFormatted)
                         binding.connsInfo.text =
-                            "连接: ${stats.tcpConns + stats.udpFlows}"
+                            getString(R.string.home_conns_fmt, stats.tcpConns + stats.udpFlows)
                         // 今日/本月用量 (持久化统计)
                         val today = com.mirage.android.core.TrafficStatsStore.getToday(requireContext())
                         val month = com.mirage.android.core.TrafficStatsStore.getThisMonth(requireContext())
-                        binding.todayUsage.text =
-                            "今日用量: ↑${fmtBytes(today.first.toDouble())} / ↓${fmtBytes(today.second.toDouble())} · 本月: ↑${fmtBytes(month.first.toDouble())} / ↓${fmtBytes(month.second.toDouble())}"
+                        binding.todayUsage.text = getString(
+                            R.string.home_usage_fmt,
+                            fmtBytes(today.first.toDouble()), fmtBytes(today.second.toDouble()),
+                            fmtBytes(month.first.toDouble()), fmtBytes(month.second.toDouble())
+                        )
                     }
                 }
                 launch {

@@ -108,7 +108,7 @@ class TunConfigDialog(
             vpnRepo.setBypassLanEnabled(isChecked)
             Toast.makeText(
                 context,
-                if (isChecked) "已开启绕过局域网 (局域网设备/投屏/打印机原生直连，重连生效)" else "已关闭绕过局域网 (全局接管私有网段，重连生效)",
+                context.getString(if (isChecked) R.string.tun_lan_on else R.string.tun_lan_off),
                 Toast.LENGTH_SHORT
             ).show()
         }
@@ -117,7 +117,7 @@ class TunConfigDialog(
             vpnRepo.setIpv6Enabled(isChecked)
             Toast.makeText(
                 context,
-                if (isChecked) "已开启 IPv6 路由接管 (防 5G 旁路泄露，重连生效)" else "已关闭 IPv6 路由接管 (纯 IPv4 模式，重连生效)",
+                context.getString(if (isChecked) R.string.tun_ipv6_on else R.string.tun_ipv6_off),
                 Toast.LENGTH_SHORT
             ).show()
         }
@@ -126,7 +126,7 @@ class TunConfigDialog(
             vpnRepo.setBlockQuic(isChecked)
             Toast.makeText(
                 context,
-                if (isChecked) "已开启海外 QUIC 屏蔽 (国内正常放行，海外促使 HTTP/2 秒级降级)" else "已放行全局 QUIC 流量",
+                context.getString(if (isChecked) R.string.tun_quic_on else R.string.tun_quic_off),
                 Toast.LENGTH_SHORT
             ).show()
         }
@@ -135,7 +135,7 @@ class TunConfigDialog(
             vpnRepo.setUdpMux(isChecked)
             Toast.makeText(
                 context,
-                if (isChecked) "已启用 UDP Mux 多路复用 (4条共享隧道并发)" else "已关闭 UDP Mux (传统单流单隧道)",
+                context.getString(if (isChecked) R.string.tun_mux_on else R.string.tun_mux_off),
                 Toast.LENGTH_SHORT
             ).show()
         }
@@ -157,14 +157,14 @@ class TunConfigDialog(
         binding.btnSave.setOnClickListener {
             val mtu = binding.etMtu.text?.toString()?.toIntOrNull()
             if (mtu == null || mtu !in 1280..1500) {
-                binding.tilMtu.error = "MTU 必须在 1280 ~ 1500 之间"
+                binding.tilMtu.error = context.getString(R.string.tun_mtu_range_error)
                 return@setOnClickListener
             }
             binding.tilMtu.error = null
 
             val idle = binding.etTcpIdle.text?.toString()?.toIntOrNull()
             if (idle == null || idle !in 60..1800) {
-                binding.tilTcpIdle.error = "空闲超时必须在 60 ~ 1800 秒之间"
+                binding.tilTcpIdle.error = context.getString(R.string.tun_idle_range_error)
                 return@setOnClickListener
             }
             binding.tilTcpIdle.error = null

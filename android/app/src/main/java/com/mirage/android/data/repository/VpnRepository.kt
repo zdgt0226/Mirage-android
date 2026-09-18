@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import com.mirage.android.R
 
 /**
  * VPN 核心连接状态与遥测数据仓库。
@@ -224,7 +225,7 @@ class VpnRepository(private val context: Context) {
     fun startVpn() {
         val selected = nodeRepo.getSelectedNode()
         if (selected == null) {
-            _vpnState.value = VpnState.Error("请先选择或添加节点")
+            _vpnState.value = VpnState.Error(context.getString(R.string.select_node_first))
             return
         }
 

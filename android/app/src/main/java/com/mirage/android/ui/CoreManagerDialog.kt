@@ -199,7 +199,7 @@ class CoreManagerDialog(
                         if (activeCore.id == existing.id) {
                             Toast.makeText(
                                 context,
-                                "当前已是最新内核版本 (${latest.tagName})\n无需重复下载",
+                                context.getString(R.string.core_already_latest, latest.tagName),
                                 Toast.LENGTH_SHORT
                             ).show()
                         } else {
@@ -209,7 +209,7 @@ class CoreManagerDialog(
                             onCoreChanged()
                             Toast.makeText(
                                 context,
-                                "已在本地找到已下载的最新内核 (${latest.tagName})\n已为你自动切换激活 (免重复下载)",
+                                context.getString(R.string.core_found_local, latest.tagName),
                                 Toast.LENGTH_LONG
                             ).show()
                         }
@@ -274,7 +274,7 @@ class CoreManagerDialog(
 
             val result = context.contentResolver.openInputStream(uri)?.use { stream ->
                 coreManager.importCore(stream, displayName)
-            } ?: throw IllegalArgumentException("无法打开所选文件")
+            } ?: throw IllegalArgumentException(context.getString(R.string.core_cannot_open_file))
             if (result.isSuccess) {
                 val core = result.getOrThrow()
                 coreManager.setActiveCore(core.id)

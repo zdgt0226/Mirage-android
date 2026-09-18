@@ -19,7 +19,10 @@ data class ConnectionInfo(
 ) {
     val upFormatted: String get() = formatBytes(upBytes)
     val downFormatted: String get() = formatBytes(downBytes)
+    // i18n-exempt: 与内核给出的 status / outbound 原文比较, 随语言变化就匹配不上
     val isClosed: Boolean get() = status == "已断开"
+
+    // i18n-exempt: 同上
     val isDirect: Boolean get() = outbound.contains("直连")
 
     companion object {
@@ -28,7 +31,9 @@ data class ConnectionInfo(
                 id = json.optLong("id", 0),
                 protocol = json.optString("protocol", "TCP"),
                 target = json.optString("target", "-"),
+                // i18n-exempt: 内核 JSON 缺字段时的回退值, 要与内核用词一致
                 outbound = json.optString("outbound", "隧道代理"),
+                // i18n-exempt: 同上
                 status = json.optString("status", "已连接"),
                 upBytes = json.optLong("up_bytes", 0),
                 downBytes = json.optLong("down_bytes", 0),

@@ -179,12 +179,8 @@ class NodesFragment : Fragment() {
     private fun choosePoolSize() {
         val sizes = intArrayOf(1, 4, 8, 16, 32, 64)
         val items = arrayOf(
-            "1 (低功耗 / 单路)",
-            "4 (轻量 / 省电)",
-            "8 (标准推荐 / 兼顾性能)",
-            "16 (高并发 / 极速浏览)",
-            "32 (超快响应 / 大带宽)",
-            "64 (极限并发)"
+            getString(R.string.pool_1), getString(R.string.pool_4), getString(R.string.pool_8),
+            getString(R.string.pool_16), getString(R.string.pool_32), getString(R.string.pool_64)
         )
         val currentSize = viewModel.poolSize.value
         val currentIdx = sizes.indexOf(currentSize).coerceAtLeast(2)
@@ -232,34 +228,34 @@ class NodesFragment : Fragment() {
             setPadding(16, 16, 16, 16)
         }
 
-        val nameInput = createField("节点名称 (可选，如 香港 01)", existing?.name ?: "")
+        val nameInput = createField(getString(R.string.node_name_hint), existing?.name ?: "")
 
         val radioGroup = RadioGroup(ctx).apply {
             orientation = RadioGroup.HORIZONTAL
             setPadding(0, 10, 0, 10)
         }
         val radioLink = RadioButton(ctx).apply {
-            text = "粘贴链接"
+            text = getString(R.string.node_tab_paste)
             isChecked = true
             id = View.generateViewId()
         }
         val radioManual = RadioButton(ctx).apply {
-            text = "手动填写"
+            text = getString(R.string.node_tab_manual)
             id = View.generateViewId()
         }
         radioGroup.addView(radioLink)
         radioGroup.addView(radioManual)
 
-        val linkInput = createField("mirage://密码@host:端口?sni=www.apple.com", existing?.uri ?: "")
+        val linkInput = createField(getString(R.string.node_hint), existing?.uri ?: "")
 
         val manualBox = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
         }
-        val serverInput = createField("服务器 (IP 或域名)", existing?.server ?: "")
-        val portInput = createField("端口 (默认 443)", existing?.port ?: "443")
-        val pwdInput = createField("密码", existing?.password ?: "")
-        val sniInput = createField("SNI 伪装域名 (如 www.apple.com)", existing?.sni ?: "www.apple.com")
+        val serverInput = createField(getString(R.string.node_server_hint), existing?.server ?: "")
+        val portInput = createField(getString(R.string.node_port_hint), existing?.port ?: "443")
+        val pwdInput = createField(getString(R.string.node_password_hint), existing?.password ?: "")
+        val sniInput = createField(getString(R.string.node_sni_hint), existing?.sni ?: "www.apple.com")
 
         manualBox.addView(serverInput)
         manualBox.addView(portInput)
