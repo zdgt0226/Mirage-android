@@ -51,14 +51,15 @@ class NodeAdapter(
             binding.tvServerPort.text = "${node.server}:${node.port} (SNI: ${node.sni})"
             binding.radioSelected.isChecked = isSelected
 
-            // 选中高亮边框和背景
-            if (isSelected) {
-                binding.cardNode.strokeColor = ContextCompat.getColor(ctx, R.color.meow_blue)
-                binding.cardNode.setCardBackgroundColor(Color.parseColor("#0A0077CC"))
-            } else {
-                binding.cardNode.strokeColor = ContextCompat.getColor(ctx, R.color.meow_outline)
-                binding.cardNode.setCardBackgroundColor(Color.WHITE)
-            }
+            // 选中高亮边框和背景。
+            // 都走主题色: 原先选中态是 #0A0077CC (alpha 只有 4%, 等于没有), 未选中态
+            // 写死 Color.WHITE —— 深色模式下就是一张白卡贴在深色面板上。
+            binding.cardNode.strokeColor = ContextCompat.getColor(
+                ctx, if (isSelected) R.color.meow_blue else R.color.meow_outline
+            )
+            binding.cardNode.setCardBackgroundColor(
+                ContextCompat.getColor(ctx, if (isSelected) R.color.node_row_selected else R.color.node_row_default)
+            )
 
             // 延迟状态显示
             when {

@@ -23,4 +23,8 @@
     <color name="meow_connected_tint">#EAF8EF</color><!-- 已连接柔和安全绿底 -->
     <color name="meow_amber_tint">#FFF8EB</color>    <!-- 告警柔和琥珀底 -->
     <color name="meow_surface_bento">#F8FAFC</color> <!-- Bento 卡片浅色质感底 -->
+    <!-- 节点列表: 选中项的淡色高亮。原先写死 #0A0077CC (4% 不透明度, 几乎看不见)
+         与 Color.WHITE (深色模式下会是白卡片贴在深色面板上)。 -->
+    <color name="node_row_selected">#E8F1FC</color>
+    <color name="node_row_default">#FFFFFF</color>
 </resources>

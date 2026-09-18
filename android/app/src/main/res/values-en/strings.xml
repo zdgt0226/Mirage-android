@@ -108,7 +108,6 @@
     <string name="save_settings">Save</string>
     <string name="tun_mtu_hint">Custom MTU (1280–1500)</string>
     <string name="tun_idle_hint">Custom timeout in seconds (60–1800)</string>
-    <string name="home_subtitle">Surge-style secure tunnel · native Rust engine</string>
     <string name="mode_rule">Rules</string>
     <string name="mode_global">Global</string>
     <string name="mode_direct">Direct</string>
@@ -201,7 +200,6 @@
     <string name="status_disconnecting">Disconnecting…</string>
     <string name="disconnecting_btn">Disconnecting…</string>
     <string name="status_error">Connection error: %1$s</string>
-    <string name="home_build_subtitle">Secure tunnel · build %1$s (#%2$s)</string>
     <string name="home_tun_summary">MTU %1$s · batch %2$s · %3$s · %4$s · %5$s</string>
     <string name="version_dialog_title">Version and runtime</string>
     <string name="manage_core">Manage core</string>
@@ -363,9 +361,6 @@
     <string name="tun_sum_quic_pass">QUIC allowed</string>
     <string name="tun_sum_mux_on">UDP mux</string>
     <string name="tun_sum_mux_off">single UDP</string>
-    <string name="core_tag_builtin">bundled</string>
-    <string name="core_tag_custom">custom</string>
-    <string name="home_version_badge">v%1$s · %2$s</string>
     <string name="home_node_fmt">Node: %1$s</string>
     <string name="home_total_fmt">Total: ↑%1$s / ↓%2$s</string>
     <string name="home_conns_fmt">Connections: %1$s</string>

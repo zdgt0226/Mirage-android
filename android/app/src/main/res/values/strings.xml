@@ -109,7 +109,6 @@
     <string name="save_settings">保存设置</string>
     <string name="tun_mtu_hint">自定义 MTU (1280 ~ 1500)</string>
     <string name="tun_idle_hint">自定义超时秒数 (60 ~ 1800 秒)</string>
-    <string name="home_subtitle">Surge 架构安全隧道 · Rust 原生引擎</string>
     <string name="mode_rule">规则分流</string>
     <string name="mode_global">全局代理</string>
     <string name="mode_direct">直接连接</string>
@@ -202,7 +201,6 @@
     <string name="status_disconnecting">正在断开连接…</string>
     <string name="disconnecting_btn">断开中…</string>
     <string name="status_error">连接异常: %1$s</string>
-    <string name="home_build_subtitle">安全隧道代理 · Build %1$s (#%2$s)</string>
     <string name="home_tun_summary">MTU: %1$s · 批处理: %2$s · %3$s · %4$s · %5$s</string>
     <string name="version_dialog_title">版本与运行环境详情</string>
     <string name="manage_core">管理内核</string>
@@ -364,9 +362,6 @@
     <string name="tun_sum_quic_pass">放行QUIC</string>
     <string name="tun_sum_mux_on">UDP Mux</string>
     <string name="tun_sum_mux_off">单流UDP</string>
-    <string name="core_tag_builtin">内置</string>
-    <string name="core_tag_custom">自定义</string>
-    <string name="home_version_badge">v%1$s · %2$s</string>
     <string name="home_node_fmt">节点: %1$s</string>
     <string name="home_total_fmt">累计: ↑%1$s / ↓%2$s</string>
     <string name="home_conns_fmt">连接: %1$s</string>

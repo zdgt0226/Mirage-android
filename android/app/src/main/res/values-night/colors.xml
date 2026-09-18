@@ -12,4 +12,6 @@
     <color name="meow_download">#2CB5FF</color>
     <color name="meow_outline">#2C4A60</color>
     <color name="meow_disconnected">#5A7484</color>
+    <color name="node_row_selected">#1B3348</color>
+    <color name="node_row_default">#152430</color>
 </resources>

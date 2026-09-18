@@ -11,6 +11,7 @@
     android:focusable="true"
     app:cardCornerRadius="14dp"
     app:cardElevation="0dp"
+    app:materialThemeOverlay="@style/MirageNoElevationOverlay"
     app:strokeColor="@color/meow_outline"
     app:strokeWidth="1dp">
 

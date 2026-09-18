@@ -212,101 +212,17 @@ class NodesFragment : Fragment() {
             .show()
     }
 
+    /** 表单本体在 [NodeEditDialog], 首页的节点选择层用的是同一套。 */
     private fun showNodeDialog(index: Int?) {
         val existing = index?.let { viewModel.nodes.value.getOrNull(it) }
-        val ctx = requireContext()
-
-        val layout = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(40, 20, 40, 10)
-        }
-
-        fun createField(hint: String, value: String) = EditText(ctx).apply {
-            this.hint = hint
-            setText(value)
-            textSize = 14f
-            setPadding(16, 16, 16, 16)
-        }
-
-        val nameInput = createField(getString(R.string.node_name_hint), existing?.name ?: "")
-
-        val radioGroup = RadioGroup(ctx).apply {
-            orientation = RadioGroup.HORIZONTAL
-            setPadding(0, 10, 0, 10)
-        }
-        val radioLink = RadioButton(ctx).apply {
-            text = getString(R.string.node_tab_paste)
-            isChecked = true
-            id = View.generateViewId()
-        }
-        val radioManual = RadioButton(ctx).apply {
-            text = getString(R.string.node_tab_manual)
-            id = View.generateViewId()
-        }
-        radioGroup.addView(radioLink)
-        radioGroup.addView(radioManual)
-
-        val linkInput = createField(getString(R.string.node_hint), existing?.uri ?: "")
-
-        val manualBox = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            visibility = View.GONE
-        }
-        val serverInput = createField(getString(R.string.node_server_hint), existing?.server ?: "")
-        val portInput = createField(getString(R.string.node_port_hint), existing?.port ?: "443")
-        val pwdInput = createField(getString(R.string.node_password_hint), existing?.password ?: "")
-        val sniInput = createField(getString(R.string.node_sni_hint), existing?.sni ?: "www.apple.com")
-
-        manualBox.addView(serverInput)
-        manualBox.addView(portInput)
-        manualBox.addView(pwdInput)
-        manualBox.addView(sniInput)
-
-        radioGroup.setOnCheckedChangeListener { _, checkedId ->
-            val manual = checkedId == radioManual.id
-            manualBox.visibility = if (manual) View.VISIBLE else View.GONE
-            linkInput.visibility = if (manual) View.GONE else View.VISIBLE
-        }
-
-        layout.addView(nameInput)
-        layout.addView(radioGroup)
-        layout.addView(linkInput)
-        layout.addView(manualBox)
-
-        AlertDialog.Builder(ctx)
-            .setTitle(if (index == null) R.string.nodes_add else R.string.node_edit_title)
-            .setView(layout)
-            .setPositiveButton(R.string.save) { _, _ ->
-                val uri: String
-                if (radioLink.isChecked) {
-                    uri = linkInput.text.toString().trim()
-                    if (!uri.startsWith("mirage://")) {
-                        Toast.makeText(ctx, R.string.node_uri_prefix_error, Toast.LENGTH_LONG).show()
-                        return@setPositiveButton
-                    }
-                } else {
-                    val server = serverInput.text.toString().trim()
-                    val port = portInput.text.toString().trim().ifEmpty { "443" }
-                    val pwd = pwdInput.text.toString()
-                    val sni = sniInput.text.toString().trim().ifEmpty { "www.apple.com" }
-
-                    if (server.isEmpty() || pwd.isEmpty()) {
-                        Toast.makeText(ctx, R.string.node_required_fields, Toast.LENGTH_LONG).show()
-                        return@setPositiveButton
-                    }
-                    uri = Node.uriOf(server, port, pwd, sni)
-                }
-
-                val name = nameInput.text.toString().trim()
-                if (index == null) {
-                    val newIdx = viewModel.addNode(uri, name)
-                    viewModel.selectNode(newIdx)
-                } else {
-                    viewModel.updateNode(index, uri, name)
-                }
+        NodeEditDialog.show(requireContext(), existing) { uri, name ->
+            if (index == null) {
+                val newIdx = viewModel.addNode(uri, name)
+                viewModel.selectNode(newIdx)
+            } else {
+                viewModel.updateNode(index, uri, name)
             }
-            .setNegativeButton(R.string.cancel, null)
-            .show()
+        }
     }
 
     override fun onDestroyView() {

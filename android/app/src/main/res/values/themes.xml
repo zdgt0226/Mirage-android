@@ -27,6 +27,19 @@
         <item name="android:editTextStyle">@style/MirageEditText</item>
     </style>
 
+    <!--
+        关掉 Material3 的 elevation overlay。
+        该 overlay 只在填充色**恰好等于 colorSurface** 时生效, 而 colorSurface 就是
+        meow_card (#FFFFFF) —— 节点卡片未选中态正好是这个值。卡片自己 cardElevation=0,
+        但 overlay 算的是父级绝对 elevation: 在「节点」Tab 里是 0 所以看不出来, 放进
+        BottomSheet 后父级抬得很高, 白卡片被叠成 #DEECF7 (colorPrimary 约 15%),
+        看上去像是未选中的那一行被高亮了。选中色 #E8F1FC 不等于 colorSurface, 反而
+        不受影响, 于是两行的视觉恰好反过来。真机取像素值定位。
+    -->
+    <style name="MirageNoElevationOverlay">
+        <item name="elevationOverlayEnabled">false</item>
+    </style>
+
     <style name="MirageCard" parent="Widget.MaterialComponents.CardView">
         <item name="cardCornerRadius">14dp</item>
         <item name="cardElevation">0dp</item>

@@ -205,11 +205,8 @@ class MainActivity : AppCompatActivity() {
                 // 打开文件选择器选择 .so 文件或任意二进制
                 pickSoLauncher.launch("*/*")
             },
-            onCoreChanged = {
-                // 刷新首页内核显示
-                val homeFragment = supportFragmentManager.findFragmentByTag("f0") as? HomeFragment
-                homeFragment?.updateVersionBadge()
-            }
+            // 版本/内核信息现在只在设置页显示, 首页没有要刷新的东西
+            onCoreChanged = { }
         )
         coreManagerDialog?.show()
     }

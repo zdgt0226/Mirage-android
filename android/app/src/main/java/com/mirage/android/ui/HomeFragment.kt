@@ -30,6 +30,9 @@ class HomeFragment : Fragment() {
 
     private val viewModel: HomeViewModel by activityViewModels()
 
+    /** 首页的「+」和二级选择层都要动节点, 与 NodePickerSheet 共用同一实例。 */
+    private val nodesViewModel: com.mirage.android.ui.viewmodel.NodesViewModel by activityViewModels()
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -41,8 +44,6 @@ class HomeFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-
-        updateVersionBadge()
 
         binding.btnSettings.setOnClickListener {
             com.mirage.android.util.Haptic.tap(it)
@@ -58,9 +59,18 @@ class HomeFragment : Fragment() {
             }
         }
 
+        // 就地弹出二级选择层, 不再跳到「节点」Tab —— 选完不用自己切回来
         binding.nodeSelectCard.setOnClickListener {
             com.mirage.android.util.Haptic.tap(it)
-            (activity as? MainActivity)?.navigateToTab(1)
+            NodePickerSheet().show(parentFragmentManager, NodePickerSheet.TAG)
+        }
+
+        binding.btnAddNode.setOnClickListener {
+            com.mirage.android.util.Haptic.tap(it)
+            NodeEditDialog.show(requireContext(), null) { uri, name ->
+                val idx = nodesViewModel.addNode(uri, name)
+                nodesViewModel.selectNode(idx)
+            }
         }
 
         setupOutboundModeToggle()
@@ -226,16 +236,7 @@ class HomeFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
-        updateVersionBadge()
         viewModel.checkCurrentState()
-    }
-
-    fun updateVersionBadge() {
-        val ctx = context ?: return
-        val activeCore = com.mirage.android.core.CoreManager.getInstance(ctx).getActiveCore()
-        val coreTag = getString(if (activeCore.isBuiltin) R.string.core_tag_builtin else R.string.core_tag_custom)
-        _binding?.tvVersion?.text = getString(R.string.home_version_badge, com.mirage.android.BuildConfig.VERSION_NAME, coreTag)
-        _binding?.tvAppSubtitle?.text = getString(R.string.home_build_subtitle, com.mirage.android.BuildConfig.BUILD_TIME, com.mirage.android.BuildConfig.VERSION_CODE)
     }
 
     private fun fmtBytes(b: Double): String = when {
