@@ -45,7 +45,7 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="规则名称 (可选备注):"
+                android:text="@string/rule_name_label"
                 android:textColor="@color/meow_ink_secondary"
                 android:textSize="12sp"
                 android:textStyle="bold" />
@@ -56,7 +56,7 @@
                 android:layout_height="44dp"
                 android:layout_marginTop="6dp"
                 android:background="@drawable/badge_latency_bg"
-                android:hint="如: Google 全家桶加速 / 公司内网"
+                android:hint="@string/rule_name_hint"
                 android:imeOptions="actionNext"
                 android:inputType="text"
                 android:paddingHorizontal="14dp"
@@ -68,7 +68,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="14dp"
-                android:text="分流目标动作:"
+                android:text="@string/rule_action_label"
                 android:textColor="@color/meow_ink_secondary"
                 android:textSize="12sp"
                 android:textStyle="bold" />
@@ -88,7 +88,7 @@
                     android:layout_width="0dp"
                     android:layout_height="42dp"
                     android:layout_weight="1"
-                    android:text="🚀 代理"
+                    android:text="@string/rule_action_proxy"
                     android:textSize="12sp"
                     android:textStyle="bold" />
 
@@ -98,7 +98,7 @@
                     android:layout_width="0dp"
                     android:layout_height="42dp"
                     android:layout_weight="1"
-                    android:text="⚡ 直连"
+                    android:text="@string/rule_action_direct"
                     android:textSize="12sp"
                     android:textStyle="bold" />
 
@@ -108,7 +108,7 @@
                     android:layout_width="0dp"
                     android:layout_height="42dp"
                     android:layout_weight="1"
-                    android:text="🚫 拦截"
+                    android:text="@string/rule_action_block"
                     android:textSize="12sp"
                     android:textStyle="bold" />
             </com.google.android.material.button.MaterialButtonToggleGroup>
@@ -118,7 +118,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="14dp"
-                android:text="多条件匹配逻辑:"
+                android:text="@string/rule_logic_label"
                 android:textColor="@color/meow_ink_secondary"
                 android:textSize="12sp"
                 android:textStyle="bold" />
@@ -138,7 +138,7 @@
                     android:layout_width="0dp"
                     android:layout_height="40dp"
                     android:layout_weight="1"
-                    android:text="OR (满足任一即可)"
+                    android:text="@string/rule_logic_or"
                     android:textSize="11sp" />
 
                 <com.google.android.material.button.MaterialButton
@@ -147,7 +147,7 @@
                     android:layout_width="0dp"
                     android:layout_height="40dp"
                     android:layout_weight="1"
-                    android:text="AND (必须全部满足)"
+                    android:text="@string/rule_logic_and"
                     android:textSize="11sp" />
             </com.google.android.material.button.MaterialButtonToggleGroup>
 
@@ -163,7 +163,7 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="匹配条件清单:"
+                    android:text="@string/rule_conditions_label"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="12sp"
                     android:textStyle="bold" />
@@ -173,7 +173,7 @@
                     style="@style/Widget.Material3.Button.TextButton"
                     android:layout_width="wrap_content"
                     android:layout_height="36dp"
-                    android:text="+ 添加条件"
+                    android:text="@string/rule_add_condition"
                     android:textSize="12sp"
                     android:textStyle="bold" />
             </LinearLayout>
@@ -204,7 +204,7 @@
             android:layout_width="0dp"
             android:layout_height="46dp"
             android:layout_weight="1"
-            android:text="取消"
+            android:text="@string/cancel"
             android:textSize="14sp" />
 
         <com.google.android.material.button.MaterialButton
@@ -213,7 +213,7 @@
             android:layout_height="46dp"
             android:layout_marginStart="12dp"
             android:layout_weight="1.6"
-            android:text="保存并生效"
+            android:text="@string/save_and_enable"
             android:textSize="14sp"
             android:textStyle="bold" />
     </LinearLayout>

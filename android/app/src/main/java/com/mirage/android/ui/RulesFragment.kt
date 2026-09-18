@@ -77,10 +77,10 @@ class RulesFragment : Fragment() {
             onEdit = { index, _ -> showRuleDialog(index) },
             onDelete = { index, rule ->
                 AlertDialog.Builder(requireContext())
-                    .setTitle("删除规则")
-                    .setMessage("确定要删除规则「${rule.displayName}」吗？")
-                    .setPositiveButton("删除") { _, _ -> viewModel.deleteRule(index) }
-                    .setNegativeButton("取消", null)
+                    .setTitle(R.string.rule_delete_title)
+                    .setMessage(getString(R.string.rule_delete_message, rule.displayName))
+                    .setPositiveButton(R.string.delete) { _, _ -> viewModel.deleteRule(index) }
+                    .setNegativeButton(R.string.cancel, null)
                     .show()
             },
             onToggleEnabled = { index, _, _ ->
@@ -175,7 +175,7 @@ class RulesFragment : Fragment() {
         binding.btnResetHits.setOnClickListener {
             com.mirage.android.util.Haptic.tap(it)
             viewModel.resetRuleHits()
-            Toast.makeText(requireContext(), "已清空规则命中统计", Toast.LENGTH_SHORT).show()
+            Toast.makeText(requireContext(), R.string.rules_stats_cleared, Toast.LENGTH_SHORT).show()
         }
 
         binding.defaultActionBtn.setOnClickListener {
@@ -186,7 +186,7 @@ class RulesFragment : Fragment() {
         binding.applyRulesBtn.setOnClickListener {
             com.mirage.android.util.Haptic.confirm(it)
             val ok = viewModel.applyRules()
-            Toast.makeText(requireContext(), if (ok) "分流规则已立即生效" else "规则应用失败", Toast.LENGTH_SHORT).show()
+            Toast.makeText(requireContext(), if (ok) R.string.rules_applied else R.string.rules_apply_failed, Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -194,10 +194,10 @@ class RulesFragment : Fragment() {
         val ctx = context ?: return
         val config = com.mirage.android.core.AppFilterStore.getConfig(ctx)
         if (!config.enabled) {
-            binding.tvAppFilterSummary.text = "未启用 (默认全部应用由 VPN 规则接管)"
+            binding.tvAppFilterSummary.text = getString(R.string.rules_perapp_off)
         } else {
-            val modeText = if (config.mode == com.mirage.android.data.model.AppFilterMode.ALLOW) "白名单模式" else "黑名单模式"
-            binding.tvAppFilterSummary.text = "已启用 · $modeText (${config.selectedPackages.size} 款应用)"
+            val modeText = getString(if (config.mode == com.mirage.android.data.model.AppFilterMode.ALLOW) R.string.perapp_mode_whitelist_short else R.string.perapp_mode_blacklist_short)
+            binding.tvAppFilterSummary.text = getString(R.string.rules_perapp_on, modeText, config.selectedPackages.size)
         }
     }
 
@@ -223,7 +223,7 @@ class RulesFragment : Fragment() {
                 }
                 launch {
                     viewModel.defaultAction.collect { act ->
-                        binding.defaultActionBtn.text = "默认: ${if (act == "direct") "直连" else "代理"}"
+                        binding.defaultActionBtn.text = getString(R.string.rules_default_fmt, getString(if (act == "direct") R.string.action_direct else R.string.action_proxy))
                     }
                 }
                 // 周期性拉取内核命中统计
@@ -238,16 +238,16 @@ class RulesFragment : Fragment() {
     }
 
     private fun chooseDefaultAction() {
-        val items = arrayOf("代理 (默认)", "直连 (默认)")
+        val items = arrayOf(getString(R.string.rules_default_proxy_item), getString(R.string.rules_default_direct_item))
         val current = if (viewModel.defaultAction.value == "direct") 1 else 0
 
         AlertDialog.Builder(requireContext())
-            .setTitle("默认策略 (未匹配任何规则时)")
+            .setTitle(R.string.rules_default_title)
             .setSingleChoiceItems(items, current) { dialog, which ->
                 viewModel.setDefaultAction(if (which == 0) "proxy" else "direct")
                 dialog.dismiss()
             }
-            .setNegativeButton("取消", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
@@ -303,7 +303,7 @@ class RulesFragment : Fragment() {
         }
         layout.addView(tvTagDesc)
 
-        val actions = arrayOf("直连 (direct)", "代理 (proxy)", "拦截 (block)")
+        val actions = arrayOf(getString(R.string.rule_action_direct_item), getString(R.string.rule_action_proxy_item), getString(R.string.rule_action_block_item))
         val actionKeys = arrayOf("direct", "proxy", "block")
         val actionSpinner = Spinner(ctx).apply {
             adapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_dropdown_item, actions)
@@ -333,9 +333,9 @@ class RulesFragment : Fragment() {
         }
 
         AlertDialog.Builder(ctx)
-            .setTitle("分流预设与模板")
+            .setTitle(R.string.rules_preset_title)
             .setView(layout)
-            .setPositiveButton("添加此单条规则") { _, _ ->
+            .setPositiveButton(R.string.rules_preset_add_one) { _, _ ->
                 val pos = presetSpinner.selectedItemPosition
                 if (pos in GeoManager.PRESET_GEO_TAGS.indices) {
                     val preset = GeoManager.PRESET_GEO_TAGS[pos]
@@ -351,20 +351,20 @@ class RulesFragment : Fragment() {
                         action = action
                     )
                     viewModel.saveRule(null, rule)
-                    Toast.makeText(ctx, "已添加规则: ${preset.kind}:${preset.tag} -> $action", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(ctx, getString(R.string.rules_preset_added, "${preset.kind}:${preset.tag}", action), Toast.LENGTH_SHORT).show()
                 }
             }
-            .setNeutralButton("一键切换分流模板") { _, _ ->
+            .setNeutralButton(R.string.rules_template_switch) { _, _ ->
                 AlertDialog.Builder(ctx)
-                    .setTitle("选择分流方案模板")
+                    .setTitle(R.string.rules_template_title)
                     .setItems(templateNames) { _, which ->
                         viewModel.applyPresetTemplate(which)
-                        Toast.makeText(ctx, "已应用模板: ${templateNames[which]}", Toast.LENGTH_LONG).show()
+                        Toast.makeText(ctx, getString(R.string.rules_template_applied, templateNames[which]), Toast.LENGTH_LONG).show()
                     }
-                    .setNegativeButton("取消", null)
+                    .setNegativeButton(R.string.cancel, null)
                     .show()
             }
-            .setNegativeButton("取消", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
@@ -382,7 +382,7 @@ class RulesFragment : Fragment() {
         dialog.behavior.state = BottomSheetBehavior.STATE_EXPANDED
         dialog.behavior.skipCollapsed = true
 
-        dBinding.tvDialogTitle.text = if (index == null) "添加分流规则" else "编辑分流规则"
+        dBinding.tvDialogTitle.text = getString(if (index == null) R.string.rule_dialog_add else R.string.rule_dialog_edit)
         dBinding.etRuleName.setText(existing?.name ?: "")
 
         // 动作选择
@@ -449,7 +449,7 @@ class RulesFragment : Fragment() {
                         conditionsList.removeAt(cIdx)
                         renderConditions()
                     } else {
-                        Toast.makeText(ctx, "至少需保留一个匹配条件", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(ctx, R.string.rule_need_one_condition, Toast.LENGTH_SHORT).show()
                     }
                 }
 
@@ -471,7 +471,7 @@ class RulesFragment : Fragment() {
         dBinding.btnSave.setOnClickListener {
             val validConds = conditionsList.filter { it.pattern.isNotBlank() }
             if (validConds.isEmpty()) {
-                Toast.makeText(ctx, "请至少填写一个有效的匹配参数", Toast.LENGTH_SHORT).show()
+                Toast.makeText(ctx, R.string.rule_need_valid_param, Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
 
@@ -498,7 +498,7 @@ class RulesFragment : Fragment() {
             )
             viewModel.saveRule(index, rule)
             dialog.dismiss()
-            Toast.makeText(ctx, "分流规则已更新并热生效！", Toast.LENGTH_SHORT).show()
+            Toast.makeText(ctx, R.string.rules_updated, Toast.LENGTH_SHORT).show()
         }
 
         dialog.show()

@@ -84,7 +84,7 @@
             android:layout_width="36dp"
             android:layout_height="36dp"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="删除内核"
+            android:contentDescription="@string/core_mgr_delete"
             android:src="@android:drawable/ic_menu_delete"
             app:tint="#EF4444" />
     </LinearLayout>

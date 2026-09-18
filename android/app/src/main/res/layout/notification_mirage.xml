@@ -22,7 +22,7 @@
         android:layout_height="36dp"
         android:layout_alignParentEnd="true"
         android:layout_centerVertical="true"
-        android:text="断开"
+        android:text="@string/disconnect"
         android:textStyle="bold"
         android:textSize="12sp"
         android:textColor="#FFFFFF"
@@ -45,7 +45,7 @@
             android:id="@+id/notifTitle"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Mirage 已连接"
+            android:text="@string/notif_connected"
             android:textStyle="bold"
             android:textSize="14sp"
             android:textColor="#1E293B" />

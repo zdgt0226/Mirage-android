@@ -63,7 +63,7 @@ class NodeAdapter(
             // 延迟状态显示
             when {
                 node.isTesting -> {
-                    binding.tvLatency.text = "测试中…"
+                    binding.tvLatency.text = ctx.getString(R.string.node_testing)
                     binding.tvLatency.setTextColor(Color.parseColor("#64748B"))
                 }
                 node.latencyMs != null -> {
@@ -81,7 +81,7 @@ class NodeAdapter(
                     binding.tvLatency.setTextColor(Color.parseColor("#EF4444"))
                 }
                 else -> {
-                    binding.tvLatency.text = "未测速"
+                    binding.tvLatency.text = ctx.getString(R.string.node_untested)
                     binding.tvLatency.setTextColor(Color.parseColor("#94A3B8"))
                 }
             }
@@ -108,10 +108,10 @@ class NodeAdapter(
         private fun showPopupMenu(anchor: View, position: Int, node: Node) {
             val ctx = anchor.context
             val popup = PopupMenu(ctx, anchor)
-            popup.menu.add(0, 1, 0, "测试延迟")
-            popup.menu.add(0, 2, 0, "复制链接")
-            popup.menu.add(0, 3, 0, "编辑节点")
-            popup.menu.add(0, 4, 0, "删除节点")
+            popup.menu.add(0, 1, 0, R.string.node_menu_test)
+            popup.menu.add(0, 2, 0, R.string.node_menu_copy)
+            popup.menu.add(0, 3, 0, R.string.node_edit_title)
+            popup.menu.add(0, 4, 0, R.string.node_delete_title)
 
             popup.setOnMenuItemClickListener { item ->
                 when (item.itemId) {
@@ -119,7 +119,7 @@ class NodeAdapter(
                     2 -> {
                         val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         cm.setPrimaryClip(ClipData.newPlainText("Mirage URI", node.uri))
-                        Toast.makeText(ctx, "已复制节点链接", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(ctx, R.string.node_link_copied, Toast.LENGTH_SHORT).show()
                     }
                     3 -> onEdit(position, node)
                     4 -> onDelete(position, node)

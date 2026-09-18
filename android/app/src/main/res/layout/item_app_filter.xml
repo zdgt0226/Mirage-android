@@ -46,7 +46,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="6dp"
-                android:text="系统"
+                android:text="@string/app_system"
                 android:textColor="@color/meow_ink_secondary"
                 android:textSize="10sp"
                 android:background="@drawable/badge_latency_bg"

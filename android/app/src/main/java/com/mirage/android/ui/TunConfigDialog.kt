@@ -9,6 +9,7 @@ import android.widget.Toast
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.mirage.android.core.TunConfigStore
 import com.mirage.android.databinding.DialogTunConfigBinding
+import com.mirage.android.R
 
 /**
  * TUN 性能与高级网络参数调优 Dialog
@@ -178,7 +179,7 @@ class TunConfigDialog(
             TunConfigStore.setTcpIdleTimeoutSec(context, idle)
             TunConfigStore.setBatchSize(context, batch)
 
-            Toast.makeText(context, "TUN 参数已保存 (MTU: $mtu, 超时: ${idle}s, 批处理: $batch)", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, context.getString(R.string.tun_saved, mtu, idle, batch), Toast.LENGTH_SHORT).show()
             onSaved?.invoke()
             dismiss()
         }

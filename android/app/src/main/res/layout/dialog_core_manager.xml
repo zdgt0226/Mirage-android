@@ -19,7 +19,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="Mirage 内核管理"
+            android:text="@string/core_mgr_title"
             android:textColor="@color/meow_ink"
             android:textSize="18sp"
             android:textStyle="bold" />
@@ -37,7 +37,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="4dp"
-        android:text="支持动态替换或升级 mirage-core 原生动态库 (.so)"
+        android:text="@string/core_mgr_desc"
         android:textColor="#64748B"
         android:textSize="12sp" />
 
@@ -60,7 +60,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="当前激活内核:"
+                android:text="@string/core_mgr_active"
                 android:textColor="@color/meow_blue"
                 android:textSize="12sp"
                 android:textStyle="bold" />
@@ -117,7 +117,7 @@
                 android:layout_weight="1"
                 android:textColor="@color/meow_blue"
                 android:textSize="12sp"
-                android:text="正在下载在线内核..." />
+                android:text="@string/core_mgr_downloading" />
 
             <TextView
                 android:id="@+id/tvDownloadPercent"
@@ -154,7 +154,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="内核更新源"
+            android:text="@string/core_mgr_source"
             android:textColor="#64748B"
             android:textSize="12sp" />
 
@@ -162,7 +162,7 @@
             android:id="@+id/tvCurrentSource"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="国内极速镜像 (ghfast.top) ▾"
+            android:text="@string/core_mgr_source_mirror"
             android:textColor="@color/meow_blue"
             android:textSize="12sp"
             android:textStyle="bold" />
@@ -175,7 +175,7 @@
         android:layout_width="match_parent"
         android:layout_height="44dp"
         android:layout_marginTop="6dp"
-        android:text="检查 GitHub 在线内核 (Releases)"
+        android:text="@string/core_mgr_check_github"
         android:textSize="13sp"
         app:cornerRadius="8dp"
         app:icon="@drawable/ic_refresh"
@@ -195,7 +195,7 @@
             android:layout_height="42dp"
             android:layout_marginEnd="4dp"
             android:layout_weight="1"
-            android:text="导入本地 (.so)"
+            android:text="@string/core_mgr_import_local"
             android:textSize="12sp"
             app:cornerRadius="8dp" />
 
@@ -206,7 +206,7 @@
             android:layout_height="42dp"
             android:layout_marginStart="4dp"
             android:layout_weight="1"
-            android:text="恢复内置默认"
+            android:text="@string/core_mgr_restore_builtin"
             android:textSize="12sp"
             app:cornerRadius="8dp"
             app:strokeColor="@color/meow_outline" />

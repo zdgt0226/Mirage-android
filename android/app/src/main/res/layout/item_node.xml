@@ -88,7 +88,7 @@
             android:layout_width="32dp"
             android:layout_height="32dp"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="更多选项"
+            android:contentDescription="@string/more_options"
             android:src="@drawable/ic_more_vert"
             app:tint="@color/meow_ink_secondary" />
     </LinearLayout>

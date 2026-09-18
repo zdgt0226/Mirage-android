@@ -50,6 +50,11 @@
             android:name=".ui.AppFilterActivity"
             android:exported="false" />
 
+        <!-- 设置 (DNS / TUN / 内核 / 备份恢复) -->
+        <activity
+            android:name=".ui.SettingsActivity"
+            android:exported="false" />
+
         <!-- VPN 服务 (独立内核进程 :core) -->
         <service
             android:name=".CoreService"

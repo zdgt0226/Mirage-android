@@ -26,7 +26,7 @@
             android:layout_height="match_parent"
             android:background="?attr/selectableItemBackground"
             android:clickable="true"
-            android:contentDescription="按住上下拖动调整优先级"
+            android:contentDescription="@string/rule_drag_handle"
             android:focusable="true"
             android:gravity="center"
             android:orientation="vertical"
@@ -155,7 +155,7 @@
             android:layout_height="34dp"
             android:layout_marginEnd="6dp"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="更多操作"
+            android:contentDescription="@string/more_actions"
             android:padding="6dp"
             android:src="@drawable/ic_more_vert"
             app:tint="@color/meow_ink_secondary" />

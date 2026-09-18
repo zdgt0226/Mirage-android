@@ -57,7 +57,7 @@ class TrafficFragment : Fragment() {
 
         binding.btnClearLogs.setOnClickListener {
             viewModel.clearLogs()
-            Toast.makeText(requireContext(), "日志已清空", Toast.LENGTH_SHORT).show()
+            Toast.makeText(requireContext(), R.string.logs_cleared, Toast.LENGTH_SHORT).show()
         }
 
         binding.btnCopyLogs.setOnClickListener {
@@ -66,9 +66,9 @@ class TrafficFragment : Fragment() {
                 if (logs.isNotBlank()) {
                     val cm = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                     cm?.setPrimaryClip(ClipData.newPlainText("Mirage Logs", logs))
-                    Toast.makeText(requireContext(), "已复制当前日志到剪贴板", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(requireContext(), R.string.logs_copied, Toast.LENGTH_SHORT).show()
                 } else {
-                    Toast.makeText(requireContext(), "当前没有可复制的日志", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(requireContext(), R.string.logs_empty_copy, Toast.LENGTH_SHORT).show()
                 }
             } else {
                 val reqs = viewModel.filteredRecentRequests.value.joinToString("\n") {
@@ -77,20 +77,20 @@ class TrafficFragment : Fragment() {
                 if (reqs.isNotBlank()) {
                     val cm = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                     cm?.setPrimaryClip(ClipData.newPlainText("Mirage Recent Requests", reqs))
-                    Toast.makeText(requireContext(), "已复制最近请求流记录到剪贴板", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(requireContext(), R.string.requests_copied, Toast.LENGTH_SHORT).show()
                 } else {
-                    Toast.makeText(requireContext(), "当前暂无请求流记录", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(requireContext(), R.string.requests_empty_copy, Toast.LENGTH_SHORT).show()
                 }
             }
         }
 
         binding.btnExportLogs.setOnClickListener {
             viewLifecycleOwner.lifecycleScope.launch {
-                Toast.makeText(requireContext(), "正在打包生成诊断日志包...", Toast.LENGTH_SHORT).show()
+                Toast.makeText(requireContext(), R.string.diag_packing, Toast.LENGTH_SHORT).show()
                 runCatching {
                     com.mirage.android.core.LogExporter.shareDiagnosticZip(requireContext())
                 }.onFailure { e ->
-                    Toast.makeText(requireContext(), "导出失败: ${e.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(requireContext(), getString(R.string.diag_export_failed, e.message ?: ""), Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -193,8 +193,8 @@ class TrafficFragment : Fragment() {
                     viewModel.stats.collect { stats ->
                         binding.upRate.text = stats.upRateFormatted
                         binding.downRate.text = stats.downRateFormatted
-                        binding.totalUp.text = "累计上行: ${stats.upTotalFormatted}"
-                        binding.totalDown.text = "累计下行: ${stats.downTotalFormatted}"
+                        binding.totalUp.text = getString(R.string.traffic_total_up_fmt, stats.upTotalFormatted)
+                        binding.totalDown.text = getString(R.string.traffic_total_down_fmt, stats.downTotalFormatted)
                     }
                 }
                 launch {
@@ -210,7 +210,7 @@ class TrafficFragment : Fragment() {
                 launch {
                     viewModel.filteredRecentRequests.collect { reqs ->
                         recentAdapter.submitList(reqs)
-                        binding.btnTabRequests.text = if (reqs.isNotEmpty()) "请求流 (${reqs.size})" else "请求流"
+                        binding.btnTabRequests.text = if (reqs.isNotEmpty()) getString(R.string.traffic_requests_tab_n, reqs.size) else getString(R.string.traffic_requests_tab)
                         binding.tvEmptyRequests.visibility = if (reqs.isEmpty()) View.VISIBLE else View.GONE
                     }
                 }
@@ -228,7 +228,7 @@ class TrafficFragment : Fragment() {
 
     private fun renderColoredLogs(logLines: List<String>) {
         if (logLines.isEmpty()) {
-            binding.trafficLogView.text = "暂无匹配的日志记录"
+            binding.trafficLogView.text = getString(R.string.logs_no_match)
             return
         }
 

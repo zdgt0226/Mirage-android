@@ -105,16 +105,16 @@ class DnsConfigDialog(
             val remote = binding.editRemoteDns.text?.toString()?.trim() ?: ""
 
             if (!isValidIp(direct)) {
-                Toast.makeText(context, "国内 DNS IP 格式不正确", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, R.string.dns_direct_invalid, Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
             if (!isValidIp(remote)) {
-                Toast.makeText(context, "国外 DNS IP 格式不正确", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, R.string.dns_remote_invalid, Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
 
             dnsRepo.setDns(direct, remote)
-            Toast.makeText(context, "DNS 已更新并生效", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, R.string.dns_updated, Toast.LENGTH_SHORT).show()
             onDnsSaved?.invoke()
             dismiss()
         }

@@ -211,17 +211,17 @@ class GeoAssetActivity : AppCompatActivity() {
         var selectedIdx = intervals.indexOf(current).coerceAtLeast(0)
 
         AlertDialog.Builder(this)
-            .setTitle("设置自动更新策略")
+            .setTitle(R.string.geo_auto_policy_title)
             .setSingleChoiceItems(names, selectedIdx) { _, which ->
                 selectedIdx = which
             }
-            .setPositiveButton("确定") { _, _ ->
+            .setPositiveButton(R.string.ok) { _, _ ->
                 val chosen = intervals[selectedIdx]
                 GeoManager.setAutoUpdateInterval(this, chosen)
                 binding.tvCurrentSchedule.text = "${chosen.displayName} ▾"
-                Toast.makeText(this, "自动更新策略已设置为: ${chosen.displayName}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.geo_auto_policy_set, chosen.displayName), Toast.LENGTH_SHORT).show()
             }
-            .setNegativeButton("取消", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
@@ -235,10 +235,10 @@ class GeoAssetActivity : AppCompatActivity() {
 
             withContext(Dispatchers.Main) {
                 if (status.isReady) {
-                    binding.tvGeoStatusBadge.text = "已就绪"
+                    binding.tvGeoStatusBadge.text = getString(R.string.geo_ready)
                     binding.tvGeoStatusBadge.setTextColor(Color.parseColor("#10B981"))
                 } else {
-                    binding.tvGeoStatusBadge.text = "未就绪"
+                    binding.tvGeoStatusBadge.text = getString(R.string.geo_not_ready)
                     binding.tvGeoStatusBadge.setTextColor(Color.parseColor("#EF4444"))
                 }
 
@@ -309,7 +309,7 @@ class GeoAssetActivity : AppCompatActivity() {
             currentDisplayList.addAll(fullFilteredPool.subList(nextStart, nextEnd))
             tagAdapter.submitList(currentDisplayList.toList())
             if (binding.chipAll.isChecked && binding.etSearchTag.text.isNullOrBlank()) {
-                binding.tvTagMatchCount.text = "全量标签: 已载入 ${currentDisplayList.size}/${fullFilteredPool.size} 个 (向下滑动加载更多)"
+                binding.tvTagMatchCount.text = getString(R.string.geo_tag_loaded, currentDisplayList.size, fullFilteredPool.size)
             }
         }
     }
@@ -340,13 +340,9 @@ class GeoAssetActivity : AppCompatActivity() {
                 } else {
                     // 未校验是安全相关状态, 必须用户显式确认过一次, Toast 会被错过
                     androidx.appcompat.app.AlertDialog.Builder(this@GeoAssetActivity)
-                        .setTitle("已安装，但未经校验")
-                        .setMessage(
-                            result.message +
-                                "\n\n该源未提供 SHA-256 摘要，无法确认下载内容与上游一致。" +
-                                "若该源不可信，路由规则可能已被篡改。"
-                        )
-                        .setPositiveButton("我知道了", null)
+                        .setTitle(R.string.geo_unverified_title)
+                        .setMessage(getString(R.string.geo_unverified_message, result.message))
+                        .setPositiveButton(R.string.geo_understood, null)
                         .show()
                 }
                 refreshStatus()
@@ -354,7 +350,7 @@ class GeoAssetActivity : AppCompatActivity() {
                     startLoadingTags()
                 }
             } else {
-                Toast.makeText(this@GeoAssetActivity, "更新失败: ${result.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@GeoAssetActivity, getString(R.string.geo_update_failed, result.message), Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -366,27 +362,27 @@ class GeoAssetActivity : AppCompatActivity() {
         var selectedIdx = sources.indexOfFirst { it.id == active.id }.coerceAtLeast(0)
 
         AlertDialog.Builder(this)
-            .setTitle("选择 Geo 规则更新源")
+            .setTitle(R.string.geo_source_title)
             .setSingleChoiceItems(names, selectedIdx) { _, which ->
                 selectedIdx = which
             }
-            .setPositiveButton("确定") { _, _ ->
+            .setPositiveButton(R.string.ok) { _, _ ->
                 val chosen = sources[selectedIdx]
                 GeoManager.setActiveSource(this, chosen.id)
                 refreshStatus()
-                Toast.makeText(this, "已切换更新源为: ${chosen.name}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.geo_source_switched, chosen.name), Toast.LENGTH_SHORT).show()
             }
-            .setNeutralButton("添加自定义源") { _, _ ->
+            .setNeutralButton(R.string.geo_source_add_custom) { _, _ ->
                 showAddCustomSourceDialog()
             }
-            .setNegativeButton("取消", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
     private fun showAddCustomSourceDialog() {
-        val etName = EditText(this).apply { hint = "规则源名称 (如: 我的私有源)" }
-        val etSiteUrl = EditText(this).apply { hint = "geosite.dat 下载 URL" }
-        val etIpUrl = EditText(this).apply { hint = "geoip.dat 下载 URL" }
+        val etName = EditText(this).apply { hint = getString(R.string.geo_source_name_hint) }
+        val etSiteUrl = EditText(this).apply { hint = getString(R.string.geo_site_url_hint) }
+        val etIpUrl = EditText(this).apply { hint = getString(R.string.geo_ip_url_hint) }
 
         val layout = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
@@ -397,9 +393,9 @@ class GeoAssetActivity : AppCompatActivity() {
         }
 
         AlertDialog.Builder(this)
-            .setTitle("添加自定义 Geo 规则源")
+            .setTitle(R.string.geo_source_add_title)
             .setView(layout)
-            .setPositiveButton("保存并使用") { _, _ ->
+            .setPositiveButton(R.string.geo_source_save_use) { _, _ ->
                 val name = etName.text.toString().trim()
                 val siteUrl = etSiteUrl.text.toString().trim()
                 val ipUrl = etIpUrl.text.toString().trim()
@@ -411,24 +407,24 @@ class GeoAssetActivity : AppCompatActivity() {
                     GeoManager.saveCustomSources(this, list)
                     GeoManager.setActiveSource(this, id)
                     refreshStatus()
-                    Toast.makeText(this, "已添加并激活自定义源: $name", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, getString(R.string.geo_source_added, name), Toast.LENGTH_SHORT).show()
                 }
             }
-            .setNegativeButton("取消", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
     private fun showAddRuleDialog(entry: GeoManager.GeoTagEntry) {
-        val actions = arrayOf("🚀 走代理 (Proxy)", "⚡ 走直连 (Direct)", "🚫 拦截阻断 (Block)")
+        val actions = arrayOf(getString(R.string.geo_action_proxy), getString(R.string.geo_action_direct), getString(R.string.geo_action_block))
         val actionValues = arrayOf("proxy", "direct", "block")
         var selectedAction = 0
 
         AlertDialog.Builder(this)
-            .setTitle("将标签「${entry.tag}」添加为分流规则")
+            .setTitle(getString(R.string.geo_tag_add_title, entry.tag))
             .setSingleChoiceItems(actions, selectedAction) { _, which ->
                 selectedAction = which
             }
-            .setPositiveButton("添加") { _, _ ->
+            .setPositiveButton(R.string.add_action) { _, _ ->
                 val chosenAction = actionValues[selectedAction]
                 val kind = if (entry.isGeoSite) "geosite" else "geoip"
                 val type = if (entry.isGeoSite) "geosite" else "geoip"
@@ -445,9 +441,9 @@ class GeoAssetActivity : AppCompatActivity() {
                 )
                 RuleStore.addRule(this, rule)
                 val ok = CoreController.setRules(RuleStore.toJson(this))
-                Toast.makeText(this, if (ok) "已成功添加并生效分流规则: $name" else "规则添加成功", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, if (ok) getString(R.string.geo_rule_added, name) else getString(R.string.geo_rule_added_plain), Toast.LENGTH_SHORT).show()
             }
-            .setNegativeButton("取消", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
@@ -472,11 +468,11 @@ class GeoAssetActivity : AppCompatActivity() {
                 if (entry.isGeoSite) {
                     binding.tvTagType.text = "GEOSITE"
                     binding.tvTagType.setTextColor(Color.parseColor("#0077CC"))
-                    binding.tvTagCount.text = "包含 ${entry.count} 条域名规则"
+                    binding.tvTagCount.text = getString(R.string.geo_tag_domain_count, entry.count)
                 } else {
                     binding.tvTagType.text = "GEOIP"
                     binding.tvTagType.setTextColor(Color.parseColor("#10B981"))
-                    binding.tvTagCount.text = "包含 ${entry.count} 个 IP/CIDR 网段"
+                    binding.tvTagCount.text = getString(R.string.geo_tag_ip_count, entry.count)
                 }
 
                 binding.btnAddRule.setOnClickListener {

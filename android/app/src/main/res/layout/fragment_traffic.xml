@@ -35,7 +35,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="↑ 上行速率"
+                        android:text="@string/rate_up_label"
                         android:textColor="@color/meow_upload"
                         android:textSize="11.5sp"
                         android:textStyle="bold" />
@@ -61,7 +61,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="↓ 下行速率"
+                        android:text="@string/rate_down_label"
                         android:textColor="@color/meow_download"
                         android:textSize="11.5sp"
                         android:textStyle="bold" />
@@ -96,7 +96,7 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:fontFeatureSettings="tnum"
-                    android:text="累计上行: 0 B"
+                    android:text="@string/traffic_total_up_zero"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="11sp" />
 
@@ -106,7 +106,7 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:fontFeatureSettings="tnum"
-                    android:text="累计下行: 0 B"
+                    android:text="@string/traffic_total_down_zero"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="11sp" />
             </LinearLayout>
@@ -152,7 +152,7 @@
                 android:focusable="true"
                 android:gravity="center"
                 android:paddingHorizontal="12dp"
-                android:text="请求流 (Recent)"
+                android:text="@string/traffic_requests_title"
                 android:textColor="@android:color/white"
                 android:textSize="11.5sp"
                 android:textStyle="bold" />
@@ -166,7 +166,7 @@
                 android:focusable="true"
                 android:gravity="center"
                 android:paddingHorizontal="12dp"
-                android:text="运行日志"
+                android:text="@string/traffic_logs_title"
                 android:textColor="@color/meow_ink_secondary"
                 android:textSize="11.5sp" />
         </LinearLayout>
@@ -181,7 +181,7 @@
             android:layout_width="30dp"
             android:layout_height="30dp"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="导出诊断包"
+            android:contentDescription="@string/traffic_export_diag"
             android:src="@android:drawable/ic_menu_save"
             app:tint="@color/meow_connected" />
 
@@ -191,7 +191,7 @@
             android:layout_height="30dp"
             android:layout_marginStart="4dp"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="复制"
+            android:contentDescription="@string/copy"
             android:src="@android:drawable/ic_menu_share"
             app:tint="@color/meow_blue" />
 
@@ -201,7 +201,7 @@
             android:layout_height="30dp"
             android:layout_marginStart="4dp"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="清空"
+            android:contentDescription="@string/clear"
             android:src="@android:drawable/ic_menu_delete"
             app:tint="@color/meow_ink_secondary" />
     </LinearLayout>
@@ -228,7 +228,7 @@
                 android:layout_height="34dp"
                 android:layout_weight="1"
                 android:background="@drawable/bg_telegram_pill"
-                android:hint="🔍 搜索域名 / IP..."
+                android:hint="@string/traffic_search_hint"
                 android:imeOptions="actionDone"
                 android:inputType="text"
                 android:maxLines="1"
@@ -256,7 +256,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:checked="true"
-                    android:text="全部"
+                    android:text="@string/filter_all"
                     android:textSize="10.5sp" />
 
                 <com.google.android.material.chip.Chip
@@ -310,7 +310,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_gravity="center"
-                android:text="暂无请求流记录 (发起网络请求后实时刷新)"
+                android:text="@string/traffic_requests_empty"
                 android:textColor="@color/meow_ink_secondary"
                 android:textSize="12sp"
                 android:visibility="gone" />
@@ -344,7 +344,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:checked="true"
-                    android:text="全部"
+                    android:text="@string/filter_all"
                     android:textSize="10.5sp" />
 
                 <com.google.android.material.chip.Chip

@@ -20,7 +20,7 @@
             android:layout_height="?attr/actionBarSize"
             android:background="@color/meow_canvas"
             app:navigationIcon="@drawable/ic_arrow_back"
-            app:title="Geo 规则集资产中心"
+            app:title="@string/rules_geo_entry"
             app:titleTextColor="@color/meow_ink" />
 
         <!-- 可折叠的顶部卡片区域 -->
@@ -57,7 +57,7 @@
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
                             android:layout_weight="1"
-                            android:text="Geo 数据集状态"
+                            android:text="@string/geo_status_title"
                             android:textColor="@color/meow_ink"
                             android:textSize="15sp"
                             android:textStyle="bold" />
@@ -69,7 +69,7 @@
                             android:background="@drawable/badge_latency_bg"
                             android:paddingHorizontal="8dp"
                             android:paddingVertical="3dp"
-                            android:text="已就绪"
+                            android:text="@string/geo_ready"
                             android:textColor="#10B981"
                             android:textSize="11sp"
                             android:textStyle="bold" />
@@ -115,7 +115,7 @@
                             android:layout_width="0dp"
                             android:layout_height="38dp"
                             android:layout_weight="1"
-                            android:text="立即在线更新"
+                            android:text="@string/geo_update_now"
                             android:textSize="12sp" />
 
                         <com.google.android.material.button.MaterialButton
@@ -124,7 +124,7 @@
                             android:layout_width="wrap_content"
                             android:layout_height="38dp"
                             android:layout_marginStart="8dp"
-                            android:text="更新源设置"
+                            android:text="@string/geo_source_settings"
                             android:textSize="12sp" />
                     </LinearLayout>
                 </LinearLayout>
@@ -156,7 +156,7 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="⏰ 自动更新策略"
+                        android:text="@string/geo_auto_policy"
                         android:textColor="@color/meow_ink"
                         android:textSize="13sp"
                         android:textStyle="bold" />
@@ -196,7 +196,7 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="🏷️ Tag 规则集深度内省器"
+                    android:text="@string/geo_tag_browser"
                     android:textColor="@color/meow_ink"
                     android:textSize="15sp"
                     android:textStyle="bold" />
@@ -207,7 +207,7 @@
                     android:layout_marginTop="6dp"
                     android:gravity="center"
                     android:lineSpacingExtra="2dp"
-                    android:text="本地已就绪 1,543 个域名标签与 260 个 IP 网段。\n点击下方按钮按需解析标签索引，随时添加分流规则："
+                    android:text="@string/geo_tag_browser_desc"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="12sp" />
 
@@ -216,7 +216,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="44dp"
                     android:layout_marginTop="12dp"
-                    android:text="🔍 点击读取并浏览 Tag 规则集"
+                    android:text="@string/geo_tag_browse_btn"
                     android:textSize="13sp"
                     android:textStyle="bold" />
             </LinearLayout>
@@ -242,7 +242,7 @@
                 android:background="@drawable/badge_latency_bg"
                 android:drawableStart="@android:drawable/ic_menu_search"
                 android:drawablePadding="8dp"
-                android:hint="搜索标签 (如 google, cn, openai, ads, netflix...)"
+                android:hint="@string/geo_tag_search_hint"
                 android:imeOptions="actionSearch"
                 android:inputType="text"
                 android:paddingHorizontal="12dp"
@@ -268,35 +268,35 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:checked="true"
-                        android:text="🔥 常用精选" />
+                        android:text="@string/geo_tag_popular" />
 
                     <com.google.android.material.chip.Chip
                         android:id="@+id/chipChina"
                         style="@style/Widget.Material3.Chip.Filter"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="🇨🇳 国内常用" />
+                        android:text="@string/geo_tag_cn" />
 
                     <com.google.android.material.chip.Chip
                         android:id="@+id/chipOverseas"
                         style="@style/Widget.Material3.Chip.Filter"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="🚀 境外服务" />
+                        android:text="@string/geo_tag_oversea" />
 
                     <com.google.android.material.chip.Chip
                         android:id="@+id/chipAds"
                         style="@style/Widget.Material3.Chip.Filter"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="🛡️ 广告拦截" />
+                        android:text="@string/geo_tag_ads" />
 
                     <com.google.android.material.chip.Chip
                         android:id="@+id/chipAll"
                         style="@style/Widget.Material3.Chip.Filter"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="🌐 全部标签 (按需)" />
+                        android:text="@string/geo_tag_all" />
                 </com.google.android.material.chip.ChipGroup>
             </HorizontalScrollView>
 

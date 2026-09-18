@@ -20,7 +20,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="节点管理"
+            android:text="@string/nodes_title"
             android:textColor="@color/meow_ink"
             android:textSize="22sp"
             android:textStyle="bold" />
@@ -31,7 +31,7 @@
             android:layout_width="wrap_content"
             android:layout_height="38dp"
             android:paddingHorizontal="10dp"
-            android:text="剪贴板导入"
+            android:text="@string/nodes_import_clipboard"
             android:textSize="12sp"
             app:cornerRadius="8dp"
             app:strokeColor="@color/meow_blue" />
@@ -56,7 +56,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="center"
-            android:text="暂无节点，点击下方「添加节点」或「剪贴板导入」"
+            android:text="@string/nodes_empty"
             android:textColor="@color/meow_ink_secondary"
             android:textSize="14sp"
             android:visibility="gone" />
@@ -75,7 +75,7 @@
             android:layout_height="46dp"
             android:layout_marginEnd="4dp"
             android:layout_weight="1"
-            android:text="添加节点"
+            android:text="@string/nodes_add"
             android:textSize="14sp"
             app:cornerRadius="10dp" />
 
@@ -86,7 +86,7 @@
             android:layout_height="46dp"
             android:layout_marginStart="4dp"
             android:layout_weight="1"
-            android:text="一键测速"
+            android:text="@string/nodes_test_all"
             android:textSize="14sp"
             app:cornerRadius="10dp" />
     </LinearLayout>
@@ -106,7 +106,7 @@
             android:layout_marginEnd="3dp"
             android:layout_weight="1"
             android:paddingHorizontal="4dp"
-            android:text="自动优选: 关"
+            android:text="@string/nodes_auto_off"
             android:textSize="11sp"
             app:cornerRadius="8dp"
             app:strokeColor="@color/meow_outline" />
@@ -119,7 +119,7 @@
             android:layout_marginHorizontal="3dp"
             android:layout_weight="1"
             android:paddingHorizontal="4dp"
-            android:text="测速: TCP"
+            android:text="@string/nodes_test_method_tcp"
             android:textSize="11sp"
             app:cornerRadius="8dp"
             app:strokeColor="@color/meow_outline" />
@@ -132,7 +132,7 @@
             android:layout_marginStart="3dp"
             android:layout_weight="1"
             android:paddingHorizontal="4dp"
-            android:text="连接池: 8"
+            android:text="@string/nodes_pool_default"
             android:textSize="11sp"
             app:cornerRadius="8dp"
             app:strokeColor="@color/meow_outline" />

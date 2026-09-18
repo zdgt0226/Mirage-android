@@ -78,7 +78,7 @@
                 <TextView
                     android:layout_width="90dp"
                     android:layout_height="wrap_content"
-                    android:text="请求目标"
+                    android:text="@string/req_target"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="12.5sp" />
                 <TextView
@@ -106,7 +106,7 @@
                 <TextView
                     android:layout_width="90dp"
                     android:layout_height="wrap_content"
-                    android:text="解析地址"
+                    android:text="@string/req_resolved"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="12.5sp" />
                 <TextView
@@ -133,7 +133,7 @@
                 <TextView
                     android:layout_width="90dp"
                     android:layout_height="wrap_content"
-                    android:text="出站策略"
+                    android:text="@string/req_outbound"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="12.5sp" />
                 <TextView
@@ -161,7 +161,7 @@
                 <TextView
                     android:layout_width="90dp"
                     android:layout_height="wrap_content"
-                    android:text="匹配规则"
+                    android:text="@string/req_matched_rule"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="12.5sp" />
                 <TextView
@@ -188,7 +188,7 @@
                 <TextView
                     android:layout_width="90dp"
                     android:layout_height="wrap_content"
-                    android:text="连接状态"
+                    android:text="@string/req_state"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="12.5sp" />
                 <TextView
@@ -233,7 +233,7 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:fontFamily="sans-serif-medium"
-                    android:text="耗时阶段瀑布流"
+                    android:text="@string/req_waterfall"
                     android:textColor="@color/meow_ink"
                     android:textSize="13sp"
                     android:textStyle="bold" />
@@ -307,7 +307,7 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="DNS 解析 (DNS Lookup)"
+                    android:text="@string/req_phase_dns"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="12sp" />
 
@@ -346,7 +346,7 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="TCP 建连 / 隧道分配 (Connect)"
+                    android:text="@string/req_phase_connect"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="12sp" />
 
@@ -386,7 +386,7 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="TLS 嗅探与协商 (TLS Handshake)"
+                    android:text="@string/req_phase_tls"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="12sp" />
 
@@ -426,7 +426,7 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="首字节响应 (TTFB / First Byte)"
+                    android:text="@string/req_phase_ttfb"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="12sp" />
 
@@ -468,7 +468,7 @@
                 <TextView
                     android:layout_width="90dp"
                     android:layout_height="wrap_content"
-                    android:text="持续时间"
+                    android:text="@string/req_duration"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="12.5sp" />
                 <TextView
@@ -496,7 +496,7 @@
                 <TextView
                     android:layout_width="90dp"
                     android:layout_height="wrap_content"
-                    android:text="上传数据"
+                    android:text="@string/req_uploaded"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="12.5sp" />
                 <TextView
@@ -524,7 +524,7 @@
                 <TextView
                     android:layout_width="90dp"
                     android:layout_height="wrap_content"
-                    android:text="下载数据"
+                    android:text="@string/req_downloaded"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="12.5sp" />
                 <TextView
@@ -554,7 +554,7 @@
             android:layout_height="44dp"
             android:layout_marginEnd="6dp"
             android:layout_weight="1"
-            android:text="复制详情"
+            android:text="@string/req_copy"
             android:textSize="13sp"
             app:cornerRadius="10dp" />
 
@@ -565,7 +565,7 @@
             android:layout_height="44dp"
             android:layout_marginStart="6dp"
             android:layout_weight="1"
-            android:text="重置切断"
+            android:text="@string/req_reset"
             android:textColor="@color/meow_error"
             android:textSize="13sp"
             app:cornerRadius="10dp"

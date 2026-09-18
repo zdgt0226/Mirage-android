@@ -51,10 +51,10 @@ class ConnectionAdapter : ListAdapter<ConnectionInfo, ConnectionAdapter.ConnView
             binding.tvDuration.text = "· ${item.durationSecs}s"
 
             if (item.isClosed) {
-                binding.tvStatusBadge.text = "已断开"
+                binding.tvStatusBadge.text = ctx.getString(R.string.conn_disconnected)
                 binding.tvStatusBadge.setTextColor(ContextCompat.getColor(ctx, R.color.meow_ink_secondary))
             } else {
-                binding.tvStatusBadge.text = "已连接"
+                binding.tvStatusBadge.text = ctx.getString(R.string.status_connected)
                 binding.tvStatusBadge.setTextColor(ContextCompat.getColor(ctx, R.color.meow_connected))
             }
 

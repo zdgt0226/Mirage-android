@@ -39,7 +39,7 @@ class CoreManagerDialog(
         binding = DialogCoreManagerBinding.inflate(LayoutInflater.from(context))
         val b = binding!!
 
-        b.tvDeviceAbi.text = "设备: ${Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown"}"
+        b.tvDeviceAbi.text = context.getString(R.string.core_device_abi, Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown")
         updateCurrentCoreView()
 
         adapter = CoreAdapter(
@@ -48,19 +48,19 @@ class CoreManagerDialog(
                 adapter?.setActiveId(core.id)
                 updateCurrentCoreView()
                 onCoreChanged()
-                Toast.makeText(context, "已切换内核: ${core.name} (若已连接VPN请重新连接生效)", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, context.getString(R.string.core_switched, core.name), Toast.LENGTH_SHORT).show()
             },
             onDelete = { core ->
                 AlertDialog.Builder(context)
-                    .setTitle("删除内核")
-                    .setMessage("确定删除自定义内核「${core.name}」吗？")
-                    .setPositiveButton("删除") { _, _ ->
+                    .setTitle(R.string.core_delete_title)
+                    .setMessage(context.getString(R.string.core_delete_message, core.name))
+                    .setPositiveButton(R.string.delete) { _, _ ->
                         coreManager.deleteCore(core.id)
                         refreshList()
                         updateCurrentCoreView()
                         onCoreChanged()
                     }
-                    .setNegativeButton("取消", null)
+                    .setNegativeButton(R.string.cancel, null)
                     .show()
             }
         )
@@ -87,12 +87,12 @@ class CoreManagerDialog(
             adapter?.setActiveId(CoreInfo.BUILTIN_ID)
             updateCurrentCoreView()
             onCoreChanged()
-            Toast.makeText(context, "已恢复为内置默认内核", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, R.string.core_restored_builtin, Toast.LENGTH_SHORT).show()
         }
 
         alertDialog = AlertDialog.Builder(context)
             .setView(b.root)
-            .setPositiveButton("完成", null)
+            .setPositiveButton(R.string.done, null)
             .create()
 
         alertDialog?.show()
@@ -111,31 +111,31 @@ class CoreManagerDialog(
         var selectedIdx = sources.indexOfFirst { it.id == active.id }.coerceAtLeast(0)
 
         AlertDialog.Builder(context)
-            .setTitle("选择内核更新源")
+            .setTitle(R.string.core_source_title)
             .setSingleChoiceItems(names, selectedIdx) { _, which ->
                 selectedIdx = which
             }
-            .setPositiveButton("确定") { _, _ ->
+            .setPositiveButton(R.string.ok) { _, _ ->
                 val chosen = sources[selectedIdx]
                 coreManager.setActiveSource(chosen.id)
                 updateSourceView()
-                Toast.makeText(context, "已切换更新源为: ${chosen.name}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, context.getString(R.string.geo_source_switched, chosen.name), Toast.LENGTH_SHORT).show()
             }
-            .setNeutralButton("添加自定义源") { _, _ ->
+            .setNeutralButton(R.string.geo_source_add_custom) { _, _ ->
                 showAddCustomSourceDialog()
             }
-            .setNegativeButton("取消", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
     private fun showAddCustomSourceDialog() {
-        val etName = android.widget.EditText(context).apply { hint = "更新源名称 (如: 我的私有源)" }
+        val etName = android.widget.EditText(context).apply { hint = context.getString(R.string.core_source_name_hint) }
         val etApiUrl = android.widget.EditText(context).apply {
             hint = "GitHub Releases API URL"
             setText("https://api.github.com/repos/zdgt0226/Mirage-rs/releases")
         }
         val etDownloadPrefix = android.widget.EditText(context).apply {
-            hint = "下载加速前缀 (可选，如: https://ghfast.top/)"
+            hint = context.getString(R.string.core_source_prefix_hint)
         }
 
         val layout = android.widget.LinearLayout(context).apply {
@@ -147,9 +147,9 @@ class CoreManagerDialog(
         }
 
         AlertDialog.Builder(context)
-            .setTitle("添加自定义内核更新源")
+            .setTitle(R.string.core_source_add_title)
             .setView(layout)
-            .setPositiveButton("保存并使用") { _, _ ->
+            .setPositiveButton(R.string.geo_source_save_use) { _, _ ->
                 val name = etName.text.toString().trim()
                 val apiUrl = etApiUrl.text.toString().trim()
                 val prefix = etDownloadPrefix.text.toString().trim().takeIf { it.isNotBlank() }
@@ -161,10 +161,10 @@ class CoreManagerDialog(
                     coreManager.saveCustomSources(list)
                     coreManager.setActiveSource(id)
                     updateSourceView()
-                    Toast.makeText(context, "已添加并激活自定义源: $name", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, context.getString(R.string.geo_source_added, name), Toast.LENGTH_SHORT).show()
                 }
             }
-            .setNegativeButton("取消", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
@@ -174,17 +174,17 @@ class CoreManagerDialog(
             ?: kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
 
         b.btnCheckOnlineCore.isEnabled = false
-        b.btnCheckOnlineCore.text = "正在查询 GitHub Releases..."
+        b.btnCheckOnlineCore.text = context.getString(R.string.core_querying_github)
 
         scope.launch {
             val result = coreManager.fetchOnlineReleases()
 
             result.onSuccess { releases ->
                 b.btnCheckOnlineCore.isEnabled = true
-                b.btnCheckOnlineCore.text = "检查 GitHub 在线内核 (Releases)"
+                b.btnCheckOnlineCore.text = context.getString(R.string.core_mgr_check_github)
 
                 if (releases.isEmpty()) {
-                    Toast.makeText(context, "暂无与当前架构 (${Build.SUPPORTED_ABIS.firstOrNull()}) 兼容的在线内核", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, context.getString(R.string.core_no_compatible, Build.SUPPORTED_ABIS.firstOrNull() ?: ""), Toast.LENGTH_LONG).show()
                 } else {
                     val latest = releases.first()
                     val activeCore = coreManager.getActiveCore()
@@ -220,8 +220,8 @@ class CoreManagerDialog(
                 }
             }.onFailure { e ->
                 b.btnCheckOnlineCore.isEnabled = true
-                b.btnCheckOnlineCore.text = "检查 GitHub 在线内核 (Releases)"
-                Toast.makeText(context, "查询失败: ${e.message} (可尝试切换更新源或稍后重试)", Toast.LENGTH_LONG).show()
+                b.btnCheckOnlineCore.text = context.getString(R.string.core_mgr_check_github)
+                Toast.makeText(context, context.getString(R.string.core_query_failed, e.message ?: ""), Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -234,10 +234,10 @@ class CoreManagerDialog(
         val digestHint = if (release.shortDigest != null) " [SHA-256: ${release.shortDigest}]" else ""
         b.layoutDownloadProgress.visibility = android.view.View.VISIBLE
         b.progressBarDownload.progress = 0
-        b.tvDownloadStatus.text = "正在下载并校验 ${release.tagName} (${release.formattedSize})$digestHint..."
+        b.tvDownloadStatus.text = context.getString(R.string.core_downloading_fmt, release.tagName, release.formattedSize, digestHint)
         b.tvDownloadPercent.text = "0%"
         b.btnCheckOnlineCore.isEnabled = false
-        b.btnCheckOnlineCore.text = "正在下载并校验内核 ${release.tagName}..."
+        b.btnCheckOnlineCore.text = context.getString(R.string.core_downloading_btn, release.tagName)
 
         android.util.Log.i("Mirage", "[loader] 开始下载在线内核: ${release.tagName} from ${release.downloadUrl} (期望SHA256: ${release.expectedSha256 ?: "未指定"})")
         scope.launch {
@@ -250,7 +250,7 @@ class CoreManagerDialog(
 
             b.layoutDownloadProgress.visibility = android.view.View.GONE
             b.btnCheckOnlineCore.isEnabled = true
-            b.btnCheckOnlineCore.text = "检查 GitHub 在线内核 (Releases)"
+            b.btnCheckOnlineCore.text = context.getString(R.string.core_mgr_check_github)
 
             result.onSuccess { core ->
                 android.util.Log.i("Mirage", "[loader] 在线内核下载并校验通过: ${core.name} (SHA: ${core.sha256})")
@@ -259,10 +259,10 @@ class CoreManagerDialog(
                 updateCurrentCoreView()
                 onCoreChanged()
                 val shaInfo = core.shortSha256?.let { " (SHA: $it)" } ?: ""
-                Toast.makeText(context, "成功下载并通过完整性校验: ${core.name}$shaInfo\n(若已连接VPN请重新连接生效)", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, context.getString(R.string.core_download_ok, core.name, shaInfo), Toast.LENGTH_LONG).show()
             }.onFailure { e ->
                 android.util.Log.e("Mirage", "[loader] 在线内核下载或校验失败: ${e.message}", e)
-                Toast.makeText(context, "下载或校验失败: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, context.getString(R.string.core_download_failed, e.message ?: ""), Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -281,20 +281,20 @@ class CoreManagerDialog(
                 refreshList()
                 updateCurrentCoreView()
                 onCoreChanged()
-                Toast.makeText(context, "成功导入并激活内核: ${core.name}", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, context.getString(R.string.core_import_ok, core.name), Toast.LENGTH_LONG).show()
             } else {
-                val msg = result.exceptionOrNull()?.message ?: "导入失败"
+                val msg = result.exceptionOrNull()?.message ?: context.getString(R.string.core_import_failed_default)
                 AlertDialog.Builder(context)
-                    .setTitle("内核导入失败")
+                    .setTitle(R.string.core_import_failed_title)
                     .setMessage(msg)
-                    .setPositiveButton("确定", null)
+                    .setPositiveButton(R.string.ok, null)
                     .show()
             }
         } catch (e: Exception) {
             AlertDialog.Builder(context)
-                .setTitle("导入出错")
+                .setTitle(R.string.core_import_error_title)
                 .setMessage(e.message)
-                .setPositiveButton("确定", null)
+                .setPositiveButton(R.string.ok, null)
                 .show()
         }
     }

@@ -91,7 +91,7 @@
                 android:background="@drawable/bg_telegram_pill"
                 android:paddingHorizontal="6dp"
                 android:paddingVertical="1dp"
-                android:text="已连接"
+                android:text="@string/status_connected"
                 android:textColor="@color/meow_connected"
                 android:textSize="10sp"
                 android:textStyle="bold" />

@@ -2,6 +2,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.Properties
+import org.gradle.api.tasks.PathSensitivity
 
 plugins {
     alias(libs.plugins.android.application)
@@ -120,4 +121,13 @@ dependencies {
     implementation(libs.androidx.fragment.ktx)
     testImplementation(libs.junit)
     testImplementation(libs.org.json)
+}
+
+// LocalizationTest 直接读 src/main/res 下的 strings.xml 与 layout, 而这些文件不在
+// 单测任务的默认输入里 —— 不声明的话改了资源 Gradle 仍判 UP-TO-DATE 跳过测试,
+// 门禁会静默失效 (实测: 删掉 values-en 的一个 key, 测试根本没跑就 BUILD SUCCESSFUL)。
+tasks.withType<Test>().configureEach {
+    inputs.dir("src/main/res")
+        .withPropertyName("resForLocalizationTest")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
 }

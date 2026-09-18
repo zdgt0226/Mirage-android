@@ -19,6 +19,8 @@ import com.mirage.android.databinding.FragmentNodesBinding
 import com.mirage.android.ui.adapter.NodeAdapter
 import com.mirage.android.ui.viewmodel.NodesViewModel
 import kotlinx.coroutines.launch
+import com.google.android.material.snackbar.Snackbar
+import com.mirage.android.R
 
 /**
  * 节点管理 Tab: 现代 RecyclerView 列表 + 响应式并发测速与剪贴板导入。
@@ -61,10 +63,10 @@ class NodesFragment : Fragment() {
             onEdit = { index, _ -> showNodeDialog(index) },
             onDelete = { index, node ->
                 AlertDialog.Builder(requireContext())
-                    .setTitle("删除节点")
-                    .setMessage("确定要删除节点「${node.displayName}」吗？")
-                    .setPositiveButton("删除") { _, _ -> viewModel.deleteNode(index) }
-                    .setNegativeButton("取消", null)
+                    .setTitle(R.string.node_delete_title)
+                    .setMessage(getString(R.string.node_delete_message, node.displayName))
+                    .setPositiveButton(R.string.delete) { _, _ -> viewModel.deleteNode(index) }
+                    .setNegativeButton(R.string.cancel, null)
                     .show()
             }
         )
@@ -85,31 +87,37 @@ class NodesFragment : Fragment() {
             val text = cm.primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
             val count = viewModel.importFromClipboard(text)
             if (count > 0) {
-                Toast.makeText(requireContext(), "成功导入 $count 个节点", Toast.LENGTH_SHORT).show()
+                Toast.makeText(requireContext(), getString(R.string.nodes_imported, count), Toast.LENGTH_SHORT).show()
             } else {
-                Toast.makeText(requireContext(), "未在剪贴板中发现 mirage:// 节点链接", Toast.LENGTH_SHORT).show()
+                Toast.makeText(requireContext(), R.string.nodes_import_none, Toast.LENGTH_SHORT).show()
             }
         }
 
         binding.btnTestAll.setOnClickListener {
             com.mirage.android.util.Haptic.confirm(it)
             // 批量测速 + RTT 排序展示
+            // 结果不再倒进对话框: 每一行本来就会显示自己的 RTT (NodeAdapter 里按
+            // 100/250ms 分三档着色)。订阅动辄上百个节点, 对话框里那一坨纯文本既读
+            // 不了也点不了。这里只留一句概要和"选最快"这个唯一有用的动作。
             viewModel.testAllWithSort { sorted ->
+                val root = _binding?.root ?: return@testAllWithSort
                 if (sorted.isEmpty()) {
-                    Toast.makeText(requireContext(), "全部节点不可用", Toast.LENGTH_LONG).show()
+                    Toast.makeText(requireContext(), R.string.nodes_all_unavailable, Toast.LENGTH_LONG).show()
                     return@testAllWithSort
                 }
-                val msg = sorted.joinToString("\n") { "${it.first.displayName}: ${it.second}ms" }
-                AlertDialog.Builder(requireContext())
-                    .setTitle("测速结果 (${sorted.size} 可用, 按延迟排序)")
-                    .setMessage(msg)
-                    .setPositiveButton("选择最优") { _, _ ->
-                        val best = sorted.first()
-                        val idx = viewModel.nodes.value.indexOfFirst { it.uri == best.first.uri }
-                        if (idx >= 0) viewModel.selectNode(idx)
-                    }
-                    .setNegativeButton("关闭", null)
-                    .show()
+                val best = sorted.first()
+                val bar = Snackbar.make(
+                    root,
+                    getString(R.string.nodes_test_summary, sorted.size, best.first.displayName, best.second),
+                    Snackbar.LENGTH_LONG
+                )
+                // 悬浮胶囊导航栏盖在底部, 不锚定就会被它压住
+                activity?.findViewById<View>(R.id.cardFloatingNav)?.let(bar::setAnchorView)
+                bar.setAction(R.string.nodes_pick_best) {
+                    val idx = viewModel.nodes.value.indexOfFirst { it.uri == best.first.uri }
+                    if (idx >= 0) viewModel.selectNode(idx)
+                }
+                bar.show()
             }
         }
 
@@ -146,22 +154,22 @@ class NodesFragment : Fragment() {
                 launch {
                     viewModel.isTestingAll.collect { testing ->
                         binding.btnTestAll.isEnabled = !testing
-                        binding.btnTestAll.text = if (testing) "测速中…" else "一键测速"
+                        binding.btnTestAll.text = getString(if (testing) R.string.nodes_testing else R.string.nodes_test_all)
                     }
                 }
                 launch {
                     viewModel.isAutoSelect.collect { auto ->
-                        binding.autoSelectBtn.text = if (auto) "自动优选: 开" else "自动优选: 关"
+                        binding.autoSelectBtn.text = getString(if (auto) R.string.nodes_auto_on else R.string.nodes_auto_off)
                     }
                 }
                 launch {
                     viewModel.testMethod.collect { method ->
-                        binding.testMethodBtn.text = "测速: ${method.uppercase()}"
+                        binding.testMethodBtn.text = getString(R.string.nodes_test_method_fmt, method.uppercase())
                     }
                 }
                 launch {
                     viewModel.poolSize.collect { size ->
-                        binding.btnPoolSize.text = "连接池: $size"
+                        binding.btnPoolSize.text = getString(R.string.nodes_pool_fmt, size)
                     }
                 }
             }
@@ -182,29 +190,29 @@ class NodesFragment : Fragment() {
         val currentIdx = sizes.indexOf(currentSize).coerceAtLeast(2)
 
         AlertDialog.Builder(requireContext())
-            .setTitle("设置并发连接池容量 (Warm Pool Size)")
+            .setTitle(R.string.nodes_pool_title)
             .setSingleChoiceItems(items, currentIdx) { dialog, which ->
                 val selected = sizes[which]
                 viewModel.setPoolSize(selected)
-                Toast.makeText(requireContext(), "已设置连接池容量为: $selected", Toast.LENGTH_SHORT).show()
+                Toast.makeText(requireContext(), getString(R.string.nodes_pool_set, selected), Toast.LENGTH_SHORT).show()
                 dialog.dismiss()
             }
-            .setNegativeButton("取消", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
     private fun chooseTestMethod() {
-        val items = arrayOf("tcp (TCP 连接延迟)", "ping (同 TCP)", "connect (完整 Mirage 握手)")
+        val items = arrayOf(getString(R.string.nodes_test_tcp), getString(R.string.nodes_test_ping), getString(R.string.nodes_test_connect))
         val keys = arrayOf("tcp", "ping", "connect")
         val currentIdx = keys.indexOf(viewModel.testMethod.value).coerceAtLeast(0)
 
         AlertDialog.Builder(requireContext())
-            .setTitle("选择测速方法")
+            .setTitle(R.string.nodes_test_method_title)
             .setSingleChoiceItems(items, currentIdx) { dialog, which ->
                 viewModel.setTestMethod(keys[which])
                 dialog.dismiss()
             }
-            .setNegativeButton("取消", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
@@ -270,14 +278,14 @@ class NodesFragment : Fragment() {
         layout.addView(manualBox)
 
         AlertDialog.Builder(ctx)
-            .setTitle(if (index == null) "添加节点" else "编辑节点")
+            .setTitle(if (index == null) R.string.nodes_add else R.string.node_edit_title)
             .setView(layout)
-            .setPositiveButton("保存") { _, _ ->
+            .setPositiveButton(R.string.save) { _, _ ->
                 val uri: String
                 if (radioLink.isChecked) {
                     uri = linkInput.text.toString().trim()
                     if (!uri.startsWith("mirage://")) {
-                        Toast.makeText(ctx, "链接格式必须以 mirage:// 开头", Toast.LENGTH_LONG).show()
+                        Toast.makeText(ctx, R.string.node_uri_prefix_error, Toast.LENGTH_LONG).show()
                         return@setPositiveButton
                     }
                 } else {
@@ -287,7 +295,7 @@ class NodesFragment : Fragment() {
                     val sni = sniInput.text.toString().trim().ifEmpty { "www.apple.com" }
 
                     if (server.isEmpty() || pwd.isEmpty()) {
-                        Toast.makeText(ctx, "服务器和密码为必填项", Toast.LENGTH_LONG).show()
+                        Toast.makeText(ctx, R.string.node_required_fields, Toast.LENGTH_LONG).show()
                         return@setPositiveButton
                     }
                     uri = Node.uriOf(server, port, pwd, sni)
@@ -301,7 +309,7 @@ class NodesFragment : Fragment() {
                     viewModel.updateNode(index, uri, name)
                 }
             }
-            .setNegativeButton("取消", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 

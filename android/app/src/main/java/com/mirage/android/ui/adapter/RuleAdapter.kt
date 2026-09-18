@@ -12,6 +12,7 @@ import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.mirage.android.data.model.Rule
 import com.mirage.android.databinding.ItemRuleBinding
+import com.mirage.android.R
 
 class RuleAdapter(
     private val onEdit: (Int, Rule) -> Unit,
@@ -41,7 +42,7 @@ class RuleAdapter(
 
             if (rule.isComposite) {
                 binding.tvLogicBadge.visibility = View.VISIBLE
-                binding.tvLogicBadge.text = "${rule.logic.uppercase()} 复合"
+                binding.tvLogicBadge.text = binding.root.context.getString(R.string.rule_logic_badge, rule.logic.uppercase())
             } else {
                 binding.tvLogicBadge.visibility = View.GONE
             }
@@ -49,7 +50,7 @@ class RuleAdapter(
             binding.tvAction.text = rule.actionDisplayName
             if (rule.hits > 0) {
                 binding.tvHits.visibility = View.VISIBLE
-                binding.tvHits.text = "${rule.hits}次"
+                binding.tvHits.text = binding.root.context.getString(R.string.rule_hits_fmt, rule.hits)
             } else {
                 binding.tvHits.visibility = View.GONE
             }
@@ -108,16 +109,16 @@ class RuleAdapter(
             val total = itemCount
 
             if (position > 0) {
-                popup.menu.add(0, 10, 0, "📌 置顶 (移至 #1)")
-                popup.menu.add(0, 11, 1, "⬆️ 上移一位")
+                popup.menu.add(0, 10, 0, R.string.rule_menu_top)
+                popup.menu.add(0, 11, 1, R.string.rule_menu_up)
             }
             if (position < total - 1) {
-                popup.menu.add(0, 12, 2, "⬇️ 下移一位")
-                popup.menu.add(0, 13, 3, "🔻 置底 (移至最后)")
+                popup.menu.add(0, 12, 2, R.string.rule_menu_down)
+                popup.menu.add(0, 13, 3, R.string.rule_menu_bottom)
             }
-            popup.menu.add(0, 1, 4, "✏️ 编辑规则")
-            popup.menu.add(0, 2, 5, if (rule.enabled) "⏸️ 禁用规则" else "▶️ 启用规则")
-            popup.menu.add(0, 3, 6, "🗑️ 删除规则")
+            popup.menu.add(0, 1, 4, R.string.rule_menu_edit)
+            popup.menu.add(0, 2, 5, if (rule.enabled) R.string.rule_menu_disable else R.string.rule_menu_enable)
+            popup.menu.add(0, 3, 6, R.string.rule_menu_delete)
 
             popup.setOnMenuItemClickListener { item ->
                 when (item.itemId) {

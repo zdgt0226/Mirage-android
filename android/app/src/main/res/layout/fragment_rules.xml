@@ -20,7 +20,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="分流规则"
+            android:text="@string/rules_title"
             android:textColor="@color/meow_ink"
             android:textSize="22sp"
             android:textStyle="bold" />
@@ -32,7 +32,7 @@
             android:layout_height="38dp"
             android:layout_marginEnd="6dp"
             android:paddingHorizontal="8dp"
-            android:text="清空统计"
+            android:text="@string/rules_clear_stats"
             android:textColor="@color/meow_ink_secondary"
             android:textSize="12sp" />
 
@@ -42,7 +42,7 @@
             android:layout_width="wrap_content"
             android:layout_height="38dp"
             android:paddingHorizontal="10dp"
-            android:text="默认: 代理"
+            android:text="@string/rules_default_proxy"
             android:textSize="12sp"
             app:cornerRadius="8dp"
             app:strokeColor="@color/meow_outline" />
@@ -86,7 +86,7 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Geo 规则集资产中心"
+                    android:text="@string/rules_geo_entry"
                     android:textColor="@color/meow_ink"
                     android:textSize="14sp"
                     android:textStyle="bold" />
@@ -96,7 +96,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="2dp"
-                    android:text="规则源设置 · 自动更新调度 · Tag 深度内省器"
+                    android:text="@string/rules_geo_entry_desc"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="11sp" />
             </LinearLayout>
@@ -147,7 +147,7 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="分应用代理 (Per-App Proxy)"
+                    android:text="@string/rules_perapp_entry"
                     android:textColor="@color/meow_ink"
                     android:textSize="14sp"
                     android:textStyle="bold" />
@@ -157,7 +157,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="2dp"
-                    android:text="白名单 / 黑名单模式 · 精确指定应用进出 VPN"
+                    android:text="@string/rules_perapp_entry_desc"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="11sp" />
             </LinearLayout>
@@ -183,7 +183,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="规则列表 (首条命中即生效)"
+            android:text="@string/rules_list_label"
             android:textColor="@color/meow_ink"
             android:textSize="13sp"
             android:textStyle="bold" />
@@ -191,7 +191,7 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="按住 ≡ 上下拖动调优"
+            android:text="@string/rules_drag_hint"
             android:textColor="@color/meow_ink_secondary"
             android:textSize="11sp" />
     </LinearLayout>
@@ -215,7 +215,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="center"
-            android:text="暂无自定义规则，点击下方「常用预设」或「添加规则」"
+            android:text="@string/rules_empty"
             android:textColor="@color/meow_ink_secondary"
             android:textSize="13sp"
             android:visibility="gone" />
@@ -235,7 +235,7 @@
             android:layout_marginEnd="4dp"
             android:layout_weight="1"
             android:paddingHorizontal="4dp"
-            android:text="常用预设"
+            android:text="@string/rules_presets"
             android:textSize="13sp"
             app:cornerRadius="10dp" />
 
@@ -247,7 +247,7 @@
             android:layout_marginHorizontal="4dp"
             android:layout_weight="1"
             android:paddingHorizontal="4dp"
-            android:text="添加规则"
+            android:text="@string/rules_add"
             android:textSize="13sp"
             app:cornerRadius="10dp" />
 
@@ -259,7 +259,7 @@
             android:layout_marginStart="4dp"
             android:layout_weight="1"
             android:paddingHorizontal="4dp"
-            android:text="应用规则"
+            android:text="@string/rules_apply"
             android:textSize="13sp"
             app:cornerRadius="10dp" />
     </LinearLayout>

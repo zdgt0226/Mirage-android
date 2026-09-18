@@ -13,6 +13,7 @@ import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.mirage.android.core.CoreController
 import com.mirage.android.data.model.RecentRequestInfo
 import com.mirage.android.databinding.DialogRequestDetailBinding
+import com.mirage.android.R
 
 class RequestDetailBottomSheet() : BottomSheetDialogFragment() {
 
@@ -42,13 +43,13 @@ class RequestDetailBottomSheet() : BottomSheetDialogFragment() {
         binding.tvDetailTitle.text = req.target
 
         binding.tvHostValue.text = req.target
-        binding.tvIpValue.text = req.resolvedIp.ifBlank { "直接转发" }
+        binding.tvIpValue.text = req.resolvedIp.ifBlank { getString(R.string.req_direct_forward) }
         binding.tvOutboundValue.text = req.outbound
         binding.tvRuleValue.text = req.matchedRule
         binding.tvStatusValue.text = req.status
 
         // 耗时瀑布流指标绑定
-        binding.tvWaterfallTotal.text = "总耗时 ${req.durationFormatted}"
+        binding.tvWaterfallTotal.text = getString(R.string.req_total_time, req.durationFormatted)
         binding.tvDnsValue.text = req.dnsFormatted
         binding.tvConnectValue.text = req.connectFormatted
         binding.tvTtfbValue.text = req.ttfbFormatted
@@ -111,15 +112,15 @@ class RequestDetailBottomSheet() : BottomSheetDialogFragment() {
 
             val cm = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
             cm?.setPrimaryClip(ClipData.newPlainText("Mirage Request Detail", text))
-            Toast.makeText(requireContext(), "已复制请求详情与耗时分析", Toast.LENGTH_SHORT).show()
+            Toast.makeText(requireContext(), R.string.req_detail_copied, Toast.LENGTH_SHORT).show()
         }
 
         binding.btnCloseConn.setOnClickListener {
             val ok = CoreController.closeConnection(req.id)
             if (ok) {
-                Toast.makeText(requireContext(), "已重置并切断连接 #${req.id}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(requireContext(), getString(R.string.req_reset_done, req.id), Toast.LENGTH_SHORT).show()
             } else {
-                Toast.makeText(requireContext(), "连接已处于关闭状态", Toast.LENGTH_SHORT).show()
+                Toast.makeText(requireContext(), R.string.req_already_closed, Toast.LENGTH_SHORT).show()
             }
             dismiss()
         }

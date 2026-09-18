@@ -72,16 +72,19 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="1dp"
-                    android:text="Surge 架构安全隧道 · Rust 原生引擎"
+                    android:text="@string/home_subtitle"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="11sp" />
             </LinearLayout>
 
-            <com.google.android.material.switchmaterial.SwitchMaterial
-                android:id="@+id/connectSwitch"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:minWidth="0dp" />
+            <ImageButton
+                android:id="@+id/btnSettings"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/settings_open"
+                android:src="@drawable/ic_settings"
+                app:tint="@color/meow_ink_secondary" />
         </LinearLayout>
 
         <!-- Surge 级出站模式三段式分流控制器 (Segmented Control) -->
@@ -102,7 +105,7 @@
                 android:layout_weight="1"
                 android:insetTop="0dp"
                 android:insetBottom="0dp"
-                android:text="规则分流"
+                android:text="@string/mode_rule"
                 android:textSize="11.5sp" />
 
             <com.google.android.material.button.MaterialButton
@@ -113,7 +116,7 @@
                 android:layout_weight="1"
                 android:insetTop="0dp"
                 android:insetBottom="0dp"
-                android:text="全局代理"
+                android:text="@string/mode_global"
                 android:textSize="11.5sp" />
 
             <com.google.android.material.button.MaterialButton
@@ -124,7 +127,7 @@
                 android:layout_weight="1"
                 android:insetTop="0dp"
                 android:insetBottom="0dp"
-                android:text="直接连接"
+                android:text="@string/mode_direct"
                 android:textSize="11.5sp" />
         </com.google.android.material.button.MaterialButtonToggleGroup>
 
@@ -217,7 +220,7 @@
                             android:layout_weight="1"
                             android:ellipsize="end"
                             android:maxLines="1"
-                            android:text="节点: (无) → 点击添加"
+                            android:text="@string/home_no_node"
                             android:textColor="@color/meow_ink"
                             android:textSize="13.5sp"
                             android:textStyle="bold" />
@@ -225,7 +228,7 @@
                         <TextView
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="切换 ›"
+                            android:text="@string/home_switch_node"
                             android:textColor="@color/meow_blue"
                             android:textSize="12.5sp"
                             android:textStyle="bold" />
@@ -262,7 +265,7 @@
                         <TextView
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="↑ 上行速率"
+                            android:text="@string/rate_up_label"
                             android:textColor="@color/meow_upload"
                             android:textSize="11sp"
                             android:textStyle="bold" />
@@ -288,7 +291,7 @@
                         <TextView
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="↓ 下行速率"
+                            android:text="@string/rate_down_label"
                             android:textColor="@color/meow_download"
                             android:textSize="11sp"
                             android:textStyle="bold" />
@@ -331,7 +334,7 @@
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
                         android:fontFeatureSettings="tnum"
-                        android:text="累计: ↑0B / ↓0B"
+                        android:text="@string/home_total_zero"
                         android:textColor="@color/meow_ink_secondary"
                         android:textSize="11sp" />
 
@@ -340,7 +343,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:fontFeatureSettings="tnum"
-                        android:text="连接: 0"
+                        android:text="@string/home_conns_zero"
                         android:textColor="@color/meow_ink_secondary"
                         android:textSize="11sp" />
                 </LinearLayout>
@@ -351,133 +354,14 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="3dp"
                     android:fontFeatureSettings="tnum"
-                    android:text="今日用量: ↑0B / ↓0B"
+                    android:text="@string/home_today_zero"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="11sp" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- DNS 服务器配置卡片 -->
-        <com.google.android.material.card.MaterialCardView
-            android:id="@+id/dnsCard"
-            style="@style/MirageCard"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:clickable="true"
-            android:focusable="true"
-            android:foreground="?attr/selectableItemBackground"
-            app:cardCornerRadius="12dp">
 
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:padding="12dp">
 
-                <ImageView
-                    android:layout_width="22dp"
-                    android:layout_height="22dp"
-                    android:src="@drawable/ic_dns"
-                    app:tint="@color/meow_blue" />
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="10dp"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="DNS 服务器与 Fake-IP"
-                        android:textColor="@color/meow_ink"
-                        android:textSize="13.5sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/tvDnsSummary"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="2dp"
-                        android:text="国内: 223.5.5.5 · 国外: 1.1.1.1"
-                        android:textColor="@color/meow_ink_secondary"
-                        android:textSize="11.5sp" />
-                </LinearLayout>
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="配置 ›"
-                    android:textColor="@color/meow_blue"
-                    android:textSize="12.5sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
-
-        <!-- TUN 性能与高级调优卡片 -->
-        <com.google.android.material.card.MaterialCardView
-            android:id="@+id/tunCard"
-            style="@style/MirageCard"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:clickable="true"
-            android:focusable="true"
-            android:foreground="?attr/selectableItemBackground"
-            app:cardCornerRadius="12dp">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:padding="12dp">
-
-                <ImageView
-                    android:layout_width="22dp"
-                    android:layout_height="22dp"
-                    android:src="@drawable/ic_nav_traffic"
-                    app:tint="@color/meow_blue" />
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="10dp"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="TUN 性能与网络调优"
-                        android:textColor="@color/meow_ink"
-                        android:textSize="13.5sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/tvTunSummary"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="2dp"
-                        android:text="MTU: 1400 · 批处理: 32 · 0轮询省电"
-                        android:textColor="@color/meow_ink_secondary"
-                        android:textSize="11.5sp" />
-                </LinearLayout>
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="调优 ›"
-                    android:textColor="@color/meow_blue"
-                    android:textSize="12.5sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
-
-        <!-- 连接按钮 (胶囊按钮) -->
         <com.google.android.material.button.MaterialButton
             android:id="@+id/connectBtn"
             style="@style/MirageButton"
@@ -487,38 +371,5 @@
             android:text="@string/connect"
             android:textSize="15sp"
             app:cornerRadius="24dp" />
-
-        <!-- 配置备份/恢复 -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:orientation="horizontal">
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnBackup"
-                style="@style/Widget.Material3.Button.OutlinedButton"
-                android:layout_width="0dp"
-                android:layout_height="40dp"
-                android:layout_marginEnd="3dp"
-                android:layout_weight="1"
-                android:text="备份配置"
-                android:textSize="12.5sp"
-                app:cornerRadius="8dp"
-                app:strokeColor="@color/meow_outline" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnRestore"
-                style="@style/Widget.Material3.Button.OutlinedButton"
-                android:layout_width="0dp"
-                android:layout_height="40dp"
-                android:layout_marginStart="3dp"
-                android:layout_weight="1"
-                android:text="恢复配置"
-                android:textSize="12.5sp"
-                app:cornerRadius="8dp"
-                app:strokeColor="@color/meow_outline" />
-        </LinearLayout>
-
     </LinearLayout>
 </ScrollView>

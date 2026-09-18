@@ -36,7 +36,7 @@
                 android:layout_height="36dp"
                 android:layout_marginStart="8dp"
                 android:background="?attr/selectableItemBackgroundBorderless"
-                android:contentDescription="删除此条件"
+                android:contentDescription="@string/rule_delete_condition"
                 android:padding="6dp"
                 android:src="@android:drawable/ic_menu_delete"
                 app:tint="@color/meow_error" />
@@ -48,7 +48,7 @@
             android:layout_height="40dp"
             android:layout_marginTop="8dp"
             android:background="@drawable/badge_latency_bg"
-            android:hint="匹配内容 (如: google, *.google.com, 443)"
+            android:hint="@string/rule_condition_hint"
             android:imeOptions="actionDone"
             android:inputType="text"
             android:paddingHorizontal="12dp"

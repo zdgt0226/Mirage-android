@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/meow_canvas"
+    android:orientation="vertical">
+
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/meow_card"
+        app:navigationIcon="@drawable/ic_arrow_back"
+        app:navigationIconTint="@color/meow_ink"
+        app:title="@string/settings_title"
+        app:titleTextColor="@color/meow_ink" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:fillViewport="true">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="12dp">
+
+            <!-- 网络 -->
+            <TextView
+                style="@style/MirageSettingsSection"
+                android:text="@string/settings_section_network" />
+
+            <include
+                android:id="@+id/rowDns"
+                layout="@layout/item_settings_row" />
+
+            <include
+                android:id="@+id/rowTun"
+                layout="@layout/item_settings_row" />
+
+            <!-- 内核 -->
+            <TextView
+                style="@style/MirageSettingsSection"
+                android:text="@string/settings_section_core" />
+
+            <include
+                android:id="@+id/rowCore"
+                layout="@layout/item_settings_row" />
+
+            <include
+                android:id="@+id/rowVersion"
+                layout="@layout/item_settings_row" />
+
+            <!-- 配置 -->
+            <TextView
+                style="@style/MirageSettingsSection"
+                android:text="@string/settings_section_config" />
+
+            <include
+                android:id="@+id/rowBackup"
+                layout="@layout/item_settings_row" />
+
+            <include
+                android:id="@+id/rowRestore"
+                layout="@layout/item_settings_row" />
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

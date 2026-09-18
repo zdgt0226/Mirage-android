@@ -44,33 +44,9 @@ class HomeFragment : Fragment() {
 
         updateVersionBadge()
 
-        binding.tvVersion.setOnClickListener {
+        binding.btnSettings.setOnClickListener {
             com.mirage.android.util.Haptic.tap(it)
-            showVersionDetailsDialog()
-        }
-
-        binding.tvAppSubtitle.setOnClickListener {
-            com.mirage.android.util.Haptic.tap(it)
-            showVersionDetailsDialog()
-        }
-
-        binding.connectSwitch.setOnClickListener {
-            com.mirage.android.util.Haptic.toggle(it)
-            val isChecked = binding.connectSwitch.isChecked
-            if (isChecked && !viewModel.vpnState.value.isRunning) {
-                performConnect()
-            } else if (!isChecked && viewModel.vpnState.value.isRunning) {
-                viewModel.disconnect()
-            }
-        }
-
-        binding.btnBackup.setOnClickListener {
-            com.mirage.android.util.Haptic.tap(it)
-            showBackupDialog()
-        }
-        binding.btnRestore.setOnClickListener {
-            com.mirage.android.util.Haptic.tap(it)
-            showRestoreDialog()
+            SettingsActivity.start(requireContext())
         }
 
         binding.connectBtn.setOnClickListener {
@@ -87,18 +63,7 @@ class HomeFragment : Fragment() {
             (activity as? MainActivity)?.navigateToTab(1)
         }
 
-        binding.dnsCard.setOnClickListener {
-            com.mirage.android.util.Haptic.tap(it)
-            showDnsConfigDialog()
-        }
-
-        binding.tunCard.setOnClickListener {
-            com.mirage.android.util.Haptic.tap(it)
-            showTunConfigDialog()
-        }
-
         setupOutboundModeToggle()
-        updateTunSummary()
 
         observeState()
     }
@@ -114,12 +79,12 @@ class HomeFragment : Fragment() {
                 }
                 if (viewModel.outboundMode.value != targetMode) {
                     viewModel.setOutboundMode(targetMode)
-                    val modeName = when (targetMode) {
-                        1 -> "全局代理 (Global)"
-                        2 -> "直接连接 (Direct)"
-                        else -> "规则分流 (Rule)"
-                    }
-                    Toast.makeText(requireContext(), "分流模式已切换为: $modeName", Toast.LENGTH_SHORT).show()
+                    val modeName = getString(when (targetMode) {
+                        1 -> R.string.mode_global_full
+                        2 -> R.string.mode_direct_full
+                        else -> R.string.mode_rule_full
+                    })
+                    Toast.makeText(requireContext(), getString(R.string.mode_switched, modeName), Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -128,8 +93,7 @@ class HomeFragment : Fragment() {
     private fun performConnect() {
         val selected = viewModel.selectedNode.value
         if (selected == null) {
-            Toast.makeText(requireContext(), "请先添加或选择节点 (Tab: 节点)", Toast.LENGTH_SHORT).show()
-            binding.connectSwitch.isChecked = false
+            Toast.makeText(requireContext(), R.string.select_node_first, Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -203,34 +167,10 @@ class HomeFragment : Fragment() {
                     }
                 }
                 launch {
-                    val dnsRepo = com.mirage.android.data.repository.DnsRepository.getInstance(requireContext())
-                    dnsRepo.directDns.collect { direct ->
-                        binding.tvDnsSummary.text = "国内: $direct · 国外: ${dnsRepo.getRemoteDns()}"
-                    }
-                }
-                launch {
-                    val dnsRepo = com.mirage.android.data.repository.DnsRepository.getInstance(requireContext())
-                    dnsRepo.remoteDns.collect { remote ->
-                        binding.tvDnsSummary.text = "国内: ${dnsRepo.getDirectDns()} · 国外: $remote"
-                    }
-                }
-                launch {
-                    val vpnRepo = com.mirage.android.data.repository.VpnRepository.getInstance(requireContext())
-                    vpnRepo.isIpv6Enabled.collect { updateTunSummary() }
-                }
-                launch {
-                    val vpnRepo = com.mirage.android.data.repository.VpnRepository.getInstance(requireContext())
-                    vpnRepo.isBlockQuic.collect { updateTunSummary() }
-                }
-                launch {
-                    val vpnRepo = com.mirage.android.data.repository.VpnRepository.getInstance(requireContext())
-                    vpnRepo.isUdpMux.collect { updateTunSummary() }
-                }
-                launch {
                     viewModel.latencyMs.collect { rtt ->
                         if (rtt >= 0 && viewModel.vpnState.value is VpnState.Connected) {
                             binding.tvLatency.visibility = View.VISIBLE
-                            binding.tvLatency.text = "隧道 RTT: ${rtt}ms"
+                            binding.tvLatency.text = getString(R.string.home_rtt, rtt)
                         } else {
                             binding.tvLatency.visibility = View.GONE
                         }
@@ -242,35 +182,31 @@ class HomeFragment : Fragment() {
 
     private fun updateVpnUi(state: VpnState) {
         android.util.Log.d("Mirage", "[ui] updateVpnUi state=${state}")
-        val running = state.isRunning
-        if (binding.connectSwitch.isChecked != running) {
-            binding.connectSwitch.isChecked = running
-        }
 
         when (state) {
             is VpnState.Connected -> {
                 binding.statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.meow_connected))
-                binding.statusText.text = "已连接 (加密隧道保护中)"
+                binding.statusText.text = getString(R.string.status_connected_detail)
                 binding.statusText.setTextColor(ContextCompat.getColor(requireContext(), R.color.meow_connected))
                 binding.connectBtn.text = getString(R.string.disconnect)
                 binding.connectBtn.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.meow_error))
             }
             is VpnState.Connecting -> {
                 binding.statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.meow_ginger))
-                binding.statusText.text = "正在建立加密隧道…"
+                binding.statusText.text = getString(R.string.status_establishing)
                 binding.statusText.setTextColor(ContextCompat.getColor(requireContext(), R.color.meow_ginger))
-                binding.connectBtn.text = "正在连接…"
+                binding.connectBtn.text = getString(R.string.connecting_btn)
                 binding.connectBtn.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.meow_ginger))
             }
             is VpnState.Stopping -> {
                 binding.statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.meow_disconnected))
-                binding.statusText.text = "正在断开连接…"
+                binding.statusText.text = getString(R.string.status_disconnecting)
                 binding.statusText.setTextColor(ContextCompat.getColor(requireContext(), R.color.meow_disconnected))
-                binding.connectBtn.text = "断开中…"
+                binding.connectBtn.text = getString(R.string.disconnecting_btn)
             }
             is VpnState.Error -> {
                 binding.statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.meow_error))
-                binding.statusText.text = "连接异常: ${state.message}"
+                binding.statusText.text = getString(R.string.status_error, state.message)
                 binding.statusText.setTextColor(ContextCompat.getColor(requireContext(), R.color.meow_error))
                 binding.connectBtn.text = getString(R.string.connect)
                 binding.connectBtn.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.meow_blue))
@@ -294,123 +230,9 @@ class HomeFragment : Fragment() {
     fun updateVersionBadge() {
         val ctx = context ?: return
         val activeCore = com.mirage.android.core.CoreManager.getInstance(ctx).getActiveCore()
-        val coreTag = if (activeCore.isBuiltin) "内置" else "自定义"
-        _binding?.tvVersion?.text = "v${com.mirage.android.BuildConfig.VERSION_NAME} · $coreTag"
-        _binding?.tvAppSubtitle?.text = "安全隧道代理 · Build ${com.mirage.android.BuildConfig.BUILD_TIME} (#${com.mirage.android.BuildConfig.VERSION_CODE})"
-    }
-
-    private fun showVersionDetailsDialog() {
-        val ctx = requireContext()
-        val activeCore = com.mirage.android.core.CoreManager.getInstance(ctx).getActiveCore()
-        val coreDesc = if (activeCore.isBuiltin) "内置核心 (Mirage Rust Core)" else "自定义核心: ${activeCore.name}"
-        val nativeVer = runCatching { com.mirage.android.core.MirageNative.version() }.getOrDefault("v0.2.1")
-
-        val info = """
-            📱 客户端版本: v${com.mirage.android.BuildConfig.VERSION_NAME}
-            🔢 版本编号: Code ${com.mirage.android.BuildConfig.VERSION_CODE} (${com.mirage.android.BuildConfig.BUILD_TAG})
-            📅 构建日期: ${com.mirage.android.BuildConfig.BUILD_TIME}
-            ⚙️ 运行内核: $coreDesc ($nativeVer)
-            🧩 架构对齐: arm64-v8a (16KB Page Aligned)
-            🛡️ 兼容环境: Android 9.0 (API 28) ~ Android 16 (API 36+)
-            🚀 核心特性: QUIC ICMP 端口不可达即时回退、WarmPool 预热池、全量 DNS 路由分流、TUN 零轮询事件驱动 & 防分片 MTU
-        """.trimIndent()
-
-        android.app.AlertDialog.Builder(ctx)
-            .setTitle("版本与运行环境详情")
-            .setMessage(info)
-            .setPositiveButton("管理内核") { _, _ ->
-                (activity as? MainActivity)?.showCoreManagerDialog()
-            }
-            .setNegativeButton("关闭", null)
-            .show()
-    }
-
-    private fun showDnsConfigDialog() {
-        DnsConfigDialog(requireContext()).show()
-    }
-
-    private fun updateTunSummary() {
-        val ctx = context ?: return
-        val mtu = com.mirage.android.core.TunConfigStore.getMtu(ctx)
-        val batch = com.mirage.android.core.TunConfigStore.getBatchSize(ctx)
-        val desc = when (mtu) {
-            1400 -> "1400"
-            1420 -> "1420"
-            1500 -> "1500"
-            1280 -> "1280"
-            else -> "$mtu"
-        }
-        val vpnRepo = com.mirage.android.data.repository.VpnRepository.getInstance(ctx)
-        val ipv6 = if (vpnRepo.isIpv6Enabled.value) "IPv6接管" else "IPv4单栈"
-        val quic = if (vpnRepo.isBlockQuic.value) "屏蔽QUIC" else "放行QUIC"
-        val mux = if (vpnRepo.isUdpMux.value) "UDP Mux" else "单流UDP"
-        binding.tvTunSummary.text = "MTU: $desc · 批处理: $batch · $ipv6 · $quic · $mux"
-    }
-
-    private fun showTunConfigDialog() {
-        TunConfigDialog(requireContext()) {
-            updateTunSummary()
-        }.show()
-    }
-
-    /** 备份配置: 显示导出的 JSON, 可复制/分享。 */
-    private fun showBackupDialog() {
-        val json = com.mirage.android.core.ConfigBackup.export(requireContext())
-        val input = android.widget.EditText(requireContext()).apply {
-            setText(json)
-            setTextSize(12f)
-            isSingleLine = false
-            minLines = 8
-        }
-        android.app.AlertDialog.Builder(requireContext())
-            .setTitle("备份配置 (节点 + 规则 + DNS + 设置)")
-            .setView(input)
-            .setPositiveButton("复制") { _, _ ->
-                val cm = requireContext().getSystemService(android.content.ClipboardManager::class.java)
-                cm.setPrimaryClip(android.content.ClipData.newPlainText("mirage-config", json))
-                Toast.makeText(requireContext(), "配置已复制到剪贴板", Toast.LENGTH_SHORT).show()
-            }
-            .setNegativeButton("关闭", null)
-            .show()
-    }
-
-    /** 恢复配置: 粘贴 JSON 导入 (支持合并或覆盖)。 */
-    private fun showRestoreDialog() {
-        val input = android.widget.EditText(requireContext()).apply {
-            hint = "粘贴备份的 JSON 文本"
-            setTextSize(12f)
-            isSingleLine = false
-            minLines = 8
-        }
-        android.app.AlertDialog.Builder(requireContext())
-            .setTitle("恢复配置")
-            .setView(input)
-            .setPositiveButton("合并导入 (去重)") { _, _ ->
-                val json = input.text.toString().trim()
-                if (json.isEmpty()) { Toast.makeText(requireContext(), "内容为空", Toast.LENGTH_SHORT).show(); return@setPositiveButton }
-                runCatching {
-                    val (nodes, rules) = com.mirage.android.core.ConfigBackup.import(requireContext(), json, overwrite = false)
-                    com.mirage.android.data.repository.NodeRepository.getInstance(requireContext()).reload()
-                    com.mirage.android.data.repository.RuleRepository.getInstance(requireContext()).reload()
-                    Toast.makeText(requireContext(), "已合并导入 $nodes 个新节点, $rules 条新规则", Toast.LENGTH_LONG).show()
-                }.onFailure { e ->
-                    Toast.makeText(requireContext(), "导入失败: ${e.message}", Toast.LENGTH_LONG).show()
-                }
-            }
-            .setNeutralButton("覆盖全部") { _, _ ->
-                val json = input.text.toString().trim()
-                if (json.isEmpty()) { Toast.makeText(requireContext(), "内容为空", Toast.LENGTH_SHORT).show(); return@setNeutralButton }
-                runCatching {
-                    val (nodes, rules) = com.mirage.android.core.ConfigBackup.import(requireContext(), json, overwrite = true)
-                    com.mirage.android.data.repository.NodeRepository.getInstance(requireContext()).reload()
-                    com.mirage.android.data.repository.RuleRepository.getInstance(requireContext()).reload()
-                    Toast.makeText(requireContext(), "已覆盖导入 $nodes 个节点, $rules 条规则", Toast.LENGTH_LONG).show()
-                }.onFailure { e ->
-                    Toast.makeText(requireContext(), "覆盖导入失败: ${e.message}", Toast.LENGTH_LONG).show()
-                }
-            }
-            .setNegativeButton("取消", null)
-            .show()
+        val coreTag = getString(if (activeCore.isBuiltin) R.string.core_tag_builtin else R.string.core_tag_custom)
+        _binding?.tvVersion?.text = getString(R.string.home_version_badge, com.mirage.android.BuildConfig.VERSION_NAME, coreTag)
+        _binding?.tvAppSubtitle?.text = getString(R.string.home_build_subtitle, com.mirage.android.BuildConfig.BUILD_TIME, com.mirage.android.BuildConfig.VERSION_CODE)
     }
 
     private fun fmtBytes(b: Double): String = when {

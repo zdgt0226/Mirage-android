@@ -29,7 +29,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="10dp"
-                android:text="DNS 服务器配置"
+                android:text="@string/dns_title"
                 android:textColor="@color/meow_ink"
                 android:textSize="18sp"
                 android:textStyle="bold" />
@@ -39,7 +39,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="设置国内直连域名查询与国外远程解析 DNS"
+            android:text="@string/dns_desc"
             android:textColor="@color/meow_ink_secondary"
             android:textSize="12sp" />
 
@@ -48,7 +48,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:text="国内直连 DNS (Direct DNS)"
+            android:text="@string/dns_direct_label"
             android:textColor="@color/meow_ink"
             android:textSize="14sp"
             android:textStyle="bold" />
@@ -71,7 +71,7 @@
                     style="@style/Widget.MaterialComponents.Chip.Choice"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="阿里 (223.5.5.5)"
+                    android:text="@string/dns_preset_ali"
                     android:textSize="12sp" />
 
                 <com.google.android.material.chip.Chip
@@ -95,7 +95,7 @@
                     style="@style/Widget.MaterialComponents.Chip.Choice"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="百度 (180.76.76.76)"
+                    android:text="@string/dns_preset_baidu"
                     android:textSize="12sp" />
 
                 <com.google.android.material.chip.Chip
@@ -103,7 +103,7 @@
                     style="@style/Widget.MaterialComponents.Chip.Choice"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="自定义"
+                    android:text="@string/custom"
                     android:textSize="12sp" />
             </com.google.android.material.chip.ChipGroup>
         </HorizontalScrollView>
@@ -124,7 +124,7 @@
                 android:id="@+id/editDirectDns"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:hint="国内 DNS IP (例如 223.5.5.5)"
+                android:hint="@string/dns_direct_hint"
                 android:inputType="textUri"
                 android:singleLine="true"
                 android:textColor="@color/meow_ink"
@@ -136,7 +136,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:text="国外远程 DNS (Remote DNS)"
+            android:text="@string/dns_remote_label"
             android:textColor="@color/meow_ink"
             android:textSize="14sp"
             android:textStyle="bold" />
@@ -191,7 +191,7 @@
                     style="@style/Widget.MaterialComponents.Chip.Choice"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="自定义"
+                    android:text="@string/custom"
                     android:textSize="12sp" />
             </com.google.android.material.chip.ChipGroup>
         </HorizontalScrollView>
@@ -212,7 +212,7 @@
                 android:id="@+id/editRemoteDns"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:hint="国外 DNS IP (例如 1.1.1.1)"
+                android:hint="@string/dns_remote_hint"
                 android:inputType="textUri"
                 android:singleLine="true"
                 android:textColor="@color/meow_ink"
@@ -233,7 +233,7 @@
                 android:layout_height="46dp"
                 android:layout_marginEnd="6dp"
                 android:layout_weight="1"
-                android:text="重置默认"
+                android:text="@string/reset_default"
                 android:textColor="@color/meow_ink_secondary"
                 android:textSize="14sp"
                 app:cornerRadius="23dp"
@@ -246,7 +246,7 @@
                 android:layout_height="46dp"
                 android:layout_marginStart="6dp"
                 android:layout_weight="1"
-                android:text="保存并应用"
+                android:text="@string/save_and_apply"
                 android:textSize="14sp"
                 app:cornerRadius="23dp" />
         </LinearLayout>

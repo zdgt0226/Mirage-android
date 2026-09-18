@@ -152,15 +152,15 @@ class AppFilterActivity : AppCompatActivity() {
 
     private fun updateSummary() {
         val count = selectedPackages.size
-        val modeText = if (currentConfig.mode == AppFilterMode.ALLOW) "仅代理模式" else "绕过模式"
-        val statusText = if (currentConfig.enabled) "已启用" else "未启用"
-        binding.tvSummary.text = "状态: $statusText · 当前: $modeText (已选 $count 款应用)"
+        val modeText = getString(if (currentConfig.mode == AppFilterMode.ALLOW) R.string.perapp_mode_allow else R.string.perapp_mode_bypass)
+        val statusText = getString(if (currentConfig.enabled) R.string.state_enabled else R.string.state_disabled)
+        binding.tvSummary.text = getString(R.string.perapp_summary, statusText, modeText, count)
     }
 
     private fun saveAndFinish() {
         val newConfig = currentConfig.copy(selectedPackages = selectedPackages)
         AppFilterStore.saveConfig(this, newConfig)
-        Toast.makeText(this, "分应用代理配置已保存", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, R.string.perapp_saved, Toast.LENGTH_SHORT).show()
         finish()
     }
 

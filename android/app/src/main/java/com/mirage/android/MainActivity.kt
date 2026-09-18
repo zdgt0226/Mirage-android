@@ -52,7 +52,7 @@ class MainActivity : AppCompatActivity() {
         if (result.resultCode == Activity.RESULT_OK) {
             homeViewModel.startVpn()
         } else {
-            Toast.makeText(this, "VPN 权限被拒绝", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, R.string.vpn_permission_denied, Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -229,24 +229,25 @@ class MainActivity : AppCompatActivity() {
 
         val node = parseNodeUri(uri)
         if (node == null) {
-            Toast.makeText(this, "节点链接无效，已忽略", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, R.string.node_uri_invalid, Toast.LENGTH_SHORT).show()
             return
         }
 
         androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("导入节点")
+            .setTitle(R.string.node_import_title)
             .setMessage(
-                "来自外部链接的节点请求：\n\n" +
-                    "服务器：${node.server}\n" +
-                    "端口：${node.port}\n" +
-                    (if (node.sni.isNotBlank()) "SNI：${node.sni}\n" else "") +
-                    "\n只有在你信任该链接来源时才导入。导入后不会自动切换，需要你手动选中。"
+                getString(
+                    R.string.node_import_message,
+                    node.server,
+                    node.port,
+                    if (node.sni.isNotBlank()) getString(R.string.node_import_sni, node.sni) else ""
+                )
             )
-            .setPositiveButton("导入") { _, _ ->
+            .setPositiveButton(R.string.import_action) { _, _ ->
                 NodeRepository.getInstance(this).addNode(node)
-                Toast.makeText(this, "已导入节点，请在节点页手动选中", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, R.string.node_imported_hint, Toast.LENGTH_LONG).show()
             }
-            .setNegativeButton("取消", null)
+            .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
