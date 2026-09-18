@@ -71,13 +71,26 @@ jobs:
           # 走 PATH 而非 $ANDROID_HOME/cmdline-tools/latest/bin —— setup-android v4
           # 把 cmdline-tools 装到 cmdline-tools/<版本> (如 20.0), 只有命中预装且版本
           # 相符时才用 latest。该 action 会把实际所在目录 addPath, 故 PATH 是稳的。
-          yes | sdkmanager "ndk;26.3.11579264" "build-tools;34.0.0"
+          # NDK 版本从 libs.versions.toml 取, 不在这里写第二份。解析不出就地失败 ——
+          # 静默装错版本会在 assembleRelease 才炸, 且报的是"NDK not configured"。
+          NDK_VERSION=$(sed -n 's/^ndk = "\(.*\)"$/\1/p' android/gradle/libs.versions.toml)
+          [ -n "$NDK_VERSION" ] || { echo "::error::无法从 libs.versions.toml 解析 ndk 版本"; exit 1; }
+          echo "NDK 版本 (来自 libs.versions.toml): $NDK_VERSION"
+
+          yes | sdkmanager "ndk;$NDK_VERSION" "build-tools;34.0.0"
+
+          # sdkmanager 对未知包名只是告警, 不以非零退出。装没装上要自己看 ——
+          # 装不上时 AGP 不会失败, 只会少做一步 strip (见下方 Assemble release)。
+          [ -d "$ANDROID_HOME/ndk/$NDK_VERSION" ] || {
+            echo "::error::NDK $NDK_VERSION 未安装成功, 检查 libs.versions.toml 里的版本号是否存在"
+            exit 1
+          }
           # 不写 local.properties 的 ndk.dir。AGP 已弃用该方式 ([CXX5106]), 且它优先级
-          # 高于 ndkVersion —— app/build.gradle.kts 里的 ndkVersion 才是唯一来源,
-          # AGP 会据此在 $ANDROID_HOME/ndk/<版本> 找, 正是上面装进去的位置。
+          # 高于 ndkVersion —— build.gradle.kts 的 ndkVersion (取自 libs.versions.toml)
+          # 才是唯一来源, AGP 会据此在 $ANDROID_HOME/ndk/<版本> 找, 正是上面装的位置。
           #
           # cargo-ndk 不读 Gradle 的任何配置, 必须单独给它一个环境变量。
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> $GITHUB_ENV
 
       # 停在 v5 是刻意的, 不是漏升。gradle/actions@v6 把缓存逻辑抽成闭源的
       # gradle-actions-caching 组件, 用它即视为接受 Gradle 的商业条款
@@ -112,9 +125,22 @@ jobs:
           cd native/mirage-jni
           cargo ndk -t arm64-v8a -o ../../android/app/src/main/jniLibs build --release
 
+      # 不是单纯跑构建: 还要断言 AGP 真的找到了 NDK。
+      #
+      # AGP 找不到 ndkVersion 指定的 NDK 时**不会失败** —— 只打一行
+      # "Unable to strip the following libraries, packaging them as they are"
+      # 然后 BUILD SUCCESSFUL (容器内把版本改成 99.9.99999999 实测)。
+      # 于是版本写错的唯一症状是产物带着符号发出去, 没有任何红灯。
       - name: Assemble release (R8)
         working-directory: android
-        run: ./gradlew :app:assembleRelease --no-daemon
+        run: |
+          set -o pipefail
+          ./gradlew :app:assembleRelease --no-daemon 2>&1 | tee /tmp/assemble.log
+          if grep -q "Unable to strip" /tmp/assemble.log; then
+            echo "::error::AGP 未能 strip 原生库 —— 通常意味着它没找到 ndkVersion 指定的 NDK"
+            grep "Unable to strip" /tmp/assemble.log
+            exit 1
+          fi
 
       # JNI 边界回归门禁。
       #

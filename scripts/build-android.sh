@@ -22,7 +22,13 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 CONTAINER="android-builder"
-NDK="/opt/android-sdk/ndk/26.3.11579264"
+# NDK 版本的唯一来源是 android/gradle/libs.versions.toml (build.gradle.kts 的
+# ndkVersion 也从那里取)。这里解析不出就直接退出, 不要退回硬编码。
+NDK_VERSION="$(sed -n 's/^ndk = "\(.*\)"$/\1/p' "$HERE/android/gradle/libs.versions.toml")"
+[[ -n "$NDK_VERSION" ]] || { echo "!! 无法从 libs.versions.toml 解析 ndk 版本" >&2; exit 1; }
+NDK="/opt/android-sdk/ndk/$NDK_VERSION"
+# 缺这个目录时 AGP 不会失败, 只会静默跳过 strip —— 在这里挡住。
+[[ -d "$NDK" ]] || { echo "!! NDK $NDK_VERSION 未安装 ($NDK 不存在)" >&2; exit 1; }
 CARGO="${CARGO:-cargo}"
 VARIANT="${VARIANT:-debug}"
 case "$VARIANT" in
@@ -101,7 +107,7 @@ build_apk() {
             set -e
             export JAVA_HOME=/opt/jdk-17
             export ANDROID_HOME=/android-sdk
-            export ANDROID_NDK_HOME=/android-sdk/ndk/26.3.11579264
+            export ANDROID_NDK_HOME=/android-sdk/ndk/$NDK_VERSION
             export GRADLE_USER_HOME=/root/.gradle
             export GRADLE_OPTS=\"-Dorg.gradle.native=false\"
             export PATH=/opt/jdk-17/bin:/opt/gradle-8.9/bin:\$PATH
