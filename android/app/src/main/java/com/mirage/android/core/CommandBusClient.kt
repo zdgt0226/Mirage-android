@@ -144,9 +144,13 @@ object CommandBusClient {
                     _statsFlow.tryEmit(stats)
                 }
                 "recent_requests" -> {
-                    val dataStr = obj.optString("data")
-                    if (dataStr.isNotBlank() && dataStr != "[]") {
-                        val arr = JSONArray(dataStr)
+                    val arr = obj.optJSONArray("data") ?: run {
+                        val dataStr = obj.optString("data")
+                        if (dataStr.isNotBlank() && dataStr != "[]") {
+                            runCatching { JSONArray(dataStr) }.getOrNull()
+                        } else null
+                    }
+                    if (arr != null && arr.length() > 0) {
                         val list = ArrayList<RecentRequestInfo>(arr.length())
                         for (i in 0 until arr.length()) {
                             list.add(RecentRequestInfo.fromJson(arr.getJSONObject(i)))

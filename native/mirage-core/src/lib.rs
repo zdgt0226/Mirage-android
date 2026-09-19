@@ -26,9 +26,8 @@ pub mod crypto;
 ///
 /// Android 不隔离 App 之间的 loopback: 任何持有 INTERNET 权限的应用都能访问
 /// 127.0.0.1:9090, 读取 DNS / 连接状态, 并通过 POST /debug/control 关闭全部连接。
-/// 因此该模块绝不可进入分发构建 —— 仅在 debug 构建, 或显式开启 `debug-server`
-/// feature 时才编译。
-#[cfg(any(debug_assertions, feature = "debug-server"))]
+/// 因此该模块仅在显式开启 `debug-server` feature 时才编译, 默认无论 debug 还是 release 均不编译。
+#[cfg(feature = "debug-server")]
 pub mod debug_server;
 pub mod direct;
 pub mod direct_cn_domains;

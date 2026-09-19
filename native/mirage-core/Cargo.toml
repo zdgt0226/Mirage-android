@@ -32,9 +32,8 @@ smoltcp = { version = "0.13", default-features = false, features = ["std", "medi
 # TUN 设备抽象: Android (mirage-jni) 与 iOS 共用; v1 直接用 fd (unix)
 
 [features]
-# 本机调试 REST 接口 (127.0.0.1:9090)。无鉴权, 绝不可开启于分发构建。
-# debug 构建自动启用 (见 lib.rs 的 cfg(debug_assertions)); 此 feature 仅供
-# 需要在 release profile 下本地排障时显式开启。
+# 本机调试 REST 接口 (127.0.0.1:9090)。无鉴权, 默认关闭。
+# 仅供需要排障时显式开启 (--features debug-server)。
 debug-server = []
 
 [dev-dependencies]

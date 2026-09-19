@@ -27,4 +27,9 @@
          与 Color.WHITE (深色模式下会是白卡片贴在深色面板上)。 -->
     <color name="node_row_selected">#E8F1FC</color>
     <color name="node_row_default">#FFFFFF</color>
+    <!-- 头像圆底与浅色胶囊。原先写死在 drawable 里, 深色模式下是刺眼的白圆
+         (Android 16 真机实测: 节点选择层里两行的图标都成了白色大圆)。 -->
+    <color name="avatar_bg">#E8F2FA</color>
+    <color name="pill_bg">#F0F4F8</color>
+    <color name="pill_stroke">#E2E8F0</color>
 </resources>

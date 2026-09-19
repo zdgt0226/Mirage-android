@@ -14,4 +14,7 @@
     <color name="meow_disconnected">#5A7484</color>
     <color name="node_row_selected">#1B3348</color>
     <color name="node_row_default">#152430</color>
+    <color name="avatar_bg">#1E3346</color>
+    <color name="pill_bg">#1B2B38</color>
+    <color name="pill_stroke">#2C4A60</color>
 </resources>
