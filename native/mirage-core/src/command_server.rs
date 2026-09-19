@@ -179,7 +179,14 @@ async fn handle_client(socket: tokio::net::UnixStream, stop_notify: Arc<tokio::s
             }
             _ = reqs_timer.tick() => {
                 // 2. 推送近期请求流快照 (N3: 零二次序列化，流式直接拼接消除二次转义与字符串包装)
+                // reqs_json 是完整 JSON 数组文档 (由 monitor 内部 serde_json 产出)，直接内联而非作为转义字符串值
+                // ⚠️ 若将来 get_recent_requests_json 契约变更或返回非 JSON 裸字符串，此处需改用 serde 转义
                 let reqs_json = crate::monitor::get_recent_requests_json();
+                debug_assert!(
+                    reqs_json.starts_with('[') && reqs_json.ends_with(']'),
+                    "reqs_json 必须为合法的 JSON 数组文档: {}",
+                    reqs_json
+                );
                 let mut buf = Vec::with_capacity(reqs_json.len() + 36);
                 buf.extend_from_slice(b"{\"event\":\"recent_requests\",\"data\":");
                 buf.extend_from_slice(reqs_json.as_bytes());
