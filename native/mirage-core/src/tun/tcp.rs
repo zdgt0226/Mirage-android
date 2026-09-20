@@ -687,21 +687,23 @@ async fn relay_proxy(
             }
         }
     }
+    let final_up = conn_up.load(std::sync::atomic::Ordering::Relaxed).max(up);
+    let final_down = conn_down.load(std::sync::atomic::Ordering::Relaxed).max(down);
     let duration_ms = start_time.elapsed().as_millis() as u64;
     crate::monitor::record_conn_close_with_duration(
         cid,
-        up,
-        down,
+        final_up,
+        final_down,
         &format!("{:?}", close_reason),
         duration_ms,
     );
     let req_total = request_count.load(std::sync::atomic::Ordering::Relaxed);
     // 复用或大流量长连接 (避免单请求大文件下载被误判为一次性短探测触发 zombie decay)
-    let is_reused = req_total >= 2 || down >= 512 * 1024 || (up + down) >= 1024 * 1024;
+    let is_reused = req_total >= 2 || final_down >= 512 * 1024 || (final_up + final_down) >= 1024 * 1024;
     crate::tun::adaptive_idle::record_conn_metrics(
         direct_domain.as_deref(),
-        up,
-        down,
+        final_up,
+        final_down,
         duration_ms,
         close_reason,
         is_reused,
@@ -710,8 +712,8 @@ async fn relay_proxy(
         "[TUN-TCP] {}:{} 关闭 (↑{} ↓{}, 耗时{}ms, 原因:{:?}, 请求数:{}, 复用:{})",
         dst.0,
         dst.1,
-        crate::tun::udp::human_bytes(up),
-        crate::tun::udp::human_bytes(down),
+        crate::tun::udp::human_bytes(final_up),
+        crate::tun::udp::human_bytes(final_down),
         duration_ms,
         close_reason,
         req_total,
@@ -983,6 +985,16 @@ async fn relay_direct(
             &cnt as *const _ as *const libc::c_void,
             std::mem::size_of_val(&cnt) as libc::socklen_t,
         );
+        // TCP MSS Clamping: 显式将出站 SYN 通告的 MSS 限制在安全阈值内，杜绝蜂窝网络 PMTU 黑洞 (如移动基站 1400/1432 MTU 下 3~4KB TLS 证书大包静默丢弃)
+        // IPv4: 1360 (1400 MTU - 20 IP - 20 TCP), IPv6: 1340 (1400 MTU - 40 IPv6 - 20 TCP)
+        let mss: libc::c_int = if addr.is_ipv4() { 1360 } else { 1340 };
+        libc::setsockopt(
+            raw_fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_MAXSEG,
+            &mss as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&mss) as libc::socklen_t,
+        );
     }
     // protect: 直连 socket 也要绕过 TUN (否则 0.0.0.0/0→tun0 环路)
     crate::protect::protect(raw_fd);
@@ -993,8 +1005,17 @@ async fn relay_direct(
     let is_raw_cn_ip = direct_domain.is_none() && crate::direct::is_cn_ip(target_ip);
     let connect_start = std::time::Instant::now();
 
+    // 针对国内裸 IPv6 直连 (如 Bilibili/淘宝等 App 的 HTTPDNS 并发 Happy Eyeballs):
+    // 移动蜂窝网络环境下的 IPv6 路由常常处于劣势或黑洞。若国内 IPv6 直连死等 2500ms，会导致 Happy Eyeballs 整体大幅延误。
+    // 将国内裸 IPv6 握手超时压缩至 800ms，超时即刻向客户端回送 RST，促使客户端应用层秒级回退至 IPv4 成功握手。
+    let connect_timeout = if is_raw_cn_ip && target_ip.is_ipv6() {
+        std::time::Duration::from_millis(800)
+    } else {
+        std::time::Duration::from_millis(2500)
+    };
+
     let mut remote = match tokio::time::timeout(
-        std::time::Duration::from_millis(2500),
+        connect_timeout,
         sock.connect(addr),
     )
     .await
@@ -1022,7 +1043,7 @@ async fn relay_direct(
         Err(_) => {
             if is_raw_cn_ip || is_strict_cn {
                 crate::monitor::record_conn_close(cid, 0, 0, "Direct Connect Timeout");
-                debug!("[TUN-TCP/direct] 直连国内目标 {addr} 2.5s 超时");
+                debug!("[TUN-TCP/direct] 直连国内目标 {addr} 握手超时 ({:?})", connect_timeout);
                 return;
             }
             crate::monitor::record_conn_close(cid, 0, 0, "Connect Timeout (Fallback Proxy)");
@@ -1217,11 +1238,13 @@ async fn relay_direct(
             }
         }
     }
+    let final_up = conn_up.load(std::sync::atomic::Ordering::Relaxed).max(up);
+    let final_down = conn_down.load(std::sync::atomic::Ordering::Relaxed).max(down);
     let duration_ms = start_time.elapsed().as_millis() as u64;
     crate::monitor::record_conn_close_with_duration(
         cid,
-        up,
-        down,
+        final_up,
+        final_down,
         &format!("{:?}", close_reason),
         duration_ms,
     );
@@ -1229,8 +1252,8 @@ async fn relay_direct(
     let is_reused = req_total >= 2;
     crate::tun::adaptive_idle::record_conn_metrics(
         direct_domain.as_deref(),
-        up,
-        down,
+        final_up,
+        final_down,
         duration_ms,
         close_reason,
         is_reused,
@@ -1239,8 +1262,8 @@ async fn relay_direct(
         "[TUN-TCP/direct] {}:{} 直连关闭 (↑{} ↓{}, 耗时{}ms, 原因:{:?}, 请求数:{}, 复用:{})",
         dst.0,
         dst.1,
-        crate::tun::udp::human_bytes(up),
-        crate::tun::udp::human_bytes(down),
+        crate::tun::udp::human_bytes(final_up),
+        crate::tun::udp::human_bytes(final_down),
         duration_ms,
         close_reason,
         req_total,

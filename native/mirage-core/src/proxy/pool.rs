@@ -760,6 +760,15 @@ impl WarmPool {
                     &cnt as *const _ as *const libc::c_void,
                     std::mem::size_of_val(&cnt) as libc::socklen_t,
                 );
+                // TCP MSS Clamping: 限制隧道 Socket 的 MSS，杜绝蜂窝网络 PMTU 黑洞
+                let mss: libc::c_int = if a.is_ipv4() { 1360 } else { 1340 };
+                libc::setsockopt(
+                    raw_fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_MAXSEG,
+                    &mss as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&mss) as libc::socklen_t,
+                );
             }
             // ⚠️ protect 必须在 connect 之前 (SO_MARK 影响路由选择)
             crate::protect::protect(raw_fd);

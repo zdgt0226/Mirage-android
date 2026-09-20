@@ -161,6 +161,21 @@ class CoreService : VpnService() {
         }
     }
 
+    /**
+     * 判定指定网络是否为合法的公网物理数据出口。
+     * 严格校验:
+     * 1. 排除 VPN 自身虚拟网卡 (!TRANSPORT_VPN && NET_CAPABILITY_NOT_VPN);
+     * 2. 具备公网访问能力 (NET_CAPABILITY_INTERNET);
+     * 3. 非受限网络 (NET_CAPABILITY_NOT_RESTRICTED, 杜绝电信/移动 IMS、VoLTE、MMS 专网 APN 黑洞).
+     */
+    private fun isPhysicalInternet(cm: ConnectivityManager?, network: Network, caps: NetworkCapabilities? = null): Boolean {
+        val c = caps ?: cm?.getNetworkCapabilities(network) ?: return false
+        return !c.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                c.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) &&
+                c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                c.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
+    }
+
     private fun flushLogsAndStats() {
         runCatching {
             val logs = (LogStore.all() + MirageNative.recentLogs().toList()).joinToString("\n")
@@ -519,12 +534,8 @@ class CoreService : VpnService() {
         // 显式绑定底层物理网络 (解决 Xiaomi HyperOS / Samsung OneUI / 5G 防火墙静默丢包与内核 eBPF 穿透)
         runCatching {
             val cm = getSystemService(ConnectivityManager::class.java)
-            val isPhysical = { net: Network ->
-                val caps = cm?.getNetworkCapabilities(net)
-                caps != null && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-            }
             val active = cm?.activeNetwork
-            val physical = if (active != null && isPhysical(active)) {
+            val physical = if (active != null && isPhysicalInternet(cm, active)) {
                 active
             } else {
                 null
@@ -618,21 +629,21 @@ class CoreService : VpnService() {
         val cm = getSystemService(ConnectivityManager::class.java)
         if (cm != null && networkCallback == null) {
             val cb = object : ConnectivityManager.NetworkCallback() {
-                private fun isPhysical(network: Network, caps: NetworkCapabilities?): Boolean {
-                    val c = caps ?: cm.getNetworkCapabilities(network) ?: return false
-                    return !c.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
-                            c.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                }
-
                 override fun onAvailable(network: Network) {
-                    if (isPhysical(network, null)) {
+                    if (isPhysicalInternet(cm, network, null)) {
                         switchTo(network)
                     }
                 }
 
                 override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
-                    if (isPhysical(network, networkCapabilities)) {
+                    if (isPhysicalInternet(cm, network, networkCapabilities)) {
                         switchTo(network)
+                    } else {
+                        synchronized(netLock) {
+                            if (currentPhysicalNetwork == network) {
+                                switchTo(null)
+                            }
+                        }
                     }
                 }
 
