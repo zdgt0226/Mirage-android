@@ -4,7 +4,17 @@
 
 ---
 
-## [2026-09-15] 修 flaky 测试: mirage-core `direct` 路由测试并发踩全局规则
+## [2026-09-21] 移动端内核 CI 裁剪 + 体积守卫
+
+- **mirage-jni `opt-level` 3 → "s"** (移动端 .so 体积优先): 实测 host .so 4.5MB→3.5MB (**-22%**),
+  arm64 预计 3.9MB→~3.1MB。crypto=ring 汇编不受 opt 影响、relay 内存/syscall 主导 → 真实吞吐几乎不损。
+  strip + lto + codegen-units=1 保持。**未加 `panic=abort`** —— JNI 边界靠 `catch_unwind` 兜 panic
+  防闪退 (真机踩坑), abort 会破坏它。
+- **删 mirage-core 死 `[profile.release]`**: 它是被 mirage-jni 依赖的 rlib (非构建根), Cargo 忽略其
+  profile —— 生效的是 mirage-jni 的。留注释免"改了没生效"误导。
+- **CI `.so` 体积守卫** (`ci.yml`): 交叉编译后打印 arm64 `.so` 体积, 超 **4 MiB** 即挂 (防依赖爆炸/
+  误开 feature/退回 opt=3 这类回胖 +25%↑)。回胖先 `cargo bloat`/`cargo tree` 查根因再显式调阈值。
+- feature 侧已干净 (mirage-core 仅 `debug-server` 默认关, release 不含调试面)。
 
 `direct.rs` 里 3 个单元测试 (`geosite_cn_direct_does_not_hijack_foreign_domains` /
 `test_is_cn_ip_accuracy_and_boundary_cases` / `test_default_router_ip_substring_immunity`)
