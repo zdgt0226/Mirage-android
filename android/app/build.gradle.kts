@@ -25,7 +25,7 @@ android {
     defaultConfig {
         applicationId = "com.mirage.android"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 36
         versionCode = propVersionCode
         versionName = propVersionName
         buildConfigField("String", "BUILD_TIME", "\"$propBuildTime\"")
