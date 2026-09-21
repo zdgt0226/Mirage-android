@@ -22,7 +22,7 @@ mimalloc = { version = "0.1", default-features = false }
 
 [profile.release]
 strip = true
-opt-level = 3
+opt-level = "s"  # 移动端 .so 体积优先 (省 ~22%); crypto=ring 汇编不受 opt 影响, relay 内存/syscall 主导, 真实吞吐几乎不损
 lto = true
 codegen-units = 1
 

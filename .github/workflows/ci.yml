@@ -125,6 +125,20 @@ jobs:
           cd native/mirage-jni
           cargo ndk -t arm64-v8a -o ../../android/app/src/main/jniLibs build --release
 
+      # .so 体积守卫: 移动端内核裁剪的 CI 卡尺。当前 opt-level=s + strip + lto + cg1 下 arm64 ≈ 3.0-3.3MB。
+      # 阈值 4 MiB 留足头量, 只掐"依赖爆炸/误开 feature/退回 opt=3"这类回胖 (+25%↑)。回胖时先 `cargo bloat`
+      # 或 `cargo tree` 查根因; 确属合理增长再调高阈值 (显式改动, 别默默放大)。
+      - name: .so 体积守卫 (arm64, 防回胖)
+        run: |
+          so=android/app/src/main/jniLibs/arm64-v8a/libmirage_jni.so
+          sz=$(stat -c%s "$so")
+          max=$((4 * 1024 * 1024))
+          echo "::notice::libmirage_jni.so (arm64-v8a) = ${sz} bytes (~$((sz/1024)) KiB), 上限 $((max/1024)) KiB"
+          if [ "$sz" -gt "$max" ]; then
+            echo "::error::.so 体积 $sz > 上限 $max —— 移动端内核回胖了。查依赖 (cargo bloat / cargo tree), 或显式调高阈值。"
+            exit 1
+          fi
+
       # 不是单纯跑构建: 还要断言 AGP 真的找到了 NDK。
       #
       # AGP 找不到 ndkVersion 指定的 NDK 时**不会失败** —— 只打一行

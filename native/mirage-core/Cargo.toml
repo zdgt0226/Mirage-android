@@ -46,8 +46,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 name = "tun_e2e"
 path = "examples/tun_e2e.rs"
 
-[profile.release]
-strip = true
-opt-level = 3
-lto = true
-codegen-units = 1
+# 注: 本 crate 是被 mirage-jni 依赖的 rlib (非构建根), Cargo 会**忽略**这里的 [profile.*]
+# —— 生效的是构建根 mirage-jni/Cargo.toml 的 [profile.release] (strip + opt-level=s + lto + cg1)。
+# 故此处不再重复声明 profile, 免误导 ("改了没生效")。tun_e2e example 独立 `cargo build` 时才用得上,
+# 那种场景保持默认 release 即可。

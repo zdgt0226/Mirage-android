@@ -688,7 +688,9 @@ async fn relay_proxy(
         }
     }
     let final_up = conn_up.load(std::sync::atomic::Ordering::Relaxed).max(up);
-    let final_down = conn_down.load(std::sync::atomic::Ordering::Relaxed).max(down);
+    let final_down = conn_down
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .max(down);
     let duration_ms = start_time.elapsed().as_millis() as u64;
     crate::monitor::record_conn_close_with_duration(
         cid,
@@ -699,7 +701,8 @@ async fn relay_proxy(
     );
     let req_total = request_count.load(std::sync::atomic::Ordering::Relaxed);
     // 复用或大流量长连接 (避免单请求大文件下载被误判为一次性短探测触发 zombie decay)
-    let is_reused = req_total >= 2 || final_down >= 512 * 1024 || (final_up + final_down) >= 1024 * 1024;
+    let is_reused =
+        req_total >= 2 || final_down >= 512 * 1024 || (final_up + final_down) >= 1024 * 1024;
     crate::tun::adaptive_idle::record_conn_metrics(
         direct_domain.as_deref(),
         final_up,
@@ -1014,12 +1017,7 @@ async fn relay_direct(
         std::time::Duration::from_millis(2500)
     };
 
-    let mut remote = match tokio::time::timeout(
-        connect_timeout,
-        sock.connect(addr),
-    )
-    .await
-    {
+    let mut remote = match tokio::time::timeout(connect_timeout, sock.connect(addr)).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             if is_raw_cn_ip || is_strict_cn {
@@ -1043,7 +1041,10 @@ async fn relay_direct(
         Err(_) => {
             if is_raw_cn_ip || is_strict_cn {
                 crate::monitor::record_conn_close(cid, 0, 0, "Direct Connect Timeout");
-                debug!("[TUN-TCP/direct] 直连国内目标 {addr} 握手超时 ({:?})", connect_timeout);
+                debug!(
+                    "[TUN-TCP/direct] 直连国内目标 {addr} 握手超时 ({:?})",
+                    connect_timeout
+                );
                 return;
             }
             crate::monitor::record_conn_close(cid, 0, 0, "Connect Timeout (Fallback Proxy)");
@@ -1239,7 +1240,9 @@ async fn relay_direct(
         }
     }
     let final_up = conn_up.load(std::sync::atomic::Ordering::Relaxed).max(up);
-    let final_down = conn_down.load(std::sync::atomic::Ordering::Relaxed).max(down);
+    let final_down = conn_down
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .max(down);
     let duration_ms = start_time.elapsed().as_millis() as u64;
     crate::monitor::record_conn_close_with_duration(
         cid,
