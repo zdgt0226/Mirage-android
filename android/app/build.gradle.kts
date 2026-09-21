@@ -18,7 +18,7 @@ val propVersionName = project.findProperty("versionName") as? String ?: "0.3.0"
 
 android {
     namespace = "com.mirage.android"
-    compileSdk = 34
+    compileSdk = 36
     // 唯一来源见 gradle/libs.versions.toml 的 ndk
     ndkVersion = libs.versions.ndk.get()
 

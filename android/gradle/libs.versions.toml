@@ -1,5 +1,5 @@
 [versions]
-agp = "8.7.3"
+agp = "8.13.0"
 # NDK 版本的唯一来源。app/build.gradle.kts 的 ndkVersion、CI 的 sdkmanager
 # 安装与 ANDROID_NDK_HOME、scripts/build-android.sh 全部从这里取。
 ndk = "26.3.11579264"

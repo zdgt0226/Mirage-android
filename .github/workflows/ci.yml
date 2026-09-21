@@ -77,7 +77,7 @@ jobs:
           [ -n "$NDK_VERSION" ] || { echo "::error::无法从 libs.versions.toml 解析 ndk 版本"; exit 1; }
           echo "NDK 版本 (来自 libs.versions.toml): $NDK_VERSION"
 
-          yes | sdkmanager "ndk;$NDK_VERSION" "build-tools;34.0.0"
+          yes | sdkmanager "ndk;$NDK_VERSION" "build-tools;34.0.0" "platforms;android-36" "build-tools;36.0.0"
 
           # sdkmanager 对未知包名只是告警, 不以非零退出。装没装上要自己看 ——
           # 装不上时 AGP 不会失败, 只会少做一步 strip (见下方 Assemble release)。
@@ -139,6 +139,35 @@ jobs:
           if grep -q "Unable to strip" /tmp/assemble.log; then
             echo "::error::AGP 未能 strip 原生库 —— 通常意味着它没找到 ndkVersion 指定的 NDK"
             grep "Unable to strip" /tmp/assemble.log
+            exit 1
+          fi
+
+      # 最低支持版本门禁。
+      #
+      # 项目要求最低支持 Android 9 (API 28)；当前 minSdk=26, 有两级余量。
+      # 风险不在主动决策, 在依赖升级: AGP 与 AndroidX 版本一动, 某些库会声明更高的
+      # minSdk, 而 **Gradle 取所有依赖的最大值合并且不报错**。等发现时已经装不上老机器。
+      # 所以断言的是**最终产物**里的值, 而不是 build.gradle.kts 里写的那个。
+      #
+      # 取值行是 minSdkVersion:, 不是 sdkVersion: —— 后者不存在, 写错会让 sed 静默取空,
+      # 门禁变成永远通过 (本仓库第一版判据就踩了这个)。因此解析为空一律判失败。
+      - name: Assert minSdk still supports Android 9 (API 28)
+        working-directory: android
+        run: |
+          set -euo pipefail
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          MIN=$("$BT/aapt2" dump badging "$APK" | sed -n "s/^minSdkVersion:'\([0-9]*\)'.*/\1/p")
+          TGT=$("$BT/aapt2" dump badging "$APK" | sed -n "s/^targetSdkVersion:'\([0-9]*\)'.*/\1/p")
+          printf '%-28s %s\n' "产物 minSdkVersion" "${MIN:-<解析失败>}"
+          printf '%-28s %s\n' "产物 targetSdkVersion" "${TGT:-<解析失败>}"
+          if [ -z "$MIN" ]; then
+            echo "::error::无法从 APK 解析 minSdkVersion —— 判据失效, 按失败处理"
+            exit 1
+          fi
+          if [ "$MIN" -gt 28 ]; then
+            echo "::error::minSdk 已升到 $MIN, 超过项目要求的 Android 9 (API 28)。"
+            echo "::error::多半是某个依赖抬高了下限 —— 查 ./gradlew :app:dependencies"
             exit 1
           fi
 

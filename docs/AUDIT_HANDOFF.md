@@ -522,3 +522,51 @@ assertFalse(GeoManager.isBuiltinUrl("https://raw.githubusercontent.com/attacker/
 
 **新增或修改测试后做一次变异验证**：把被测逻辑改坏，确认对应用例变红；
 不变红就说明该用例没有防护力。本文档记录的每条测试改动都经过这一步。
+
+### 5.2 最低支持版本规则（Android 9 / API 28）
+
+**项目要求最低支持 Android 9（API 28）安装与运行。** 当前 `minSdk = 26`，比该要求
+低两级，有余量——但这条余量会被静默吃掉，所以立两道门禁。
+
+#### 门禁一：`minSdk` 不得静默抬升（自动，在 CI）
+
+风险不来自主动决策，来自依赖升级：AGP 与 AndroidX 版本一动，某些库会声明更高的
+`minSdk`，**Gradle 取所有依赖的最大值合并，且不报错**。等发现时已经装不上老机器。
+
+CI 在 `assembleRelease` 之后解包产物断言：
+
+```bash
+MIN=$(aapt2 dump badging "$APK" | sed -n "s/^minSdkVersion:'\([0-9]*\)'.*/\1/p")
+[ -n "$MIN" ] && [ "$MIN" -le 28 ]   # 否则失败
+```
+
+注意取值行是 `minSdkVersion:`，**不是** `sdkVersion:`（后者不存在，写错会静默取空，
+门禁变成永远通过——本仓库第一次写这条判据时就踩了这个，实测修正）。
+解析为空必须判失败，不能当作通过。
+
+#### 门禁二：每一阶段在两台真机上都验（人工，不可自动化）
+
+**只在新机器上验过的改动不算验过。** 两台设备各自覆盖一端：
+
+| 设备 | 版本 | 覆盖 |
+| :--- | :--- | :--- |
+| Sony SO-02K (`BH905W2A9G`) | Android 9 / API 28 | **最低支持线**；老硬件的性能实况 |
+| Galaxy S24+ (`SM-S9260`) | Android 16 / API 36 | 新系统行为变更；折叠屏/大屏前置验证 |
+
+引入 Compose 后这条尤其要紧：Compose 在 API 28 上**不是兼容问题而是性能问题**
+（冷启动、首帧 jank、APK 体积约 +1.5–2 MB），2018 年的 SO-02K 才是真实下限，
+在 S24+ 上测不出来。
+
+#### 配套：API 门槛用法的强制回退
+
+设计方案里若干 API 高于 28，在 Android 9 上必须有回退而不是静默失效：
+
+| API | 最低级别 | Android 9 上的正确做法 |
+| :--- | :--- | :--- |
+| `HapticFeedbackConstants.CONFIRM` | 30 | 回退 `VIRTUAL_KEY` / `KEYBOARD_TAP`（API 1） |
+| `HapticFeedbackConstants.SEGMENT_TICK` | 34 | 同上 |
+| `OnBackAnimationCallback` | 34 | **禁止直接引用平台类**，统一走 `androidx.activity` 的 `OnBackPressedDispatcher`（自带向下兼容，API 28 退化为普通返回） |
+| `FoldingFeature` | 库级兼容 | API 28 上返回空集，走单栏分支即可 |
+
+触感常量不会崩（`performHapticFeedback` 遇未知常量返回 `false`），但会让 Android 9
+用户完全没有触感反馈——多模态反馈少一条腿，属于静默降级，必须显式回退。
