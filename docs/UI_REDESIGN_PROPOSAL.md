@@ -994,10 +994,24 @@ Compose 侧无额外对齐成本：Kotlin 已是 2.1.0，自带 `org.jetbrains.k
 | 段 | 内容 | 进入条件 | 验收 |
 | :-- | :--- | :--- | :--- |
 | **UI-2** | 按压反馈铺开；`RulesFragment` 拖拽换弹簧；`TrafficFragment` 面板连续切换 | 已满足（FluidSpring 已验证） | 两台真机；拖拽快速连续触发不打架；面板快速来回点击不闪烁且最终 `GONE` |
-| **UI-3** | 弹层的动量投射与速度接力（`NodePickerSheet`、`RequestDetailBottomSheet`、DNS/TUN 两个 BottomSheet） | UI-2 合入 | 甩动时按投射落点吸附而非就近吸附；拖拽到动画之间无接缝 |
+| **UI-3** | 四个弹层的 `BottomSheetBehavior` 逐个定档（`fitToContents` / `halfExpandedRatio` / `peekHeight` / `skipCollapsed` / `dismissWithAnimation`），并检查 `ScrollView` 是否阻断下拉关闭 | UI-2 合入 | 每项取值有理由；内容滚到顶后能继续下拉关闭；关闭走 behavior settle 而非窗口动画 |
 | **C** | Compose 基建：BOM + 插件 + `ComposeView` 互操作，先迁一个叶子界面 | UI-3 合入 | 混编不崩；`LocalizationTest` 绿（Compose 内文案必须走 `stringResource`）；**SO-02K 上测冷启动与首帧 jank**，这是性能账不是兼容账 |
 | **D** | 3-Tab 信息架构重组；弃用悬浮胶囊底栏改标准 `NavigationBar`；外挂 Activity 下沉为 Fragment | C 合入 | 导航四问；预测式返回连续动画；两台真机 |
 | **E** | 自适应与折叠屏：window size class、list-detail、`FoldingFeature` | D 合入 | 三档断点；Pixel Fold 模拟器三姿态；DeX 拖拽改窗口 |
+
+> **UI-3 的范围已于 2026-09-23 收窄，原条目作废。**
+> 原先写的是"给弹层实现动量投射与速度接力"——那是把 Apple 的原则直接搬到 Android，
+> 没有先核实框架既有能力。`BottomSheetBehavior`（Material 1.12）内部用 `ViewDragHelper`
+> 跟踪速度，`onStopNestedScroll` 时按释放速度选落点再用 scroller 衰减 settle，
+> **已经是"按速度投射落点再吸附"的等价实现**。再写一遍等于替换掉它，
+> 而那正是 §0.2 明令禁止的"为 iOS 观感与 Android 手势系统打架"。
+>
+> 真正缺的不是投射算法，是**四个弹层一项 behavior 配置都没设**——内容规模从 75 行到
+> 574 行不等，却共用同一套默认值。
+>
+> 这条记在这里是因为它说明一个通用风险：**apple-design 的原则是平台无关的，
+> 但落到 Android 时必须先查框架给了什么**，否则会把已有能力重新实现一遍，
+> 还顺带违反自己写下的禁令。后续各段照此先核实再动手。
 
 **顺序不可乱**：D 的信息架构重组建立在 C 的 Compose 互操作之上；E 的双栏布局建立在 D 的
 3-Tab 之上。跳段会让回归无法归因。
