@@ -4,6 +4,24 @@
 
 ---
 
+## [2026-09-22] targetSdk 34 → 36 (edge-to-edge insets + predictive back + 16KB 对齐门禁)
+
+targetSdk 从 34 提到 36, 并处理随之打开的所有行为。minSdk 保持 26 (项目地板 Android 9)。
+
+- **Insets**: targetSdk 35+ 强制 edge-to-edge、忽略 `setDecorFitsSystemWindows`, 否则
+  Settings/GeoAsset/AppFilter 三个 Activity 的工具栏会画到状态栏和刘海下。三者现经
+  `WindowInsetsCompat` 消费 statusBars/navigationBars/displayCutout/ime; MainActivity 现有监听
+  加 displayCutout + 横向 insets (横屏 / 侧刘海设备需要)。
+- **Predictive back**: 走 androidx.activity 的 `OnBackPressedDispatcher`, 不碰平台
+  `OnBackAnimationCallback`(API34)/`OnBackInvokedCallback`(API33) —— 直引会在 Android 9
+  `NoClassDefFoundError` (API 28 地板的意义)。已验证零平台类引用。
+- **Quick settings tile**: `startForegroundService` 包裹 (Android 15+ 可拒后台 FGS 启动,
+  抛 `ForegroundServiceStartNotAllowedException`, 回退拉起 Activity); `startActivityAndCollapse`
+  API34+ 用 PendingIntent, 以下用 deprecated Intent 重载。
+- **16KB 对齐门禁**: ELF 段早已对齐 (`.cargo/config.toml` 四目标 max-page-size=16384,
+  LOAD align 读 0x4000); 缺的是 APK 级验证 —— 未签名 APK 跳过 zipalign, 实测余数 4607。CI 现无
+  分发密钥时生成一次性 keystore, 门禁才能真正验 APK zip 16KB 边界。(#7)
+
 ## [2026-09-21] 移动端内核 CI 裁剪 + 体积守卫
 
 - **mirage-jni `opt-level` 3 → "s"** (移动端 .so 体积优先): 实测 host .so 4.5MB→3.5MB (**-22%**),
