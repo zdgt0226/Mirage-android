@@ -183,14 +183,6 @@ impl PooledBuf {
         self.buf.as_mut_ptr()
     }
 
-    /// # Safety
-    ///
-    /// 调用者必须保证 `new_len <= self.buf.capacity()`，且缓冲区前 `new_len` 个字节已被正确初始化。
-    #[inline]
-    pub unsafe fn set_len(&mut self, new_len: usize) {
-        self.buf.set_len(new_len);
-    }
-
     /// 提取内部 Vec<u8>，剥离对象将不会回收入池
     pub fn into_vec(mut self) -> Vec<u8> {
         std::mem::take(&mut self.buf)

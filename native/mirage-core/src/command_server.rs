@@ -20,9 +20,30 @@ const MAX_CONCURRENT_CLIENTS: usize = 2;
 struct ClientGuard;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
+impl ClientGuard {
+    fn try_acquire() -> Option<Self> {
+        let prev = ACTIVE_CLIENTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if prev >= MAX_CONCURRENT_CLIENTS {
+            let _ = ACTIVE_CLIENTS.fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |x| x.checked_sub(1),
+            );
+            None
+        } else {
+            Some(ClientGuard)
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
 impl Drop for ClientGuard {
     fn drop(&mut self) {
-        ACTIVE_CLIENTS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        let _ = ACTIVE_CLIENTS.fetch_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |x| x.checked_sub(1),
+        );
     }
 }
 
@@ -106,15 +127,17 @@ pub fn start_command_server(
                     }
 
                     // N5: 限制最大并发客户端数，防止连接泄露与重复序列化开销
-                    if ACTIVE_CLIENTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_CONCURRENT_CLIENTS {
-                        ACTIVE_CLIENTS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                        warn!("[CMD-BUS] 达到最大并发客户端限制 ({MAX_CONCURRENT_CLIENTS})，拒绝新连接");
-                        continue;
-                    }
+                    let guard = match ClientGuard::try_acquire() {
+                        Some(g) => g,
+                        None => {
+                            warn!("[CMD-BUS] 达到最大并发客户端限制 ({MAX_CONCURRENT_CLIENTS})，拒绝新连接");
+                            continue;
+                        }
+                    };
 
                     let client_stop = stop_notify.clone();
                     tokio::spawn(async move {
-                        let _guard = ClientGuard;
+                        let _guard = guard;
                         handle_client(socket, client_stop).await;
                     });
                 }
@@ -239,8 +262,9 @@ mod tests {
         let stop_notify = Arc::new(tokio::sync::Notify::new());
         let server_stop = stop_notify.clone();
 
+        let guard = ClientGuard::try_acquire().expect("acquire client guard");
         let srv_handle = tokio::spawn(async move {
-            let _guard = ClientGuard;
+            let _guard = guard;
             handle_client(server, server_stop).await;
         });
 
@@ -273,18 +297,15 @@ mod tests {
 
     #[test]
     fn test_client_guard_atomic_counter() {
-        let initial = ACTIVE_CLIENTS.load(std::sync::atomic::Ordering::SeqCst);
-        ACTIVE_CLIENTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        {
-            let _g1 = ClientGuard;
-            assert_eq!(
-                ACTIVE_CLIENTS.load(std::sync::atomic::Ordering::SeqCst),
-                initial + 1
-            );
-        }
-        assert_eq!(
-            ACTIVE_CLIENTS.load(std::sync::atomic::Ordering::SeqCst),
-            initial
-        );
+        ACTIVE_CLIENTS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let g1 = ClientGuard::try_acquire().expect("acquire 1");
+        assert_eq!(ACTIVE_CLIENTS.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let g2 = ClientGuard::try_acquire().expect("acquire 2");
+        assert_eq!(ACTIVE_CLIENTS.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(ClientGuard::try_acquire().is_none(), "reject > MAX");
+        drop(g1);
+        assert_eq!(ACTIVE_CLIENTS.load(std::sync::atomic::Ordering::SeqCst), 1);
+        drop(g2);
+        assert_eq!(ACTIVE_CLIENTS.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

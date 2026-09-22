@@ -217,6 +217,8 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_start(
                 return 0;
             }
         }
+        mirage_core::monitor::reset_session();
+        mirage_core::tun::dns::clear_direct_cache();
         STARTED.store(true, Ordering::SeqCst);
 
         let uri_str: String = match env.get_string(&uri) {
@@ -406,6 +408,7 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_stop(
             drop(state);
         }
         mirage_core::tun::dns::clear_direct_cache();
+        mirage_core::monitor::reset_session();
         STARTED.store(false, Ordering::SeqCst);
         tracing::info!("MirageCore 已停止");
     })
