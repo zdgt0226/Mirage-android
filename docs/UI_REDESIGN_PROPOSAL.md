@@ -951,3 +951,124 @@ Compose 侧无额外对齐成本：Kotlin 已是 2.1.0，自带 `org.jetbrains.k
 
 ---
 
+## 11. 实测基线与执行规划（2026-09-22 更新）
+
+本节取代 §8 的阶段表作为**执行依据**。§1–§7 的设计论证仍然有效，但凡与本节冲突处，
+以本节为准——因为本节的每一条都有真机或容器实测支撑，而 §8 写于任何代码落地之前。
+
+### 11.1 可以直接依赖的实测结论
+
+后续任务**不需要重新验证**下列事实，它们已有明确证据：
+
+| 结论 | 证据 | 影响 |
+| :--- | :--- | :--- |
+| `FluidSpring` 的按压缩放**可用** | SO-02K (API 28)：按住时按钮宽 560 → 538，**比值 0.9607**（目标 0.96），居中内收 | 弹簧路线成立，可继续铺开 |
+| `targetSdk 36` 在 **API 28 上正常** | SO-02K 实测连接 ↑2.7 KB / ↓2.4 KB、2 连接；断开+退后台前台服务 0、`:core` adj 900 | 最低支持线不需要为 targetSdk 回退 |
+| `targetSdk 36` 在 **API 36 上正常** | S24+ 连接 ↑1.1 KB/s ↓403 B/s、23 连接；FGS 类型 `0x40000000` (SPECIAL_USE) | 新系统行为变更已处理完 |
+| **APK 内 `.so` 已 16 KB 对齐** | 签名产物 `offset=933888, rem=0`；未签名产物的 4607 只是跳过了 zipalign | 该问题结案，不必再查 |
+| `minSdk` 仍为 26，产物实测 26 | CI 门禁 `Assert minSdk still supports Android 9` 三条变异全部验证 | Android 9 底线有自动化保护 |
+| 排版五档在两台设备上均正常 | 中文无粘连、无截断；Display −0.015 / Title −0.01 / Body 0 / Label +0.02 | 排版基线可直接复用 |
+| Haptic 的 API 门槛已修 | `CONFIRM`(30)→`VIRTUAL_KEY`、`REJECT`(30)→`LONG_PRESS`、`SEGMENT_TICK`(34)→`VIRTUAL_KEY` | 新增触感调用照此模式写 |
+
+**弹簧参数基线**（已在代码中固化，新交互沿用，不要各自发明）：
+
+- 默认：`DAMPING_RATIO_NO_BOUNCY` (1.0) + `STIFFNESS_MEDIUM` (1500f)
+- 有动量的交互（甩动、拖拽释放）才降到 ~0.8 阻尼
+- 一律走 `FluidSpring.animateTo` / `attachPressScale`，它按 **View + 属性**缓存弹簧实例，
+  中断时复用同一弹簧从当前呈现值续——这是可中断性的关键，**不要 new 新实例**
+- `FluidSpring` 已内置减弱动效降级（`ANIMATOR_DURATION_SCALE == 0` 时直接置终值）
+
+### 11.2 已完成与在途
+
+| 阶段 | 内容 | 状态 |
+| :-- | :--- | :--- |
+| A | Gradle 8.13 / AGP 8.13.0 / `compileSdk 36`；`minSdk ≤ 28` 门禁 | 已合入 `main` |
+| B | `targetSdk 36`、三 Activity insets、预测式返回走 androidx、FGS 兜底、16 KB zip 门禁 | 已合入 `main`（PR #7） |
+| UI-1 | 排版五档、Haptic 回退、图标归一 | 已提交 `ui/fluid-foundation` (`02d0611`)，**未推** |
+| UI-2 | 弹簧铺到交互面（按压反馈、拖拽、面板切换） | 进行中 |
+
+### 11.3 剩余阶段与进入条件
+
+每段都写明**进入条件**和**验收**，后续任务可直接照此执行，不必重新推演。
+
+| 段 | 内容 | 进入条件 | 验收 |
+| :-- | :--- | :--- | :--- |
+| **UI-2** | 按压反馈铺开；`RulesFragment` 拖拽换弹簧；`TrafficFragment` 面板连续切换 | 已满足（FluidSpring 已验证） | 两台真机；拖拽快速连续触发不打架；面板快速来回点击不闪烁且最终 `GONE` |
+| **UI-3** | 弹层的动量投射与速度接力（`NodePickerSheet`、`RequestDetailBottomSheet`、DNS/TUN 两个 BottomSheet） | UI-2 合入 | 甩动时按投射落点吸附而非就近吸附；拖拽到动画之间无接缝 |
+| **C** | Compose 基建：BOM + 插件 + `ComposeView` 互操作，先迁一个叶子界面 | UI-3 合入 | 混编不崩；`LocalizationTest` 绿（Compose 内文案必须走 `stringResource`）；**SO-02K 上测冷启动与首帧 jank**，这是性能账不是兼容账 |
+| **D** | 3-Tab 信息架构重组；弃用悬浮胶囊底栏改标准 `NavigationBar`；外挂 Activity 下沉为 Fragment | C 合入 | 导航四问；预测式返回连续动画；两台真机 |
+| **E** | 自适应与折叠屏：window size class、list-detail、`FoldingFeature` | D 合入 | 三档断点；Pixel Fold 模拟器三姿态；DeX 拖拽改窗口 |
+
+**顺序不可乱**：D 的信息架构重组建立在 C 的 Compose 互操作之上；E 的双栏布局建立在 D 的
+3-Tab 之上。跳段会让回归无法归因。
+
+### 11.4 验证协议（本轮踩出来的，必须照做）
+
+这一节是本轮代价最高的产出。**曾两次给出带具体数字、看起来扎实、实际为假的结论**，
+根因都是"用不可靠的方式判断操作成功了"。
+
+#### 装机四查（缺一不可）
+
+```bash
+# 1. worktree 是否有 .so —— jniLibs 是 gitignore 的产物, worktree 天然没有
+ls android/app/src/main/jniLibs/arm64-v8a/*.so
+
+# 2. APK 内是否真的打进去了
+unzip -l <apk> | grep -c '\.so'          # 必须 ≥ 1
+
+# 3. 元数据是否是预期的那一个
+aapt2 dump badging <apk> | grep -E "versionCode|minSdkVersion|targetSdkVersion"
+
+# 4. 安装是否真的成功 —— 不要用 tail -1
+adb install -r <apk>                      # 完整读输出
+adb shell dumpsys package <pkg> | grep -m1 versionCode   # 回读设备实际版本
+```
+
+**`adb install` 失败时 `Failure` 行打在 `Performing Streamed Install` 之前**，
+用 `tail -1` 会读到后者，把失败读成成功。曾因此在旧包上做了一整轮"验证"。
+
+**worktree 构建必须先复制 `.so`**：
+
+```bash
+cp /opt/Mirage-android/android/app/src/main/jniLibs/arm64-v8a/libmirage_jni.so \
+   <worktree>/android/app/src/main/jniLibs/arm64-v8a/
+```
+
+否则 APK 没有原生库，装上即 `UnsatisfiedLinkError: No implementation found for
+MirageNative.isRunning()`。
+
+**versionCode 必须显式传**：`build-android.sh` 从 `git rev-list --count HEAD` 注入，
+直接调 `./gradlew` 会落回默认值 70，比设备上已装的低，触发 downgrade 拒绝安装。
+用 `./gradlew :app:assembleDebug -PversionCode=<大于设备现值>`。
+
+#### 截图前验屏幕
+
+```bash
+adb shell dumpsys power | grep -m1 mWakefulness   # 必须 Awake
+```
+
+`svc power stayon usb` **在 S24+ 上不生效**，SO-02K 上也会被其它操作弄掉。
+曾拿全黑截图测量按钮宽度，并据此"确认"弹簧不工作——反复用更严谨的手段
+确认了一个不存在的问题。另外 `input motionevent` 在 API 28 上不存在，
+制造长按要用 1 像素位移的长 `swipe`。
+
+#### 两台设备都过（§5.2 门禁二）
+
+| 设备 | 覆盖 |
+| :--- | :--- |
+| Sony SO-02K (API 28) | 最低支持线 + 老硬件性能实况 |
+| Galaxy S24+ (API 36) | 新系统行为 + 大屏/折叠前置 |
+
+只在新机器上验过的改动**不算验过**。Compose 引入后尤其要紧——那是性能账。
+
+### 11.5 已知遗留
+
+- **规则页第三条被底部按钮组压住一半**（SO-02K 实测）。列表区高度与固定按钮组的
+  间距问题，非本轮引入，D 段重排信息架构时一并解决。
+- **`core/` 仍有约 90 处中文未国际化**。混着用户可见文案与必须语言无关的标识
+  （`RuleStore` 预设名进持久化与去重键），分开需单独一轮，见 `LocalizationTest` 的 KDoc。
+- **`gradle/actions` 停在 v5**。v6 的缓存组件闭源且需接受商业条款，属授权决策。
+- **并发会话风险**。本轮有另一会话在同一仓库操作，曾把本地 merge 提交 reset 掉。
+  编辑型任务一律用独立 git worktree。
+
+---
