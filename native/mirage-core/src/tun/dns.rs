@@ -74,11 +74,13 @@ pub fn get_remote_dns() -> std::net::IpAddr {
         .unwrap_or_else(|e| e.into_inner())
 }
 
-/// 清空直连 DNS 缓存 (VPN 重连/断开时调用)
+/// 清空直连 DNS 缓存与 FlightMap (VPN 重连/断开时调用)
 pub fn clear_direct_cache() {
     let mut map = direct_cache().lock().unwrap_or_else(|e| e.into_inner());
     map.clear();
-    tracing::info!("[TUN-DNS] 直连 DNS 缓存已清空");
+    let mut flights = flight_map().lock().unwrap_or_else(|e| e.into_inner());
+    flights.clear();
+    tracing::info!("[TUN-DNS] 直连 DNS 缓存与 FlightMap 已清空");
 }
 
 const DIRECT_CACHE_MAX: usize = 4096;
@@ -203,6 +205,19 @@ fn flight_map() -> &'static FlightMap {
     F.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
+/// RAII Guard: 无论发起者由于何种原因退出 (成功、失败、timeout、任务 cancel/drop、panic)，
+/// 均在 Drop 时自动从 flight_map 中清理该域名条目，杜绝泄漏与跨请求死锁。
+struct FlightGuard {
+    domain: String,
+}
+
+impl Drop for FlightGuard {
+    fn drop(&mut self) {
+        let mut flights = flight_map().lock().unwrap_or_else(|e| e.into_inner());
+        flights.remove(&self.domain);
+    }
+}
+
 /// 异步向上游查询真实 IP (带 Single-Flight 防击穿并发聚合、双上游竞速与内存高速缓存)。
 pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
     let domain_clean = domain.trim_end_matches('.').to_ascii_lowercase();
@@ -218,18 +233,21 @@ pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
     }
 
     // 2. Single-Flight 并发防击穿: 若同一域名已有解析任务在进行，挂载监听其结果，避免重复发包
-    let (mut rx, is_initiator, tx) = {
+    let (mut rx, guard, tx) = {
         let mut flights = flight_map().lock().unwrap_or_else(|e| e.into_inner());
         if let Some(existing_rx) = flights.get(&domain_clean) {
-            (existing_rx.clone(), false, None)
+            (existing_rx.clone(), None, None)
         } else {
             let (tx, rx) = watch::channel(None);
             flights.insert(domain_clean.clone(), rx.clone());
-            (rx, true, Some(tx))
+            let guard = FlightGuard {
+                domain: domain_clean.clone(),
+            };
+            (rx, Some(guard), Some(tx))
         }
     };
 
-    if !is_initiator {
+    if guard.is_none() {
         // 等待发起者解析完成
         if rx.borrow().is_none() {
             let _ = tokio::time::timeout(Duration::from_millis(1500), rx.changed()).await;
@@ -237,17 +255,14 @@ pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
         return *rx.borrow();
     }
 
-    // 发起者执行实际上游查询
+    // 发起者持有 guard: 若在此被 cancel / drop / panic，FlightGuard 会在 Drop 时自动将 domain 从 flight_map 中清理，杜绝泄漏
     let result = resolve_upstream_internal(&domain_clean).await;
 
-    // 广播结果并清理 FlightMap
+    // 广播结果并显式 drop guard (Drop 内会从 flight_map 移除)
     if let Some(tx) = tx {
         let _ = tx.send(result);
     }
-    {
-        let mut flights = flight_map().lock().unwrap_or_else(|e| e.into_inner());
-        flights.remove(&domain_clean);
-    }
+    drop(guard);
 
     result
 }
@@ -835,5 +850,25 @@ mod tests {
         // 3. 验证已知境外主流域名绝不触发解析
         assert!(!crate::direct::should_resolve_upstream("google.com"));
         assert!(!crate::direct::should_resolve_upstream("twitter.com"));
+    }
+
+    #[tokio::test]
+    async fn test_flight_map_raii_cleanup_on_cancel() {
+        clear_direct_cache();
+        let domain = "cancel-test.example.com";
+        // 验证取消执行时，FlightGuard 自动将 domain 从 flight_map 中清理
+        let handle = tokio::spawn(async move {
+            let _ = resolve_upstream(domain).await;
+        });
+        // 立即中止任务 (模拟 VPN 重连、任务被 drop、超时中止等场景)
+        handle.abort();
+        let _ = handle.await;
+
+        // 验证 flight_map 中该域名条目已被自动清理，不留残余
+        let flights = flight_map().lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            !flights.contains_key(domain),
+            "FlightGuard 必须在任务 abort/cancel 时自动将 domain 从 flight_map 中清除！"
+        );
     }
 }

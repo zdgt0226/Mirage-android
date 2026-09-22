@@ -575,3 +575,25 @@ pub fn get_recent_requests_json() -> String {
         "[]".to_string()
     }
 }
+
+/// 重置会话级监控与度量状态 (VPN 启动/停止时调用，杜绝跨会话幽灵连接残留导致 watchdog 误判)
+pub fn reset_session() {
+    {
+        let mut lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(map) = lock.as_mut() {
+            map.clear();
+        }
+    }
+    {
+        let mut q_lock = RECENT_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(q) = q_lock.as_mut() {
+            q.clear();
+        }
+    }
+    TUNNEL_LAST_ACTIVE.store(0, Ordering::Relaxed);
+    {
+        let mut q = RATE_SAMPLES.lock().unwrap_or_else(|e| e.into_inner());
+        q.clear();
+    }
+    tracing::info!("[Monitor] 会话级状态已重置 (活跃连接、隧道活跃时间戳、速率采样)");
+}

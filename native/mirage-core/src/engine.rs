@@ -64,6 +64,8 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(node: &NodeInfo) -> Result<Arc<Self>> {
+        crate::monitor::reset_session();
+        crate::tun::dns::clear_direct_cache();
         crate::proxy::udp_mux::set_udp_mux(node.udp_mux, 4);
         let cfg = config::single_mirage_config(
             &node.tag,
@@ -86,6 +88,8 @@ impl Engine {
 
     /// 用一组配置 (多节点/组) 构建引擎; default_tag 是默认出站。
     pub fn from_config(cfg: Config, default_tag: &str) -> Result<Arc<Self>> {
+        crate::monitor::reset_session();
+        crate::tun::dns::clear_direct_cache();
         let mgr = OutboundManager::new(&cfg).context("构建出站失败")?;
         let fake_ip = FakeIpMapper::new(FAKE_IP_CIDR).context("初始化 fake-IP 失败")?;
         Ok(Arc::new(Self {
@@ -173,11 +177,12 @@ impl Engine {
         self.outbounds.set_pool_size(new_size);
     }
 
-    /// 重置 Fake-IP 映射与直连 DNS 缓存 (VPN 启动/重连时清理历史残留)
+    /// 重置 Fake-IP 映射、直连 DNS 缓存与会话度量状态 (VPN 启动/重连时清理历史残留)
     pub fn reset_dns_and_fake_ip(&self) {
         self.fake_ip.clear();
         crate::tun::dns::clear_direct_cache();
-        tracing::info!("[Engine] Fake-IP 映射与直连 DNS 缓存已重置");
+        crate::monitor::reset_session();
+        tracing::info!("[Engine] Fake-IP 映射、直连 DNS 缓存与会话度量已重置");
     }
 
     /// 移动端网络环境改变或唤醒时，主动冲刷所有出站节点中的空闲预热连接，

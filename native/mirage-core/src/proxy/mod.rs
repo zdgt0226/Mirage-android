@@ -10,6 +10,5 @@ pub mod brutal;
 pub mod mirage_stream;
 pub mod outbound;
 pub mod pool;
-pub mod resolver;
 pub mod tunnel;
 pub mod udp_mux;

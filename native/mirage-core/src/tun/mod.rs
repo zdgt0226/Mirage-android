@@ -320,6 +320,8 @@ impl TunStack {
         }
         self.wake.notify_waiters();
         self.stop_notify.notify_waiters();
+        crate::monitor::reset_session();
+        crate::tun::dns::clear_direct_cache();
     }
 
     /// 驱动一次 smoltcp poll (同步, 从 socket 访问方调用, 如 TCP relay 写完后)。

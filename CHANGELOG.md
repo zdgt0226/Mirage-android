@@ -4,6 +4,23 @@
 
 ---
 
+## [2026-09-22] 会话生命周期状态清理 + RAII 资源泄漏加固 + 死代码清理
+
+围绕 VPN 启停会话边界收口内核内的全局状态与并发计数, 杜绝跨会话残留与泄漏。
+
+- **会话级状态重置** (`monitor::reset_session`, 新增): 清 `ACTIVE_CONNECTIONS` / `RECENT_REQUESTS` /
+  `TUNNEL_LAST_ACTIVE` / `RATE_SAMPLES`。在 VPN 启动 (`Engine::new`、JNI `start`) 与停止
+  (`TunStack::shutdown`、JNI `stop`) 两侧均调用, 杜绝上一会话的幽灵连接/陈旧时间戳残留误导 watchdog
+  误判。同侧一并 `clear_direct_cache`。
+- **DNS single-flight `FlightGuard` (RAII)**: 发起者在 `flight_map` 的条目改由 `FlightGuard` 在 `Drop`
+  清理 —— 无论成功 / 失败 / timeout / 任务 cancel-drop / panic 都不泄漏、不跨请求死锁 (原实现仅在正常
+  路径末尾手工 remove, 中途 cancel 即留残)。`clear_direct_cache` 现同时清 `FlightMap`。补 abort 清理测试。
+- **command bus `ClientGuard::try_acquire` (RAII)**: 把 "fetch_add + 超限回退 fetch_sub" 收进原子获取,
+  `Drop` 用 `checked_sub` 防并发下溢。测试重写, 覆盖满 / 拒 / 释放三态。
+- **死代码清理**: 删 `proxy/resolver.rs` (451 行, 无模块引用) + `buffer_pool.rs` 无调用者的 `unsafe set_len`。
+
+验证: `cargo test` 129 passed / 0 failed; `cargo clippy --lib -- -D warnings` core+jni 干净。
+
 ## [2026-09-22] targetSdk 34 → 36 (edge-to-edge insets + predictive back + 16KB 对齐门禁)
 
 targetSdk 从 34 提到 36, 并处理随之打开的所有行为。minSdk 保持 26 (项目地板 Android 9)。
