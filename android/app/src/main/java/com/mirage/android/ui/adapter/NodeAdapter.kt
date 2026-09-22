@@ -16,6 +16,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.mirage.android.R
 import com.mirage.android.data.model.Node
 import com.mirage.android.databinding.ItemNodeBinding
+import com.mirage.android.ui.common.FluidSpring
 
 class NodeAdapter(
     private val onSelect: (Int, Node) -> Unit,
@@ -44,6 +45,10 @@ class NodeAdapter(
 
     inner class NodeViewHolder(private val binding: ItemNodeBinding) :
         RecyclerView.ViewHolder(binding.root) {
+
+        init {
+            FluidSpring.attachPressScale(binding.cardNode)
+        }
 
         fun bind(node: Node, isSelected: Boolean) {
             val ctx = binding.root.context

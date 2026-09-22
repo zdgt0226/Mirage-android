@@ -16,6 +16,7 @@ import com.mirage.android.MainActivity
 import com.mirage.android.R
 import com.mirage.android.data.model.VpnState
 import com.mirage.android.databinding.FragmentHomeBinding
+import com.mirage.android.ui.common.FluidSpring
 import com.mirage.android.ui.viewmodel.HomeViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -45,10 +46,13 @@ class HomeFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        FluidSpring.attachPressScale(binding.btnSettings)
         binding.btnSettings.setOnClickListener {
             com.mirage.android.util.Haptic.tap(it)
             SettingsActivity.start(requireContext())
         }
+
+        FluidSpring.attachPressScale(binding.connectBtn)
 
         binding.connectBtn.setOnClickListener {
             com.mirage.android.util.Haptic.confirm(it)
@@ -60,11 +64,13 @@ class HomeFragment : Fragment() {
         }
 
         // 就地弹出二级选择层, 不再跳到「节点」Tab —— 选完不用自己切回来
+        FluidSpring.attachPressScale(binding.nodeSelectCard)
         binding.nodeSelectCard.setOnClickListener {
             com.mirage.android.util.Haptic.tap(it)
             NodePickerSheet().show(parentFragmentManager, NodePickerSheet.TAG)
         }
 
+        FluidSpring.attachPressScale(binding.btnAddNode)
         binding.btnAddNode.setOnClickListener {
             com.mirage.android.util.Haptic.tap(it)
             NodeEditDialog.show(requireContext(), null) { uri, name ->

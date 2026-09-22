@@ -14,6 +14,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
+import androidx.dynamicanimation.animation.DynamicAnimation
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.Lifecycle
@@ -24,6 +25,7 @@ import com.mirage.android.R
 import com.mirage.android.data.model.LogLevel
 import com.mirage.android.databinding.FragmentTrafficBinding
 import com.mirage.android.ui.adapter.RecentRequestAdapter
+import com.mirage.android.ui.common.FluidSpring
 import com.mirage.android.ui.viewmodel.TrafficViewModel
 import kotlinx.coroutines.launch
 
@@ -37,6 +39,7 @@ class TrafficFragment : Fragment() {
 
     private val viewModel: TrafficViewModel by viewModels()
     private lateinit var recentAdapter: RecentRequestAdapter
+    private var currentTabMode = 0
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -61,7 +64,7 @@ class TrafficFragment : Fragment() {
         }
 
         binding.btnCopyLogs.setOnClickListener {
-            if (binding.boxLogs.visibility == View.VISIBLE) {
+            if (currentTabMode == 1) {
                 val logs = viewModel.filteredLogs.value.joinToString("\n")
                 if (logs.isNotBlank()) {
                     val cm = requireContext().getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
@@ -142,8 +145,14 @@ class TrafficFragment : Fragment() {
     }
 
     private fun setupToggleMode() {
-        fun updateModeUI(mode: Int) {
-            if (mode == 0) {
+        FluidSpring.attachPressScale(binding.btnTabRequests)
+        FluidSpring.attachPressScale(binding.btnTabLogs)
+
+        fun updateModeUI(targetMode: Int, animate: Boolean) {
+            if (animate && currentTabMode == targetMode) return
+            currentTabMode = targetMode
+
+            if (targetMode == 0) {
                 binding.btnTabRequests.setBackgroundResource(R.drawable.bg_telegram_pill_active)
                 binding.btnTabRequests.setTextColor(Color.WHITE)
                 binding.btnTabRequests.typeface = android.graphics.Typeface.DEFAULT_BOLD
@@ -151,9 +160,6 @@ class TrafficFragment : Fragment() {
                 binding.btnTabLogs.setBackgroundColor(Color.TRANSPARENT)
                 binding.btnTabLogs.setTextColor(requireContext().getColor(R.color.meow_ink_secondary))
                 binding.btnTabLogs.typeface = android.graphics.Typeface.DEFAULT
-
-                binding.boxRecentRequests.visibility = View.VISIBLE
-                binding.boxLogs.visibility = View.GONE
             } else {
                 binding.btnTabLogs.setBackgroundResource(R.drawable.bg_telegram_pill_active)
                 binding.btnTabLogs.setTextColor(Color.WHITE)
@@ -162,15 +168,36 @@ class TrafficFragment : Fragment() {
                 binding.btnTabRequests.setBackgroundColor(Color.TRANSPARENT)
                 binding.btnTabRequests.setTextColor(requireContext().getColor(R.color.meow_ink_secondary))
                 binding.btnTabRequests.typeface = android.graphics.Typeface.DEFAULT
+            }
 
-                binding.boxRecentRequests.visibility = View.GONE
-                binding.boxLogs.visibility = View.VISIBLE
+            val enteringView = if (targetMode == 0) binding.boxRecentRequests else binding.boxLogs
+            val exitingView = if (targetMode == 0) binding.boxLogs else binding.boxRecentRequests
+
+            if (!animate) {
+                enteringView.visibility = View.VISIBLE
+                enteringView.alpha = 1.0f
+                exitingView.visibility = View.GONE
+                exitingView.alpha = 0.0f
+                return
+            }
+
+            if (enteringView.visibility == View.GONE) {
+                enteringView.alpha = 0.0f
+            }
+            enteringView.visibility = View.VISIBLE
+            enteringView.bringToFront()
+            FluidSpring.animateTo(enteringView, DynamicAnimation.ALPHA, 1.0f)
+
+            FluidSpring.animateTo(exitingView, DynamicAnimation.ALPHA, 0.0f) { canceled, value ->
+                if (!canceled && value <= 0.01f) {
+                    exitingView.visibility = View.GONE
+                }
             }
         }
 
-        binding.btnTabRequests.setOnClickListener { updateModeUI(0) }
-        binding.btnTabLogs.setOnClickListener { updateModeUI(1) }
-        updateModeUI(0)
+        binding.btnTabRequests.setOnClickListener { updateModeUI(0, animate = true) }
+        binding.btnTabLogs.setOnClickListener { updateModeUI(1, animate = true) }
+        updateModeUI(0, animate = false)
     }
 
     private fun setupLogLevelChips() {

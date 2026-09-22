@@ -16,6 +16,7 @@ import com.mirage.android.data.repository.NodeRepository
 import com.mirage.android.data.repository.RuleRepository
 import com.mirage.android.data.repository.VpnRepository
 import com.mirage.android.databinding.ActivitySettingsBinding
+import com.mirage.android.ui.common.FluidSpring
 
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -111,6 +112,7 @@ class SettingsActivity : AppCompatActivity() {
     ) {
         row.ivRowIcon.setImageResource(iconRes)
         row.tvRowTitle.setText(titleRes)
+        FluidSpring.attachPressScale(row.root)
         row.root.setOnClickListener {
             com.mirage.android.util.Haptic.tap(it)
             onClick()

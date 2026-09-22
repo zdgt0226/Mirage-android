@@ -12,6 +12,7 @@ import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.mirage.android.data.model.Rule
 import com.mirage.android.databinding.ItemRuleBinding
+import com.mirage.android.ui.common.FluidSpring
 import com.mirage.android.R
 
 class RuleAdapter(
@@ -33,6 +34,10 @@ class RuleAdapter(
 
     inner class RuleViewHolder(val binding: ItemRuleBinding) :
         RecyclerView.ViewHolder(binding.root) {
+
+        init {
+            FluidSpring.attachPressScale(binding.root)
+        }
 
         @SuppressLint("ClickableViewAccessibility")
         fun bind(rule: Rule, position: Int) {

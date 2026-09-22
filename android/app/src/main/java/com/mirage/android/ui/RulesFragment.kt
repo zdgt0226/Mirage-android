@@ -9,6 +9,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.*
 import androidx.core.content.ContextCompat
+import androidx.dynamicanimation.animation.DynamicAnimation
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.Lifecycle
@@ -29,6 +30,7 @@ import com.mirage.android.databinding.DialogEditRuleBinding
 import com.mirage.android.databinding.FragmentRulesBinding
 import com.mirage.android.databinding.ItemDialogConditionBinding
 import com.mirage.android.ui.adapter.RuleAdapter
+import com.mirage.android.ui.common.FluidSpring
 import com.mirage.android.ui.viewmodel.RulesViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
@@ -119,7 +121,8 @@ class RulesFragment : Fragment() {
                     com.mirage.android.util.Haptic.longPress(viewHolder.itemView)
                     // 浮起放大与高亮
                     viewHolder.binding.cardRule.apply {
-                        animate().scaleX(1.03f).scaleY(1.03f).setDuration(120).start()
+                        FluidSpring.animateTo(this, DynamicAnimation.SCALE_X, 1.03f)
+                        FluidSpring.animateTo(this, DynamicAnimation.SCALE_Y, 1.03f)
                         cardElevation = 16f
                         strokeWidth = (2 * resources.displayMetrics.density).toInt()
                         strokeColor = ContextCompat.getColor(context, R.color.meow_blue)
@@ -132,7 +135,8 @@ class RulesFragment : Fragment() {
                 if (viewHolder is RuleAdapter.RuleViewHolder) {
                     com.mirage.android.util.Haptic.tap(viewHolder.itemView)
                     viewHolder.binding.cardRule.apply {
-                        animate().scaleX(1.0f).scaleY(1.0f).setDuration(120).start()
+                        FluidSpring.animateTo(this, DynamicAnimation.SCALE_X, 1.0f)
+                        FluidSpring.animateTo(this, DynamicAnimation.SCALE_Y, 1.0f)
                         cardElevation = 0f
                         strokeWidth = (1 * resources.displayMetrics.density).toInt()
                         strokeColor = ContextCompat.getColor(context, R.color.meow_outline)
