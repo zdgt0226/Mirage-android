@@ -183,8 +183,18 @@ Android 客户端已完成一轮系统性审计（对照 [meow-android](https://
 | 3 | 唯一构建路径产出 `debuggable`、调试密钥签名却命名为发布版的 APK | 新增正式签名配置 + R8 + JNI keep 规则；产物名携带变体 |
 | 4 | `clearActive()` 无身份检查，旧实例销毁会抹掉活跃实例致 `protect()` 失效 | 改为同一性比较 `clearActive(this)` |
 
-**待处理**：第 1 批状态机（消除停止后自动重启、job 累积、启动失败无提示）、
-第 2 批网络层（失败切换拆 TUN 导致的周期性明文泄露）、第 3 批配置与数据、第 4 批工程基线。
+**第 1–4 批 + 三轮返工（复审 / 真机 / CI）均已闭环** —— 状态机、网络层、配置与数据、工程基线，
+CI 首绿并升离 Node 20，Android 9 真机回归六项全过，详见路线图。
+
+**近期加固（并入既有批次）**：
+
+- **工程基线** —— `mirage-jni` `opt-level=s` + CI `.so` 体积守卫（≤4 MiB），`.so` 再降至 ~3.1 MB（#6）；
+  targetSdk 34→36、edge-to-edge insets、predictive-back、APK 16KB 对齐门禁（#7）。
+- **状态机 / 可靠性** —— 会话生命周期状态清理（`reset_session`）、DNS single-flight `FlightGuard` 与
+  命令总线 `ClientGuard` RAII 泄漏加固、删死模块 `resolver.rs`（#9）。
+
+**后续**：Android 14+ 机型真机回归（当前真机仅覆盖 API 28）、Geo 真实性（需内置签名公钥）、
+Android Lint 纳入门禁、正式签名 keystore。
 
 ---
 
