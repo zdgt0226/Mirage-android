@@ -39,7 +39,7 @@ class MirageTileService : TileService() {
                 val appIntent = Intent(this, MainActivity::class.java).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 }
-                startActivityAndCollapse(appIntent)
+                startActivityAndCollapseCompat(appIntent)
                 return
             }
 
@@ -49,19 +49,44 @@ class MirageTileService : TileService() {
                 val appIntent = Intent(this, MainActivity::class.java).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 }
-                startActivityAndCollapse(appIntent)
+                startActivityAndCollapseCompat(appIntent)
                 return
             }
             val startIntent = Intent(this, CoreService::class.java).apply {
                 putExtra("uri", selected)
                 putExtra("pool_size", NodeStore.getPoolSize(this@MirageTileService))
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(startIntent)
-            } else {
-                startService(startIntent)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(startIntent)
+                } else {
+                    startService(startIntent)
+                }
+                updateTileState(true)
+            } catch (e: Throwable) {
+                // Android 14/15+ 后台启动限制 (ForegroundServiceStartNotAllowedException 等)
+                // 回退为拉起前台 Activity 触发连接
+                val appIntent = Intent(this, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    putExtra("auto_connect", true)
+                }
+                startActivityAndCollapseCompat(appIntent)
             }
-            updateTileState(true)
+        }
+    }
+
+    private fun startActivityAndCollapseCompat(intent: Intent) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val pendingIntent = android.app.PendingIntent.getActivity(
+                this,
+                0,
+                intent,
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+            )
+            startActivityAndCollapse(pendingIntent)
+        } else {
+            @Suppress("DEPRECATION")
+            startActivityAndCollapse(intent)
         }
     }
 

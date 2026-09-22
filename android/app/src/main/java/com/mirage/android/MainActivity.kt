@@ -84,16 +84,22 @@ class MainActivity : AppCompatActivity() {
 
         // 统一处理 Window Insets: 顶部状态栏沉浸, 底部避让系统导航栏与悬浮底栏
         androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
-            val statusBars = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.statusBars())
-            val navBars = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.navigationBars())
+            val statusBars = insets.getInsets(
+                androidx.core.view.WindowInsetsCompat.Type.statusBars() or
+                    androidx.core.view.WindowInsetsCompat.Type.displayCutout()
+            )
+            val navBars = insets.getInsets(
+                androidx.core.view.WindowInsetsCompat.Type.navigationBars() or
+                    androidx.core.view.WindowInsetsCompat.Type.displayCutout()
+            )
             
             val density = resources.displayMetrics.density
             val floatingNavHeightWithMargin = (84 * density).toInt()
-            binding.viewPager.setPadding(0, statusBars.top, 0, floatingNavHeightWithMargin + navBars.bottom)
+            binding.viewPager.setPadding(statusBars.left, statusBars.top, statusBars.right, floatingNavHeightWithMargin + navBars.bottom)
 
             val lp = binding.cardFloatingNav.layoutParams as? androidx.coordinatorlayout.widget.CoordinatorLayout.LayoutParams
             if (lp != null) {
-                val sideMargin = (20 * density).toInt()
+                val sideMargin = (20 * density).toInt() + maxOf(navBars.left, navBars.right)
                 val bottomMargin = (12 * density).toInt() + navBars.bottom
                 lp.setMargins(sideMargin, 0, sideMargin, bottomMargin)
                 binding.cardFloatingNav.layoutParams = lp
@@ -176,9 +182,17 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        val backCallback = object : androidx.activity.OnBackPressedCallback(false) {
+            override fun handleOnBackPressed() {
+                binding.viewPager.setCurrentItem(0, false)
+            }
+        }
+        onBackPressedDispatcher.addCallback(this, backCallback)
+
         binding.viewPager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
             override fun onPageSelected(position: Int) {
                 binding.bottomNav.menu.getItem(position).isChecked = true
+                backCallback.isEnabled = position != 0
             }
         })
     }

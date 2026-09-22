@@ -32,6 +32,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.DecimalFormat
 
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+
 /**
  * 独立的 Geo 规则集资产管理中心。
  * 针对流畅度极致优化：
@@ -81,10 +85,50 @@ class GeoAssetActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         binding = ActivityGeoAssetBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        binding.toolbar.setNavigationOnClickListener { finish() }
+        binding.toolbar.setNavigationOnClickListener { onBackPressedDispatcher.onBackPressed() }
+
+        val initialToolbarPaddingLeft = binding.toolbar.paddingLeft
+        val initialToolbarPaddingTop = binding.toolbar.paddingTop
+        val initialToolbarPaddingRight = binding.toolbar.paddingRight
+        val initialToolbarPaddingBottom = binding.toolbar.paddingBottom
+
+        val initialRvPaddingLeft = binding.rvTags.paddingLeft
+        val initialRvPaddingTop = binding.rvTags.paddingTop
+        val initialRvPaddingRight = binding.rvTags.paddingRight
+        val initialRvPaddingBottom = binding.rvTags.paddingBottom
+
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
+            val topInsets = insets.getInsets(
+                WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            val bottomInsets = insets.getInsets(
+                WindowInsetsCompat.Type.navigationBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
+            val sideInsets = insets.getInsets(
+                WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.navigationBars()
+            )
+
+            val bottomPadding = maxOf(bottomInsets.bottom, imeInsets.bottom)
+
+            binding.toolbar.setPadding(
+                initialToolbarPaddingLeft + sideInsets.left,
+                initialToolbarPaddingTop + topInsets.top,
+                initialToolbarPaddingRight + sideInsets.right,
+                initialToolbarPaddingBottom
+            )
+            binding.rvTags.setPadding(
+                initialRvPaddingLeft + sideInsets.left,
+                initialRvPaddingTop,
+                initialRvPaddingRight + sideInsets.right,
+                initialRvPaddingBottom + bottomPadding
+            )
+            WindowInsetsCompat.CONSUMED
+        }
 
         setupRecyclerView()
         setupListeners()

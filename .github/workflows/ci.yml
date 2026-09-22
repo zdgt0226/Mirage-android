@@ -139,6 +139,28 @@ jobs:
             exit 1
           fi
 
+      # 若未配置真实分发密钥，在 CI 临时生成一个 keystore 仅用于验证 APK zip 16KB 对齐。
+      # 该临时 keystore 绝不用于分发。
+      - name: Prepare signing key for release
+        working-directory: android
+        run: |
+          if [ -z "${MIRAGE_KEYSTORE_PATH:-}" ] || [ ! -f "${MIRAGE_KEYSTORE_PATH}" ]; then
+            echo "未检测到分发签名密钥，生成临时 keystore 供 CI 16KB 对齐门禁验证 (非分发)"
+            keytool -genkeypair -v \
+              -keystore ci-temp.keystore \
+              -alias citemp \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 1 \
+              -storepass mirage-ci-temp \
+              -keypass mirage-ci-temp \
+              -dname "CN=Mirage CI Temp, OU=CI, O=Mirage, L=Unknown, ST=Unknown, C=XX"
+            echo "MIRAGE_KEYSTORE_PATH=ci-temp.keystore" >> $GITHUB_ENV
+            echo "MIRAGE_KEYSTORE_PASSWORD=mirage-ci-temp" >> $GITHUB_ENV
+            echo "MIRAGE_KEY_ALIAS=citemp" >> $GITHUB_ENV
+            echo "MIRAGE_KEY_PASSWORD=mirage-ci-temp" >> $GITHUB_ENV
+          fi
+
       # 不是单纯跑构建: 还要断言 AGP 真的找到了 NDK。
       #
       # AGP 找不到 ndkVersion 指定的 NDK 时**不会失败** —— 只打一行
@@ -184,6 +206,59 @@ jobs:
             echo "::error::多半是某个依赖抬高了下限 —— 查 ./gradlew :app:dependencies"
             exit 1
           fi
+
+      # 16KB 内存页对齐门禁。
+      #
+      # Android 15+ 设备要求 APK 内所有未压缩的 .so 库必须按 16KB (16384 字节) 边界对齐。
+      # ELF 段对齐已由 cargo 配置完成；此处的门禁确保签名和 zipalign 后的 APK 容器内
+      # 数据偏移 % 16384 == 0。解析不到任何 .so 必须判失败，不能当作通过。
+      - name: Assert APK zip 16KB alignment for uncompressed .so
+        working-directory: android
+        run: |
+          set -euo pipefail
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          echo "检查 APK 16KB 对齐: $APK"
+          python3 - <<'EOF' "$APK"
+          import sys, zipfile, struct
+
+          apk_path = sys.argv[1]
+          found_so = 0
+          failed = 0
+
+          with open(apk_path, "rb") as f:
+              with zipfile.ZipFile(f) as zf:
+                  for info in zf.infolist():
+                      if not info.filename.endswith(".so"):
+                          continue
+                      found_so += 1
+                      f.seek(info.header_offset)
+                      local_header = f.read(30)
+                      if len(local_header) < 30 or local_header[:4] != b'PK\x03\x04':
+                          print(f"::error::无效的 ZIP 本地文件头: {info.filename}")
+                          failed += 1
+                          continue
+                      compress_type, = struct.unpack_from("<H", local_header, 8)
+                      fname_len, extra_len = struct.unpack_from("<HH", local_header, 26)
+                      data_offset = info.header_offset + 30 + fname_len + extra_len
+                      rem = data_offset % 16384
+                      print(f"{info.filename}: compress_type={compress_type}, offset={data_offset}, rem_16k={rem}")
+                      if compress_type != 0:
+                          print(f"::error::{info.filename} 未存储为未压缩状态 (compress_type={compress_type})")
+                          failed += 1
+                      elif rem != 0:
+                          print(f"::error::{info.filename} 数据偏移 {data_offset} 未按 16KB 对齐 (余数 {rem})")
+                          failed += 1
+
+          if found_so == 0:
+              print("::error::APK 中未发现任何 .so 原生库，对齐门禁判定失败")
+              sys.exit(1)
+
+          if failed > 0:
+              print(f"::error::发现 {failed} 处 .so 对齐缺陷")
+              sys.exit(1)
+
+          print(f"16KB 对齐门禁通过: 共检测 {found_so} 个 .so 库，全部满足未压缩且 16KB 边界对齐。")
+          EOF
 
       # JNI 边界回归门禁。
       #

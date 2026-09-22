@@ -5,7 +5,11 @@ import android.text.Editable
 import android.text.TextWatcher
 import android.view.View
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.mirage.android.R
@@ -32,8 +36,54 @@ class AppFilterActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         binding = ActivityAppFilterBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                saveAndFinish()
+            }
+        })
+
+        val initialToolbarPaddingLeft = binding.toolbar.paddingLeft
+        val initialToolbarPaddingTop = binding.toolbar.paddingTop
+        val initialToolbarPaddingRight = binding.toolbar.paddingRight
+        val initialToolbarPaddingBottom = binding.toolbar.paddingBottom
+
+        val initialRvPaddingLeft = binding.rvApps.paddingLeft
+        val initialRvPaddingTop = binding.rvApps.paddingTop
+        val initialRvPaddingRight = binding.rvApps.paddingRight
+        val initialRvPaddingBottom = binding.rvApps.paddingBottom
+
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
+            val topInsets = insets.getInsets(
+                WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            val bottomInsets = insets.getInsets(
+                WindowInsetsCompat.Type.navigationBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
+            val sideInsets = insets.getInsets(
+                WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.navigationBars()
+            )
+
+            val bottomPadding = maxOf(bottomInsets.bottom, imeInsets.bottom)
+
+            binding.toolbar.setPadding(
+                initialToolbarPaddingLeft + sideInsets.left,
+                initialToolbarPaddingTop + topInsets.top,
+                initialToolbarPaddingRight + sideInsets.right,
+                initialToolbarPaddingBottom
+            )
+            binding.rvApps.setPadding(
+                initialRvPaddingLeft + sideInsets.left,
+                initialRvPaddingTop,
+                initialRvPaddingRight + sideInsets.right,
+                initialRvPaddingBottom + bottomPadding
+            )
+            WindowInsetsCompat.CONSUMED
+        }
 
         repository = AppListRepository(this)
         currentConfig = AppFilterStore.getConfig(this)
@@ -47,7 +97,7 @@ class AppFilterActivity : AppCompatActivity() {
 
     private fun setupToolbar() {
         binding.toolbar.setNavigationOnClickListener {
-            saveAndFinish()
+            onBackPressedDispatcher.onBackPressed()
         }
     }
 
@@ -162,9 +212,5 @@ class AppFilterActivity : AppCompatActivity() {
         AppFilterStore.saveConfig(this, newConfig)
         Toast.makeText(this, R.string.perapp_saved, Toast.LENGTH_SHORT).show()
         finish()
-    }
-
-    override fun onBackPressed() {
-        saveAndFinish()
     }
 }

@@ -17,6 +17,10 @@ import com.mirage.android.data.repository.RuleRepository
 import com.mirage.android.data.repository.VpnRepository
 import com.mirage.android.databinding.ActivitySettingsBinding
 
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+
 /**
  * 设置页。
  *
@@ -37,9 +41,49 @@ class SettingsActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         binding = ActivitySettingsBinding.inflate(layoutInflater)
         setContentView(binding.root)
-        binding.toolbar.setNavigationOnClickListener { finish() }
+        binding.toolbar.setNavigationOnClickListener { onBackPressedDispatcher.onBackPressed() }
+
+        val initialToolbarPaddingLeft = binding.toolbar.paddingLeft
+        val initialToolbarPaddingTop = binding.toolbar.paddingTop
+        val initialToolbarPaddingRight = binding.toolbar.paddingRight
+        val initialToolbarPaddingBottom = binding.toolbar.paddingBottom
+
+        val initialScrollPaddingLeft = binding.scrollView.paddingLeft
+        val initialScrollPaddingTop = binding.scrollView.paddingTop
+        val initialScrollPaddingRight = binding.scrollView.paddingRight
+        val initialScrollPaddingBottom = binding.scrollView.paddingBottom
+
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
+            val topInsets = insets.getInsets(
+                WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            val bottomInsets = insets.getInsets(
+                WindowInsetsCompat.Type.navigationBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
+            val sideInsets = insets.getInsets(
+                WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.navigationBars()
+            )
+
+            val bottomPadding = maxOf(bottomInsets.bottom, imeInsets.bottom)
+
+            binding.toolbar.setPadding(
+                initialToolbarPaddingLeft + sideInsets.left,
+                initialToolbarPaddingTop + topInsets.top,
+                initialToolbarPaddingRight + sideInsets.right,
+                initialToolbarPaddingBottom
+            )
+            binding.scrollView.setPadding(
+                initialScrollPaddingLeft + sideInsets.left,
+                initialScrollPaddingTop,
+                initialScrollPaddingRight + sideInsets.right,
+                initialScrollPaddingBottom + bottomPadding
+            )
+            WindowInsetsCompat.CONSUMED
+        }
 
         bindRow(binding.rowDns, R.drawable.ic_dns, R.string.home_dns_card) { showDnsDialog() }
         bindRow(binding.rowTun, R.drawable.ic_nav_traffic, R.string.tun_title) { showTunDialog() }
