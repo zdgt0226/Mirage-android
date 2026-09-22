@@ -89,4 +89,58 @@
         <item name="android:height">28dp</item>
         <item name="shapeAppearance">@style/ShapeAppearance.Material3.Corner.Full</item>
     </style>
+
+    <!--
+        流体排版系统 (遵循 WWDC The Details of UI Typography 规范):
+        - 字距随字号反向: 大字号收紧 (负字距), 正文归零, 小字号略微放开
+        - 行高随字号反向: 大字号紧凑 (1.1x), 正文宽松舒适 (1.25x)
+        - 中文排版克制: 汉字为定宽方块字, 负字距过大会粘连, 因此 Display 取 -0.015, Title 取 -0.01
+        - 多维层次: 字号 + 字重 + 行高 + 字距 组合
+    -->
+
+    <!-- 1. Display: 核心大数值显示、主页面大标题 (20sp - 22sp) -->
+    <style name="TextAppearance.Mirage.Display" parent="TextAppearance.Material3.HeadlineMedium">
+        <item name="android:textSize">20sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:letterSpacing">-0.015</item>
+        <item name="android:lineSpacingMultiplier">1.1</item>
+        <item name="android:textColor">@color/meow_ink</item>
+    </style>
+
+    <!-- 2. Title: 模块主标题、Hero 连接按钮主字 (16sp - 18sp) -->
+    <style name="TextAppearance.Mirage.Title" parent="TextAppearance.Material3.TitleMedium">
+        <item name="android:textSize">16sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:letterSpacing">-0.01</item>
+        <item name="android:lineSpacingMultiplier">1.15</item>
+        <item name="android:textColor">@color/meow_ink</item>
+    </style>
+
+    <!-- 3. Body: 列表卡片主要内容、正文描述 (13.5sp - 14sp) -->
+    <style name="TextAppearance.Mirage.Body" parent="TextAppearance.Material3.BodyMedium">
+        <item name="android:textSize">14sp</item>
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:letterSpacing">0.0</item>
+        <item name="android:lineSpacingMultiplier">1.25</item>
+        <item name="android:textColor">@color/meow_ink</item>
+    </style>
+
+    <!-- 4. Label: 按钮标签、操作药丸、分段选择、次要字段名 (12sp - 12.5sp) -->
+    <style name="TextAppearance.Mirage.Label" parent="TextAppearance.Material3.LabelLarge">
+        <item name="android:textSize">12sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:letterSpacing">0.02</item>
+        <item name="android:lineSpacingMultiplier">1.15</item>
+        <item name="android:textColor">@color/meow_ink</item>
+    </style>
+
+    <!-- 5. Caption: 统计小字段、微时间戳、辅助说明、状态标签 (10.5sp - 11.5sp) -->
+    <style name="TextAppearance.Mirage.Caption" parent="TextAppearance.Material3.BodySmall">
+        <item name="android:textSize">11sp</item>
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:letterSpacing">0.03</item>
+        <item name="android:lineSpacingMultiplier">1.2</item>
+        <item name="android:textColor">@color/meow_ink_secondary</item>
+    </style>
 </resources>

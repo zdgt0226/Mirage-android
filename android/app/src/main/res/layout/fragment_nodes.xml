@@ -21,8 +21,8 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:text="@string/nodes_title"
+            android:textAppearance="@style/TextAppearance.Mirage.Display"
             android:textColor="@color/meow_ink"
-            android:textSize="22sp"
             android:textStyle="bold" />
 
         <com.google.android.material.button.MaterialButton
@@ -32,7 +32,7 @@
             android:layout_height="38dp"
             android:paddingHorizontal="10dp"
             android:text="@string/nodes_import_clipboard"
-            android:textSize="12sp"
+            android:textAppearance="@style/TextAppearance.Mirage.Label"
             app:cornerRadius="8dp"
             app:strokeColor="@color/meow_blue" />
     </LinearLayout>
@@ -57,8 +57,8 @@
             android:layout_height="wrap_content"
             android:layout_gravity="center"
             android:text="@string/nodes_empty"
+            android:textAppearance="@style/TextAppearance.Mirage.Body"
             android:textColor="@color/meow_ink_secondary"
-            android:textSize="14sp"
             android:visibility="gone" />
     </FrameLayout>
 
@@ -76,7 +76,7 @@
             android:layout_marginEnd="4dp"
             android:layout_weight="1"
             android:text="@string/nodes_add"
-            android:textSize="14sp"
+            android:textAppearance="@style/TextAppearance.Mirage.Body"
             app:cornerRadius="10dp" />
 
         <com.google.android.material.button.MaterialButton
@@ -87,7 +87,7 @@
             android:layout_marginStart="4dp"
             android:layout_weight="1"
             android:text="@string/nodes_test_all"
-            android:textSize="14sp"
+            android:textAppearance="@style/TextAppearance.Mirage.Body"
             app:cornerRadius="10dp" />
     </LinearLayout>
 
@@ -107,7 +107,7 @@
             android:layout_weight="1"
             android:paddingHorizontal="4dp"
             android:text="@string/nodes_auto_off"
-            android:textSize="11sp"
+            android:textAppearance="@style/TextAppearance.Mirage.Caption"
             app:cornerRadius="8dp"
             app:strokeColor="@color/meow_outline" />
 
@@ -120,7 +120,7 @@
             android:layout_weight="1"
             android:paddingHorizontal="4dp"
             android:text="@string/nodes_test_method_tcp"
-            android:textSize="11sp"
+            android:textAppearance="@style/TextAppearance.Mirage.Caption"
             app:cornerRadius="8dp"
             app:strokeColor="@color/meow_outline" />
 
@@ -133,7 +133,7 @@
             android:layout_weight="1"
             android:paddingHorizontal="4dp"
             android:text="@string/nodes_pool_default"
-            android:textSize="11sp"
+            android:textAppearance="@style/TextAppearance.Mirage.Caption"
             app:cornerRadius="8dp"
             app:strokeColor="@color/meow_outline" />
     </LinearLayout>
