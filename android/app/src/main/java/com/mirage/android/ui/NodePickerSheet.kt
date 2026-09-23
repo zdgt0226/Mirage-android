@@ -10,6 +10,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.recyclerview.widget.LinearLayoutManager
+import com.google.android.material.bottomsheet.BottomSheetBehavior
+import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.mirage.android.R
 import com.mirage.android.databinding.SheetNodePickerBinding
@@ -43,6 +45,19 @@ class NodePickerSheet : BottomSheetDialogFragment() {
     ): View {
         _binding = SheetNodePickerBinding.inflate(inflater, container, false)
         return binding.root
+    }
+
+    override fun onStart() {
+        super.onStart()
+        val dialog = dialog as? BottomSheetDialog ?: return
+        dialog.dismissWithAnimation = true
+        dialog.behavior.apply {
+            // 节点数量可变，内容常比半展开区矮；fitToContents=false 只定顶边、
+            // 不拉伸 wrap_content 子视图，会让面板底边吊在半空（API 36 实测空洞 593px）。
+            isFitToContents = true
+            skipCollapsed = true
+            state = BottomSheetBehavior.STATE_EXPANDED
+        }
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
