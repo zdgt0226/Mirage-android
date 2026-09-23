@@ -986,6 +986,22 @@ Compose 侧无额外对齐成本：Kotlin 已是 2.1.0，自带 `org.jetbrains.k
 | B | `targetSdk 36`、三 Activity insets、预测式返回走 androidx、FGS 兜底、16 KB zip 门禁 | 已合入 `main`（PR #7） |
 | UI-1 | 排版五档、Haptic 回退、图标归一 | 已提交 `ui/fluid-foundation` (`02d0611`)，**未推** |
 | UI-2 | 弹簧铺到交互面（按压反馈、拖拽、面板切换） | 进行中 |
+| UI-3 | 四个弹层的 `BottomSheetBehavior` 定档与滚动契约 | 已实现，两端核验通过（提交 `d545ddc`，分支 `ui/sheet-behavior`，待合入） |
+
+**UI-3 四个面板的最终配置与选择依据**：
+- `NodePickerSheet`：`fitToContents = true`
+- `RequestDetailBottomSheet`：`fitToContents = true`
+- `DnsConfigDialog`：`fitToContents = true`
+- `TunConfigDialog`：`fitToContents = false`, `halfExpandedRatio = 0.65`
+
+四者均设置 `skipCollapsed = true`、`dismissWithAnimation = true`（关闭走 behavior settle 动画而非窗口动画硬切）。三个 `ScrollView` 根视图换为 `NestedScrollView`（`DnsConfigDialog`、`TunConfigDialog`、`RequestDetailBottomSheet`），`sheet_node_picker.xml` 的 `LinearLayout` 根新包一层 `NestedScrollView`（`RecyclerView` 设置 `nestedScrollingEnabled = false`），确保 `NestedScrollingChild` 契约生效，区分“滚动内容”与“拖拽弹层”。
+
+**技术纠正（关键事实与错误模型修复）**：
+**`BottomSheetBehavior` 在 `isFitToContents = false` 时只把面板顶边定位在 `parentHeight × (1 - halfExpandedRatio)`，不会拉伸 `wrap_content` 子视图。** 当内容比该区域矮时，面板底边会直接悬吊在半空。
+- 实测 Galaxy S24+（API 36，1080×2340，两个节点）：`design_bottom_sheet` = `[0,935][1080,1747]`，顶边 935 ≈ 2340 × 0.40 正确，但面板下方露出 593px 被压暗的主界面与悬浮底栏。
+- SO-02K（720×1280）因同样内容恰好填满该区域，此前未能暴露此问题。
+- 因此 UI-3 初版给节点面板选 0.60、并推导“恰好能给出四行列表”的理由本身建立在错误模型上，现已全面纠正改为 `fitToContents = true`。改后同机实测 `[0,1528][1080,2340]`，高 812px 恰好等于内容高，空隙为 0。
+- `TunConfigDialog` 保持 `fitToContents = false` + `0.65`，是因为其表单本身高过视口，0.65 是在压制一个本会全屏的面板。
 
 ### 11.3 剩余阶段与进入条件
 
@@ -1075,8 +1091,22 @@ adb shell dumpsys power | grep -m1 mWakefulness   # 必须 Awake
 
 只在新机器上验过的改动**不算验过**。Compose 引入后尤其要紧——那是性能账。
 
+#### uiautomator 取样必须做到失败无残留
+
+仅校验 `uiautomator dump` 输出里的成功字符串 `UI hierchary dumped to` 还不够——本轮两次误判都源于读到了旧快照：
+1. **第一次**：dump 静默失败（`ERROR: could not get idle state`，发生在窗口动画期间），脚本沿用上一份本地文件，连续三次读到同一份历史数据，据此得出“TUN 面板冻结、拖不动也关不掉”的错误结论。
+2. **第二次**：给 dump 加了重试包装 `for i in 1 2 3; do dump && break; sleep 2; done`，三次全失败时循环静默结束，后续解析步骤仍读到旧文件，据此得出“TUN 面板残留在 MainActivity 之上、BACK 不消”的错误结论；后续排查 `dumpsys window windows` 发现只有一个 mirage 窗口，该判定作废。
+
+**取样规则**：
+- 取样脚本必须**先删本地快照再取**，任何失败路径都不得留下可被误读的文件，解析步骤一旦读不到文件即刻失败退出。
+- 另：首页因速率图表常驻动画，`uiautomator` 在两台设备上都基本取不到（API 28 上报 `null root node returned by UiTestAutomationBridge`），该页一律改用 `screencap` 判读。
+
 ### 11.5 已知遗留
 
+- **首页连接状态位与实际隧道状态失配（两端均可出现，非 UI-3 引入）**。
+  - **现象**：`tun0` 已起、前台服务在运行（`SpecialUse`）、请求流与累计计数在走，首页却显示「未连接／连接」，速率显示 0 B/s；按 HOME 退出再进入即自愈为「已连接（加密隧道保护中）／断开」。
+  - **出现条件**：S24+（API 36）上见于 `adb install -r` 替换安装后的首次连接；SO-02K（API 28）上见于“连接 → 切出浏览器 → 切回 → 切 tab”之后。在 S24+ 上用“冷启动后立刻连接”与“常规连接”各复现一次均未重现，说明不是每次必现。
+  - **分析**：UI-3 未触碰任何状态绑定代码。机制尚未查实，不下结论；待后续单独一轮定位，当前怀疑方向是首页状态只在 `onResume` 拉取、漏了在前台期间到达的状态迁移。
 - **规则页第三条被底部按钮组压住一半**（SO-02K 实测）。列表区高度与固定按钮组的
   间距问题，非本轮引入，D 段重排信息架构时一并解决。
 - **`core/` 仍有约 90 处中文未国际化**。混着用户可见文案与必须语言无关的标识
