@@ -1158,7 +1158,7 @@ adb shell dumpsys power | grep -m1 mWakefulness   # 必须 Awake
    - **实测后果**：三处均包含完整切换实现。该冗余系 UI-2 引入底部弹层后未及时收拢入口所致，弹层与节点 tab 功能高度重合，割裂用户心智。
 
 3. **固定时长动画残留**
-   - **代码位置**：`RulesFragment.kt:122`（`animate().scaleX(1.03f).scaleY(1.03f).setDuration(120).start()`）与 `RulesFragment.kt:135`（归位同款写法）；另外 `MainActivity.kt:172`（`isUserInputEnabled = false`）与 `177-180`（四个 `setCurrentItem(n, false)`）为 0ms 硬切；底色对应 `colors.xml:9`（`meow_canvas #F0F2F5`）与 `colors.xml:10`（`meow_card #FFFFFF`）。
+   - **代码位置**：`RulesFragment.kt:122`（`animate().scaleX(1.03f).scaleY(1.03f).setDuration(120).start()`）与 `RulesFragment.kt:135`（归位同款写法）；另外 `MainActivity.kt:172`（`isUserInputEnabled = false`）与 `177-180`（四个 `setCurrentItem(n, false)`）为 0ms 硬切。
    - **实测后果**：`RulesFragment.kt:122/135` 是全工程目前**唯一**仍在用固定时长做手势反馈的地方，缺乏物理动量与打断续接机制。
 
 ### 12.3 三条低垂果实（当前 View 体系落地）
