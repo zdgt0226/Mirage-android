@@ -60,7 +60,7 @@
     <string name="rule_conditions_label">匹配条件清单:</string>
     <string name="rule_add_condition">+ 添加条件</string>
     <string name="cancel">取消</string>
-    <string name="save_and_enable">保存并生效</string>
+    <string name="save_and_enable">保存</string>
     <string name="rule_name_hint">如: Google 全家桶加速 / 公司内网</string>
     <string name="req_target">请求目标</string>
     <string name="req_resolved">解析地址</string>
@@ -141,12 +141,13 @@
     <string name="rules_geo_entry_desc">规则源设置 · 自动更新调度 · Tag 深度内省器</string>
     <string name="rules_perapp_entry">分应用代理 (Per-App Proxy)</string>
     <string name="rules_perapp_entry_desc">白名单 / 黑名单模式 · 精确指定应用进出 VPN</string>
-    <string name="rules_list_label">规则列表 (首条命中即生效)</string>
-    <string name="rules_drag_hint">按住 ≡ 上下拖动调优</string>
-    <string name="rules_empty">暂无自定义规则，点击下方「常用预设」或「添加规则」</string>
+    <string name="rules_list_label">规则列表</string>
+    <string name="rules_drag_hint">首条命中 · 按住 ≡ 拖动排序</string>
+    <string name="rules_empty">暂无自定义规则。点右下角 + 添加，或从右上角菜单套用常用预设</string>
     <string name="rules_presets">常用预设</string>
     <string name="rules_add">添加规则</string>
-    <string name="rules_apply">应用规则</string>
+    <string name="rules_apply">应用</string>
+    <string name="rules_unapplied_hint">改动需应用才影响当前连接</string>
     <string name="traffic_total_up_zero">累计上行: 0 B</string>
     <string name="traffic_total_down_zero">累计下行: 0 B</string>
     <string name="traffic_requests_title">请求流 (Recent)</string>
