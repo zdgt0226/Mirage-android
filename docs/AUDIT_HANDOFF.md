@@ -570,3 +570,56 @@ MIN=$(aapt2 dump badging "$APK" | sed -n "s/^minSdkVersion:'\([0-9]*\)'.*/\1/p")
 
 触感常量不会崩（`performHapticFeedback` 遇未知常量返回 `false`），但会让 Android 9
 用户完全没有触感反馈——多模态反馈少一条腿，属于静默降级，必须显式回退。
+
+## 6. 栈式 PR 的合并规程（2026-09-24 实测）
+
+### 6.1 背景
+
+本轮 UI 工作形成了四层线性 PR 栈，每层的 base 都是上一层的分支：
+
+```
+#11 ui/fluid-foundation -> main
+#12 ui/sheet-behavior   -> ui/fluid-foundation
+#13 ui/rules-chrome     -> ui/sheet-behavior
+#14 ui/node-text-spring -> ui/rules-chrome
+```
+
+### 6.2 规程一：栈式 PR 必须用合并提交，不能 squash
+
+仓库历史用的是 squash（main 上早期提交标题带 `(#9)`、`(#10)`）。但 squash 会为 main 生成一个全新提交，子分支并不以它为祖先——接着合子 PR 时 git 会尝试把父 PR 的改动在同一批文件上重新铺一遍，冲突风险高。
+
+本轮统一用 `gh pr merge <n> --merge`，四次合并全部一次通过，事后 `git merge-base --is-ancestor` 确认四个提交（`a0eed2c`、`d545ddc`、`295e302`、`1e198b8`）都在 main 上，祖先关系完整。
+
+### 6.3 规程二：合并栈式 PR 时不要用 `--delete-branch`，会杀掉子 PR
+
+本轮实际发生：执行 `gh pr merge 11 --merge --delete-branch` 后，GitHub 删除了 `ui/fluid-foundation`，但**没有**把子 PR #12 改指 main，而是因其 base 分支不存在直接把 #12 转为 `CLOSED`。
+
+随后陷入死锁：
+- 关闭状态不能改 base（`Cannot change the base branch of a closed pull request`）
+- base 分支已删则不能 reopen（`Could not open the pull request`）
+- 两条路互堵
+
+**恢复办法（已验证可行）**：把被删的 base 分支从 main 历史里推回原位，再 reopen、再改指：
+
+```bash
+git push origin <被合并的提交>:refs/heads/<被删的分支名>
+gh pr reopen <子PR编号>
+gh pr edit <子PR编号> --base main
+```
+
+**正确顺序**：
+1. 先把**所有**子 PR 改指 main：`gh pr edit <n> --base main`（在它们还是 OPEN、且各自 base 分支还存在时做）
+2. 再自底向上逐个合并，**不带** `--delete-branch`：`gh pr merge <n> --merge`
+3. 全部合完、确认所有 PR 均为 MERGED 且无在途子 PR 之后，再统一删除远端分支
+
+### 6.4 附带事实：非 main 基线分支的 CI 触发规则
+
+CI 工作流的 `on.pull_request.branches` 与 `on.push.branches` 都只列了 `[main, master]`，过滤的是 **base** 分支，所以栈中 base 不是 main 的 PR 不会自动触发 CI。
+
+本轮的做法是对栈顶分支手动触发 CI：
+
+```bash
+gh workflow run ci.yml --ref <栈顶分支>
+```
+
+栈顶包含全部改动，它绿即代表整栈内容绿。
