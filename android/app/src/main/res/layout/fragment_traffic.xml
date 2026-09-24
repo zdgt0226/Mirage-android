@@ -206,13 +206,18 @@
             app:tint="@color/meow_ink_secondary" />
     </LinearLayout>
 
-    <!-- 容器1: Surge 级 Recent Requests 请求流 (默认展示) -->
-    <LinearLayout
-        android:id="@+id/boxRecentRequests"
+    <!-- 两个面板的容器：采用 FrameLayout 重叠布局，使连续过渡期间无任何高度抖动与重新测绘挤压 -->
+    <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1"
-        android:orientation="vertical">
+        android:layout_weight="1">
+
+        <!-- 容器1: Surge 级 Recent Requests 请求流 (默认展示) -->
+        <LinearLayout
+            android:id="@+id/boxRecentRequests"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical">
 
         <!-- 搜索框与筛选 Chips -->
         <LinearLayout
@@ -321,8 +326,7 @@
     <LinearLayout
         android:id="@+id/boxLogs"
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
+        android:layout_height="match_parent"
         android:orientation="vertical"
         android:visibility="gone">
 
@@ -411,4 +415,5 @@
             </ScrollView>
         </com.google.android.material.card.MaterialCardView>
     </LinearLayout>
+    </FrameLayout>
 </LinearLayout>

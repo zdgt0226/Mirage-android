@@ -21,8 +21,8 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:text="@string/rules_title"
+            android:textAppearance="@style/TextAppearance.Mirage.Display"
             android:textColor="@color/meow_ink"
-            android:textSize="22sp"
             android:textStyle="bold" />
 
         <com.google.android.material.button.MaterialButton
@@ -33,8 +33,8 @@
             android:layout_marginEnd="6dp"
             android:paddingHorizontal="8dp"
             android:text="@string/rules_clear_stats"
-            android:textColor="@color/meow_ink_secondary"
-            android:textSize="12sp" />
+            android:textAppearance="@style/TextAppearance.Mirage.Label"
+            android:textColor="@color/meow_ink_secondary" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/defaultActionBtn"
@@ -43,7 +43,7 @@
             android:layout_height="38dp"
             android:paddingHorizontal="10dp"
             android:text="@string/rules_default_proxy"
-            android:textSize="12sp"
+            android:textAppearance="@style/TextAppearance.Mirage.Label"
             app:cornerRadius="8dp"
             app:strokeColor="@color/meow_outline" />
     </LinearLayout>
@@ -87,8 +87,8 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="@string/rules_geo_entry"
+                    android:textAppearance="@style/TextAppearance.Mirage.Body"
                     android:textColor="@color/meow_ink"
-                    android:textSize="14sp"
                     android:textStyle="bold" />
 
                 <TextView
@@ -97,8 +97,8 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="2dp"
                     android:text="@string/rules_geo_entry_desc"
-                    android:textColor="@color/meow_ink_secondary"
-                    android:textSize="11sp" />
+                    android:textAppearance="@style/TextAppearance.Mirage.Caption"
+                    android:textColor="@color/meow_ink_secondary" />
             </LinearLayout>
 
             <ImageView
@@ -148,8 +148,8 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="@string/rules_perapp_entry"
+                    android:textAppearance="@style/TextAppearance.Mirage.Body"
                     android:textColor="@color/meow_ink"
-                    android:textSize="14sp"
                     android:textStyle="bold" />
 
                 <TextView
@@ -158,8 +158,8 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="2dp"
                     android:text="@string/rules_perapp_entry_desc"
-                    android:textColor="@color/meow_ink_secondary"
-                    android:textSize="11sp" />
+                    android:textAppearance="@style/TextAppearance.Mirage.Caption"
+                    android:textColor="@color/meow_ink_secondary" />
             </LinearLayout>
 
             <ImageView
@@ -184,16 +184,16 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:text="@string/rules_list_label"
+            android:textAppearance="@style/TextAppearance.Mirage.Body"
             android:textColor="@color/meow_ink"
-            android:textSize="13sp"
             android:textStyle="bold" />
 
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="@string/rules_drag_hint"
-            android:textColor="@color/meow_ink_secondary"
-            android:textSize="11sp" />
+            android:textAppearance="@style/TextAppearance.Mirage.Caption"
+            android:textColor="@color/meow_ink_secondary" />
     </LinearLayout>
 
     <!-- 自定义规则列表 -->
@@ -216,8 +216,8 @@
             android:layout_height="wrap_content"
             android:layout_gravity="center"
             android:text="@string/rules_empty"
+            android:textAppearance="@style/TextAppearance.Mirage.Body"
             android:textColor="@color/meow_ink_secondary"
-            android:textSize="13sp"
             android:visibility="gone" />
     </FrameLayout>
 
@@ -236,7 +236,7 @@
             android:layout_weight="1"
             android:paddingHorizontal="4dp"
             android:text="@string/rules_presets"
-            android:textSize="13sp"
+            android:textAppearance="@style/TextAppearance.Mirage.Label"
             app:cornerRadius="10dp" />
 
         <com.google.android.material.button.MaterialButton
@@ -248,7 +248,7 @@
             android:layout_weight="1"
             android:paddingHorizontal="4dp"
             android:text="@string/rules_add"
-            android:textSize="13sp"
+            android:textAppearance="@style/TextAppearance.Mirage.Label"
             app:cornerRadius="10dp" />
 
         <com.google.android.material.button.MaterialButton
@@ -260,7 +260,7 @@
             android:layout_weight="1"
             android:paddingHorizontal="4dp"
             android:text="@string/rules_apply"
-            android:textSize="13sp"
+            android:textAppearance="@style/TextAppearance.Mirage.Label"
             app:cornerRadius="10dp" />
     </LinearLayout>
 </LinearLayout>

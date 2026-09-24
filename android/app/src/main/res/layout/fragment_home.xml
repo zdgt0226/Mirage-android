@@ -38,7 +38,7 @@
                 android:layout_height="48dp"
                 android:layout_weight="1"
                 android:text="@string/connect"
-                android:textSize="15sp"
+                android:textAppearance="@style/TextAppearance.Mirage.Title"
                 app:cornerRadius="24dp" />
 
             <ImageButton
@@ -49,15 +49,15 @@
                 android:background="?attr/selectableItemBackgroundBorderless"
                 android:contentDescription="@string/settings_open"
                 android:src="@drawable/ic_settings"
-                app:tint="@color/meow_ink_secondary" />
+                app:tint="@color/meow_ink" />
         </LinearLayout>
 
-        <!-- Surge 级出站模式三段式分流控制器 (Segmented Control) -->
+        <!-- Surge 模式三段切换器 (胶囊外框 + 等宽三分) -->
         <com.google.android.material.button.MaterialButtonToggleGroup
             android:id="@+id/toggleOutboundMode"
             android:layout_width="match_parent"
             android:layout_height="36dp"
-            android:layout_marginTop="10dp"
+            android:layout_marginTop="8dp"
             app:checkedButton="@id/btnModeRule"
             app:selectionRequired="true"
             app:singleSelection="true">
@@ -71,7 +71,7 @@
                 android:insetTop="0dp"
                 android:insetBottom="0dp"
                 android:text="@string/mode_rule"
-                android:textSize="11.5sp" />
+                android:textAppearance="@style/TextAppearance.Mirage.Label" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnModeProxy"
@@ -82,7 +82,7 @@
                 android:insetTop="0dp"
                 android:insetBottom="0dp"
                 android:text="@string/mode_global"
-                android:textSize="11.5sp" />
+                android:textAppearance="@style/TextAppearance.Mirage.Label" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnModeDirect"
@@ -93,7 +93,7 @@
                 android:insetTop="0dp"
                 android:insetBottom="0dp"
                 android:text="@string/mode_direct"
-                android:textSize="11.5sp" />
+                android:textAppearance="@style/TextAppearance.Mirage.Label" />
         </com.google.android.material.button.MaterialButtonToggleGroup>
 
         <!-- 主状态 Hero 卡片 (圆角 14dp) -->
@@ -130,8 +130,8 @@
                         android:layout_height="wrap_content"
                         android:layout_marginStart="8dp"
                         android:text="@string/status_idle"
+                        android:textAppearance="@style/TextAppearance.Mirage.Title"
                         android:textColor="@color/meow_disconnected"
-                        android:textSize="18sp"
                         android:textStyle="bold" />
                 </LinearLayout>
 
@@ -141,8 +141,8 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="3dp"
                     android:fontFeatureSettings="tnum"
+                    android:textAppearance="@style/TextAppearance.Mirage.Label"
                     android:textColor="@color/meow_ink_secondary"
-                    android:textSize="12sp"
                     android:visibility="gone"
                     tools:text="隧道 RTT: 42ms"
                     tools:visibility="visible" />
@@ -186,16 +186,16 @@
                             android:ellipsize="end"
                             android:maxLines="1"
                             android:text="@string/home_no_node"
+                            android:textAppearance="@style/TextAppearance.Mirage.Body"
                             android:textColor="@color/meow_ink"
-                            android:textSize="13.5sp"
                             android:textStyle="bold" />
 
                         <TextView
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="@string/home_switch_node"
+                            android:textAppearance="@style/TextAppearance.Mirage.Label"
                             android:textColor="@color/meow_blue"
-                            android:textSize="12.5sp"
                             android:textStyle="bold" />
 
                         <!-- 新增节点: 常用到不该藏在二级页里 -->
@@ -243,8 +243,8 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="@string/rate_up_label"
+                            android:textAppearance="@style/TextAppearance.Mirage.Caption"
                             android:textColor="@color/meow_upload"
-                            android:textSize="11sp"
                             android:textStyle="bold" />
 
                         <TextView
@@ -254,8 +254,8 @@
                             android:layout_marginTop="2dp"
                             android:fontFeatureSettings="tnum"
                             android:text="0 B/s"
+                            android:textAppearance="@style/TextAppearance.Mirage.Display"
                             android:textColor="@color/meow_ink"
-                            android:textSize="19sp"
                             android:textStyle="bold" />
                     </LinearLayout>
 
@@ -269,8 +269,8 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="@string/rate_down_label"
+                            android:textAppearance="@style/TextAppearance.Mirage.Caption"
                             android:textColor="@color/meow_download"
-                            android:textSize="11sp"
                             android:textStyle="bold" />
 
                         <TextView
@@ -280,8 +280,8 @@
                             android:layout_marginTop="2dp"
                             android:fontFeatureSettings="tnum"
                             android:text="0 B/s"
+                            android:textAppearance="@style/TextAppearance.Mirage.Display"
                             android:textColor="@color/meow_ink"
-                            android:textSize="19sp"
                             android:textStyle="bold" />
                     </LinearLayout>
                 </LinearLayout>
@@ -312,8 +312,8 @@
                         android:layout_weight="1"
                         android:fontFeatureSettings="tnum"
                         android:text="@string/home_total_zero"
-                        android:textColor="@color/meow_ink_secondary"
-                        android:textSize="11sp" />
+                        android:textAppearance="@style/TextAppearance.Mirage.Caption"
+                        android:textColor="@color/meow_ink_secondary" />
 
                     <TextView
                         android:id="@+id/connsInfo"
@@ -321,8 +321,8 @@
                         android:layout_height="wrap_content"
                         android:fontFeatureSettings="tnum"
                         android:text="@string/home_conns_zero"
-                        android:textColor="@color/meow_ink_secondary"
-                        android:textSize="11sp" />
+                        android:textAppearance="@style/TextAppearance.Mirage.Caption"
+                        android:textColor="@color/meow_ink_secondary" />
                 </LinearLayout>
 
                 <TextView
@@ -332,8 +332,8 @@
                     android:layout_marginTop="3dp"
                     android:fontFeatureSettings="tnum"
                     android:text="@string/home_today_zero"
-                    android:textColor="@color/meow_ink_secondary"
-                    android:textSize="11sp" />
+                    android:textAppearance="@style/TextAppearance.Mirage.Caption"
+                    android:textColor="@color/meow_ink_secondary" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

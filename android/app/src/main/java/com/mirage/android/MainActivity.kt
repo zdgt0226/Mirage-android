@@ -7,6 +7,7 @@ import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.view.View
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
@@ -26,6 +27,7 @@ import com.mirage.android.ui.HomeFragment
 import com.mirage.android.ui.NodesFragment
 import com.mirage.android.ui.RulesFragment
 import com.mirage.android.ui.TrafficFragment
+import com.mirage.android.ui.common.FluidSpring
 import com.mirage.android.ui.viewmodel.HomeViewModel
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
@@ -179,6 +181,20 @@ class MainActivity : AppCompatActivity() {
                 R.id.nav_rules -> { binding.viewPager.setCurrentItem(2, false); true }
                 R.id.nav_traffic -> { binding.viewPager.setCurrentItem(3, false); true }
                 else -> false
+            }
+        }
+
+        binding.bottomNav.post {
+            val navItemIds = intArrayOf(
+                R.id.nav_home,
+                R.id.nav_nodes,
+                R.id.nav_rules,
+                R.id.nav_traffic
+            )
+            for (id in navItemIds) {
+                binding.bottomNav.findViewById<View>(id)?.let { itemView ->
+                    FluidSpring.attachPressScale(itemView)
+                }
             }
         }
 
