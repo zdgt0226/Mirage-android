@@ -68,7 +68,7 @@
                 android:maxLines="1"
                 android:textColor="@color/meow_ink_secondary"
                 android:textSize="12sp"
-                tools:text="hk.mirage.example:443 (SNI: www.apple.com)" />
+                tools:text="hk.mirage.example:443" />
         </LinearLayout>
 
         <TextView
