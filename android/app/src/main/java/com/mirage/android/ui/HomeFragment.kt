@@ -138,11 +138,7 @@ class HomeFragment : Fragment() {
                 }
                 launch {
                     viewModel.selectedNode.collect { node ->
-                        binding.currentNode.text = if (node != null) {
-                            getString(R.string.home_node_fmt, node.displayName)
-                        } else {
-                            getString(R.string.home_no_node)
-                        }
+                        binding.currentNode.text = node?.displayName ?: getString(R.string.home_no_node)
                     }
                 }
                 launch {

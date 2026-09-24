@@ -362,7 +362,6 @@
     <string name="tun_sum_quic_pass">QUIC allowed</string>
     <string name="tun_sum_mux_on">UDP mux</string>
     <string name="tun_sum_mux_off">single UDP</string>
-    <string name="home_node_fmt">Node: %1$s</string>
     <string name="home_total_fmt">Total: ↑%1$s / ↓%2$s</string>
     <string name="home_conns_fmt">Connections: %1$s</string>
     <string name="home_usage_fmt">Today: ↑%1$s / ↓%2$s · This month: ↑%3$s / ↓%4$s</string>

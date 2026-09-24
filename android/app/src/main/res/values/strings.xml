@@ -363,7 +363,6 @@
     <string name="tun_sum_quic_pass">放行QUIC</string>
     <string name="tun_sum_mux_on">UDP Mux</string>
     <string name="tun_sum_mux_off">单流UDP</string>
-    <string name="home_node_fmt">节点: %1$s</string>
     <string name="home_total_fmt">累计: ↑%1$s / ↓%2$s</string>
     <string name="home_conns_fmt">连接: %1$s</string>
     <string name="home_usage_fmt">今日用量: ↑%1$s / ↓%2$s · 本月: ↑%3$s / ↓%4$s</string>

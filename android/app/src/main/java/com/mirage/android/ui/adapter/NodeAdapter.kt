@@ -53,7 +53,7 @@ class NodeAdapter(
         fun bind(node: Node, isSelected: Boolean) {
             val ctx = binding.root.context
             binding.tvNodeName.text = node.displayName
-            binding.tvServerPort.text = "${node.server}:${node.port} (SNI: ${node.sni})"
+            binding.tvServerPort.text = "${node.server}:${node.port}"
             binding.radioSelected.isChecked = isSelected
 
             // 选中高亮边框和背景。
