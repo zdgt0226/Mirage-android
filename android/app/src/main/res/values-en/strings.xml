@@ -140,12 +140,13 @@
     <string name="rules_geo_entry_desc">Sources · auto-update schedule · tag browser</string>
     <string name="rules_perapp_entry">Per-app proxy</string>
     <string name="rules_perapp_entry_desc">Whitelist or blacklist · pick exactly which apps use the VPN</string>
-    <string name="rules_list_label">Rules (first match wins)</string>
-    <string name="rules_drag_hint">Hold ≡ to reorder</string>
-    <string name="rules_empty">No custom rules yet. Use “Presets” or “Add rule” below.</string>
+    <string name="rules_list_label">Rules</string>
+    <string name="rules_drag_hint">First match wins · hold ≡ to reorder</string>
+    <string name="rules_empty">No custom rules yet. Tap + to add one, or apply a preset from the menu.</string>
     <string name="rules_presets">Presets</string>
     <string name="rules_add">Add rule</string>
     <string name="rules_apply">Apply</string>
+    <string name="rules_unapplied_hint">Apply to update the live connection</string>
     <string name="traffic_total_up_zero">Total up: 0 B</string>
     <string name="traffic_total_down_zero">Total down: 0 B</string>
     <string name="traffic_requests_title">Recent requests</string>

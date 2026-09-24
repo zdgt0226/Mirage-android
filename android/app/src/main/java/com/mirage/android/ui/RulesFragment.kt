@@ -8,6 +8,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
+import androidx.appcompat.widget.PopupMenu
 import androidx.core.content.ContextCompat
 import androidx.dynamicanimation.animation.DynamicAnimation
 import androidx.fragment.app.Fragment
@@ -166,11 +167,24 @@ class RulesFragment : Fragment() {
             startActivity(Intent(requireContext(), AppFilterActivity::class.java))
         }
 
-        binding.btnQuickGeoPreset.setOnClickListener {
-            com.mirage.android.util.Haptic.tap(it)
-            showQuickGeoPresetDialog()
+        FluidSpring.attachPressScale(binding.btnRulesMenu)
+        binding.btnRulesMenu.setOnClickListener { v ->
+            com.mirage.android.util.Haptic.tap(v)
+            val popup = PopupMenu(requireContext(), v)
+            popup.menu.add(0, 1, 0, R.string.rules_presets)
+            popup.setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    1 -> {
+                        showQuickGeoPresetDialog()
+                        true
+                    }
+                    else -> false
+                }
+            }
+            popup.show()
         }
 
+        FluidSpring.attachPressScale(binding.addRuleBtn)
         binding.addRuleBtn.setOnClickListener {
             com.mirage.android.util.Haptic.tap(it)
             showRuleDialog(null)
@@ -187,6 +201,7 @@ class RulesFragment : Fragment() {
             chooseDefaultAction()
         }
 
+        FluidSpring.attachPressScale(binding.applyRulesBtn)
         binding.applyRulesBtn.setOnClickListener {
             com.mirage.android.util.Haptic.confirm(it)
             val ok = viewModel.applyRules()
@@ -230,6 +245,15 @@ class RulesFragment : Fragment() {
                         binding.defaultActionBtn.text = getString(R.string.rules_default_fmt, getString(if (act == "direct") R.string.action_direct else R.string.action_proxy))
                     }
                 }
+                launch {
+                    viewModel.hasUnappliedChanges.collect { dirty ->
+                        if (dirty) {
+                            showApplyBanner()
+                        } else {
+                            hideApplyBanner()
+                        }
+                    }
+                }
                 // 周期性拉取内核命中统计
                 launch {
                     while (isActive) {
@@ -239,6 +263,36 @@ class RulesFragment : Fragment() {
                 }
             }
         }
+    }
+
+    private fun showApplyBanner() {
+        val banner = binding.layoutApplyBanner
+        if (banner.visibility != View.VISIBLE) {
+            banner.alpha = 0f
+            banner.visibility = View.VISIBLE
+            banner.post {
+                if (_binding == null) return@post
+                val initialY = if (banner.height > 0) banner.height.toFloat() else (54 * resources.displayMetrics.density)
+                banner.translationY = initialY
+                FluidSpring.animateTo(banner, DynamicAnimation.TRANSLATION_Y, 0f)
+                FluidSpring.animateTo(banner, DynamicAnimation.ALPHA, 1f)
+            }
+        } else {
+            FluidSpring.animateTo(banner, DynamicAnimation.TRANSLATION_Y, 0f)
+            FluidSpring.animateTo(banner, DynamicAnimation.ALPHA, 1f)
+        }
+    }
+
+    private fun hideApplyBanner() {
+        val banner = binding.layoutApplyBanner
+        if (banner.visibility == View.GONE) return
+        val targetY = if (banner.height > 0) banner.height.toFloat() else (54 * resources.displayMetrics.density)
+        FluidSpring.animateTo(banner, DynamicAnimation.TRANSLATION_Y, targetY) { canceled, _ ->
+            if (!canceled && _binding != null) {
+                banner.visibility = View.GONE
+            }
+        }
+        FluidSpring.animateTo(banner, DynamicAnimation.ALPHA, 0f)
     }
 
     private fun chooseDefaultAction() {

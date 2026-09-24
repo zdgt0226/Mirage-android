@@ -5,7 +5,9 @@ import androidx.lifecycle.AndroidViewModel
 import com.mirage.android.core.CoreController
 import com.mirage.android.data.model.Rule
 import com.mirage.android.data.repository.RuleRepository
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -19,6 +21,9 @@ class RulesViewModel(application: Application) : AndroidViewModel(application) {
     val builtinIpCount: StateFlow<Long> = ruleRepo.builtinIpCount
     val isBlockQuic: StateFlow<Boolean> = vpnRepo.isBlockQuic
     val isUdpMux: StateFlow<Boolean> = vpnRepo.isUdpMux
+
+    private val _hasUnappliedChanges = MutableStateFlow(false)
+    val hasUnappliedChanges: StateFlow<Boolean> = _hasUnappliedChanges.asStateFlow()
 
     /** 应用内核规则命中统计到规则列表。 */
     fun applyHits(hitsMap: Map<String, Long>) {
@@ -69,6 +74,7 @@ class RulesViewModel(application: Application) : AndroidViewModel(application) {
             else -> "domain"
         }
         ruleRepo.addRule(Rule(type = type, kind = kind, pattern = pattern.trim().lowercase(), action = action))
+        _hasUnappliedChanges.value = true
     }
 
     fun updateRule(index: Int, pattern: String, kind: String, action: String) {
@@ -79,6 +85,7 @@ class RulesViewModel(application: Application) : AndroidViewModel(application) {
             else -> "domain"
         }
         ruleRepo.updateRule(index, Rule(type = type, kind = kind, pattern = pattern.trim().lowercase(), action = action))
+        _hasUnappliedChanges.value = true
     }
 
     fun saveRule(index: Int?, rule: Rule) {
@@ -87,35 +94,48 @@ class RulesViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             ruleRepo.updateRule(index, rule)
         }
-        ruleRepo.applyRules()
+        _hasUnappliedChanges.value = true
     }
 
     fun toggleRuleEnabled(index: Int): Boolean {
         val res = ruleRepo.toggleRuleEnabled(index)
-        ruleRepo.applyRules()
+        _hasUnappliedChanges.value = true
         return res
     }
 
     fun deleteRule(index: Int) {
         ruleRepo.removeRule(index)
-        ruleRepo.applyRules()
+        _hasUnappliedChanges.value = true
     }
 
     fun moveRule(from: Int, to: Int) {
-        ruleRepo.moveRule(from, to)
-        ruleRepo.applyRules()
+        if (from != to) {
+            ruleRepo.moveRule(from, to)
+            _hasUnappliedChanges.value = true
+        }
     }
 
     fun setDefaultAction(action: String) {
-        ruleRepo.setDefaultAction(action)
+        if (ruleRepo.defaultAction.value != action) {
+            ruleRepo.setDefaultAction(action)
+            _hasUnappliedChanges.value = true
+        }
     }
 
     fun applyPresetTemplate(templateId: Int): Boolean {
-        return ruleRepo.applyPresetTemplate(templateId)
+        val ok = ruleRepo.applyPresetTemplate(templateId)
+        if (ok) {
+            _hasUnappliedChanges.value = false
+        }
+        return ok
     }
 
     fun applyRules(): Boolean {
-        return ruleRepo.applyRules()
+        val ok = ruleRepo.applyRules()
+        if (ok) {
+            _hasUnappliedChanges.value = false
+        }
+        return ok
     }
 
     fun refreshBuiltin() {

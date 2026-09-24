@@ -170,7 +170,7 @@
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
-    <!-- 拖拽排序提示栏 -->
+    <!-- 拖拽排序提示栏与更多菜单 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -191,12 +191,33 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_marginEnd="6dp"
             android:text="@string/rules_drag_hint"
             android:textAppearance="@style/TextAppearance.Mirage.Caption"
             android:textColor="@color/meow_ink_secondary" />
+
+        <ImageButton
+            android:id="@+id/addRuleBtn"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/rules_add"
+            android:padding="4dp"
+            android:src="@drawable/ic_add"
+            app:tint="@color/meow_blue" />
+
+        <ImageButton
+            android:id="@+id/btnRulesMenu"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/more_actions"
+            android:padding="4dp"
+            android:src="@drawable/ic_more_vert"
+            app:tint="@color/meow_ink_secondary" />
     </LinearLayout>
 
-    <!-- 自定义规则列表 -->
+    <!-- 自定义规则列表与浮动添加按钮 -->
     <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
@@ -208,6 +229,7 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:clipToPadding="false"
+            android:paddingBottom="8dp"
             tools:listitem="@layout/item_rule" />
 
         <TextView
@@ -221,46 +243,44 @@
             android:visibility="gone" />
     </FrameLayout>
 
-    <!-- 底部按钮组 -->
-    <LinearLayout
+    <!-- 未应用改动提示条 (常态 GONE，出现改动时条件滑入) -->
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/layoutApplyBanner"
+        style="@style/MirageCard"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal">
+        android:layout_marginTop="4dp"
+        android:visibility="gone"
+        app:cardCornerRadius="14dp">
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnQuickGeoPreset"
-            style="@style/Widget.Material3.Button.TonalButton"
-            android:layout_width="0dp"
-            android:layout_height="44dp"
-            android:layout_marginEnd="4dp"
-            android:layout_weight="1"
-            android:paddingHorizontal="4dp"
-            android:text="@string/rules_presets"
-            android:textAppearance="@style/TextAppearance.Mirage.Label"
-            app:cornerRadius="10dp" />
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="14dp"
+            android:paddingVertical="8dp">
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/addRuleBtn"
-            style="@style/MirageButton"
-            android:layout_width="0dp"
-            android:layout_height="44dp"
-            android:layout_marginHorizontal="4dp"
-            android:layout_weight="1"
-            android:paddingHorizontal="4dp"
-            android:text="@string/rules_add"
-            android:textAppearance="@style/TextAppearance.Mirage.Label"
-            app:cornerRadius="10dp" />
+            <TextView
+                android:id="@+id/tvApplyBannerHint"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginEnd="8dp"
+                android:text="@string/rules_unapplied_hint"
+                android:textAppearance="@style/TextAppearance.Mirage.Body"
+                android:textColor="@color/meow_ink"
+                android:textSize="13sp" />
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/applyRulesBtn"
-            style="@style/Widget.Material3.Button.TonalButton"
-            android:layout_width="0dp"
-            android:layout_height="44dp"
-            android:layout_marginStart="4dp"
-            android:layout_weight="1"
-            android:paddingHorizontal="4dp"
-            android:text="@string/rules_apply"
-            android:textAppearance="@style/TextAppearance.Mirage.Label"
-            app:cornerRadius="10dp" />
-    </LinearLayout>
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/applyRulesBtn"
+                style="@style/MirageButton"
+                android:layout_width="wrap_content"
+                android:layout_height="38dp"
+                android:paddingHorizontal="16dp"
+                android:text="@string/rules_apply"
+                android:textAppearance="@style/TextAppearance.Mirage.Label"
+                app:cornerRadius="19dp" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
 </LinearLayout>
