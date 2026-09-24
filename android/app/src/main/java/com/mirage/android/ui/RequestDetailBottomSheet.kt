@@ -9,6 +9,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.Toast
+import com.google.android.material.bottomsheet.BottomSheetBehavior
+import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.mirage.android.core.CoreController
 import com.mirage.android.data.model.RecentRequestInfo
@@ -33,6 +35,17 @@ class RequestDetailBottomSheet() : BottomSheetDialogFragment() {
     ): View {
         _binding = DialogRequestDetailBinding.inflate(inflater, container, false)
         return binding.root
+    }
+
+    override fun onStart() {
+        super.onStart()
+        val dialog = dialog as? BottomSheetDialog ?: return
+        dialog.dismissWithAnimation = true
+        dialog.behavior.apply {
+            isFitToContents = true
+            skipCollapsed = true
+            state = BottomSheetBehavior.STATE_EXPANDED
+        }
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {

@@ -7,6 +7,7 @@ import android.text.Editable
 import android.text.TextWatcher
 import android.view.LayoutInflater
 import android.widget.Toast
+import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.mirage.android.R
 import com.mirage.android.data.repository.DnsRepository
@@ -24,6 +25,13 @@ class DnsConfigDialog(
         super.onCreate(savedInstanceState)
         binding = DialogDnsConfigBinding.inflate(LayoutInflater.from(context))
         setContentView(binding.root)
+
+        dismissWithAnimation = true
+        behavior.apply {
+            isFitToContents = true
+            skipCollapsed = true
+            state = BottomSheetBehavior.STATE_EXPANDED
+        }
 
         val currentDirect = dnsRepo.getDirectDns()
         val currentRemote = dnsRepo.getRemoteDns()

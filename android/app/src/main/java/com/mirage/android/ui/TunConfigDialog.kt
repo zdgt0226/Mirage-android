@@ -6,6 +6,7 @@ import android.text.Editable
 import android.text.TextWatcher
 import android.view.LayoutInflater
 import android.widget.Toast
+import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.mirage.android.core.TunConfigStore
 import com.mirage.android.databinding.DialogTunConfigBinding
@@ -25,6 +26,14 @@ class TunConfigDialog(
         super.onCreate(savedInstanceState)
         binding = DialogTunConfigBinding.inflate(LayoutInflater.from(context))
         setContentView(binding.root)
+
+        dismissWithAnimation = true
+        behavior.apply {
+            isFitToContents = false
+            halfExpandedRatio = 0.65f
+            skipCollapsed = true
+            state = BottomSheetBehavior.STATE_HALF_EXPANDED
+        }
 
         val currentMtu = TunConfigStore.getMtu(context)
         val currentIdle = TunConfigStore.getTcpIdleTimeoutSec(context)
