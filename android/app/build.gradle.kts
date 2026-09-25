@@ -7,6 +7,7 @@ import org.gradle.api.tasks.PathSensitivity
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.compose)
 }
 
 val propBuildTime = project.findProperty("buildTime") as? String 
@@ -99,6 +100,7 @@ android {
         viewBinding = true
         aidl = true
         buildConfig = true
+        compose = true
     }
 
     // 原生库来自 native/mirage-jni 的构建产物 (由 scripts/build-android.sh 拷入)
@@ -120,6 +122,13 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
     implementation(libs.androidx.fragment.ktx)
+
+    implementation(platform(libs.compose.bom))
+    implementation(libs.compose.ui)
+    implementation(libs.compose.material3)
+    implementation(libs.compose.ui.tooling.preview)
+    debugImplementation(libs.compose.ui.tooling)
+
     testImplementation(libs.junit)
     testImplementation(libs.org.json)
 }
