@@ -106,6 +106,24 @@ class CoreServiceStateTest {
         assertFalse(StateMachine.shouldRunStop(ServiceState.Stopped))
     }
 
+    // ── ACTION_STOP 时序防误杀 ──────────────────────────────────────────
+
+    @Test
+    fun stopCommandSequenceGuard() {
+        // 正常场景: 针对当前 session 的停止指令予以放行
+        assertTrue(StateMachine.shouldAcceptStopCommand(stopSeq = 1L, activeSessionSeq = 1L))
+        assertTrue(StateMachine.shouldAcceptStopCommand(stopSeq = 2L, activeSessionSeq = 1L))
+
+        // 误杀场景: 上一轮连接排队的 ACTION_STOP 在新一轮连接激活后才到达，必须拒绝
+        assertFalse(StateMachine.shouldAcceptStopCommand(stopSeq = 1L, activeSessionSeq = 2L))
+        assertFalse(StateMachine.shouldAcceptStopCommand(stopSeq = 5L, activeSessionSeq = 10L))
+
+        // 无差别场景: 未指定序号 (如通知栏/磁贴直接触发)，予以放行
+        assertTrue(StateMachine.shouldAcceptStopCommand(stopSeq = 0L, activeSessionSeq = 2L))
+        assertTrue(StateMachine.shouldAcceptStopCommand(stopSeq = 0L, activeSessionSeq = 0L))
+        assertTrue(StateMachine.shouldAcceptStopCommand(stopSeq = -1L, activeSessionSeq = 2L))
+    }
+
     // ── 启动结果落状态 ────────────────────────────────────────────────
 
     /**

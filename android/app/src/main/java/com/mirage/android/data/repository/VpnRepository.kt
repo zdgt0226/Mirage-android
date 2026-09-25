@@ -72,6 +72,11 @@ class VpnRepository(private val context: Context) {
     private val isAppForeground = AtomicBoolean(true)
     private val isMonitorActive = AtomicBoolean(false)
     private val startedActivities = AtomicInteger(0)
+    private val startSequence = java.util.concurrent.atomic.AtomicLong(0L)
+    @Volatile
+    private var stopConfirmation: CompletableDeferred<Unit>? = null
+    private var stopJob: Job? = null
+    private var syncingTimeoutJob: Job? = null
 
     init {
         (context.applicationContext as? Application)?.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
@@ -128,12 +133,16 @@ class VpnRepository(private val context: Context) {
     private val callback = object : ICoreCallback.Stub() {
         override fun onStateChanged(running: Boolean) {
             scope.launch {
+                syncingTimeoutJob?.cancel()
+                syncingTimeoutJob = null
                 if (running) {
                     dnsRepo.applyDns()
                     _vpnState.value = VpnState.Connected(nodeRepo.getSelectedNode())
                     startTelemetry()
                 } else {
+                    stopConfirmation?.complete(Unit)
                     _vpnState.value = VpnState.Disconnected
+                    _connections.value = emptyList()
                     stopTelemetry()
                 }
             }
@@ -161,6 +170,9 @@ class VpnRepository(private val context: Context) {
             when (intent?.action) {
                 CoreService.ACTION_VPN_STOPPED -> {
                     scope.launch {
+                        syncingTimeoutJob?.cancel()
+                        syncingTimeoutJob = null
+                        stopConfirmation?.complete(Unit)
                         _vpnState.value = VpnState.Disconnected
                         _connections.value = emptyList()
                         stopTelemetry()
@@ -168,6 +180,8 @@ class VpnRepository(private val context: Context) {
                 }
                 CoreService.ACTION_VPN_STARTED -> {
                     scope.launch {
+                        syncingTimeoutJob?.cancel()
+                        syncingTimeoutJob = null
                         _vpnState.value = VpnState.Connected(nodeRepo.getSelectedNode())
                         startTelemetry()
                     }
@@ -196,6 +210,15 @@ class VpnRepository(private val context: Context) {
             context.registerReceiver(broadcastReceiver, filter)
         }
         startTelemetry()
+
+        // Syncing 初始状态超时兜底: 若在指定超时内未收到任何权威状态回调，降级置为 Disconnected 恢复按钮
+        syncingTimeoutJob = scope.launch {
+            delay(SYNC_TIMEOUT_MS)
+            if (_vpnState.value is VpnState.Syncing) {
+                android.util.Log.w("VpnRepository", "Syncing 超时 (${SYNC_TIMEOUT_MS}ms) 未收到权威同步，兜底置 Disconnected")
+                _vpnState.value = VpnState.Disconnected
+            }
+        }
     }
 
 
@@ -213,6 +236,8 @@ class VpnRepository(private val context: Context) {
         }
         val isRunning = CoreController.isRunning()
         android.util.Log.d("Mirage", "[vpn] checkCurrentState: isRunning=$isRunning")
+        syncingTimeoutJob?.cancel()
+        syncingTimeoutJob = null
         if (isRunning) {
             _vpnState.value = VpnState.Connected(nodeRepo.getSelectedNode())
             startTelemetry()
@@ -229,6 +254,14 @@ class VpnRepository(private val context: Context) {
             return
         }
 
+        syncingTimeoutJob?.cancel()
+        syncingTimeoutJob = null
+        stopJob?.cancel()
+        stopJob = null
+        stopConfirmation?.cancel()
+        stopConfirmation = null
+
+        val seq = startSequence.incrementAndGet()
         _vpnState.value = VpnState.Connecting
         // 注入规则与 DNS 配置
         ruleRepo.applyRules()
@@ -238,6 +271,7 @@ class VpnRepository(private val context: Context) {
 
         val appFilterConfig = com.mirage.android.core.AppFilterStore.getConfig(context)
         val intent = Intent(context, CoreService::class.java).apply {
+            putExtra("start_sequence", seq)
             putExtra("uri", selected.uri)
             putExtra("pool_size", nodeRepo.getPoolSize())
             putExtra("bypass_lan", _isBypassLanEnabled.value)
@@ -319,12 +353,52 @@ class VpnRepository(private val context: Context) {
         pushNodesJob?.cancel()
         pushNodesJob = null
         CoreController.cancelPending(PENDING_PUSH_NODES)
-        _vpnState.value = VpnState.Stopping
-        runCatching { CoreController.clearDnsCache() }
-        runCatching { CoreController.stop() }
-        _vpnState.value = VpnState.Disconnected
-        _connections.value = emptyList()
-        stopTelemetry()
+
+        // 若当前服务已确认未运行，直接收尾，无需等待不存在的服务停止确认
+        if (CoreController.isBound() && !CoreController.isRunning()) {
+            android.util.Log.d("VpnRepository", "stopVpn: 服务已未运行，直接置 Disconnected")
+            _vpnState.value = VpnState.Disconnected
+            _connections.value = emptyList()
+            stopTelemetry()
+            return
+        }
+
+        val currentSeq = startSequence.get()
+        val ack = CompletableDeferred<Unit>()
+        stopConfirmation = ack
+
+        stopJob?.cancel()
+        stopJob = scope.launch {
+            _vpnState.value = VpnState.Stopping
+            // 立即停止遥测采集，避免在内核拆除中途发起高频 Binder/IPC 造成异常或错误读数
+            stopTelemetry()
+
+            runCatching { CoreController.clearDnsCache() }
+            val sent = runCatching { CoreController.stop(context, currentSeq) }.getOrDefault(false)
+            android.util.Log.d("VpnRepository", "stopVpn: 指令已送出 sent=$sent, seq=$currentSeq")
+
+            // 等待服务侧确认 (ICoreCallback.onStateChanged(false) 或 ACTION_VPN_STOPPED)
+            val confirmed = withTimeoutOrNull(STOP_TIMEOUT_MS) {
+                ack.await()
+            }
+
+            if (confirmed != null) {
+                android.util.Log.i("VpnRepository", "stopVpn: 收到停止确认，状态置为 Disconnected")
+                _vpnState.value = VpnState.Disconnected
+                _connections.value = emptyList()
+            } else {
+                android.util.Log.w("VpnRepository", "stopVpn: 等待停止确认超时 (${STOP_TIMEOUT_MS}ms)，核验状态")
+                val stillRunning = if (CoreController.isBound()) CoreController.isRunning() else false
+                if (stillRunning) {
+                    android.util.Log.e("VpnRepository", "stopVpn: 超时后内核仍在运行，置为 Error")
+                    _vpnState.value = VpnState.Error(context.getString(R.string.vpn_stop_timeout))
+                } else {
+                    android.util.Log.i("VpnRepository", "stopVpn: 超时后核验内核已停止，收尾置为 Disconnected")
+                    _vpnState.value = VpnState.Disconnected
+                    _connections.value = emptyList()
+                }
+            }
+        }
     }
 
     fun switchNode(uri: String): Boolean {
@@ -508,12 +582,23 @@ class VpnRepository(private val context: Context) {
     }
 
     fun destroy() {
+        syncingTimeoutJob?.cancel()
+        syncingTimeoutJob = null
+        stopJob?.cancel()
+        stopJob = null
+        stopConfirmation?.cancel()
+        stopConfirmation = null
         stopTelemetry()
         CoreController.unregisterCallback(callback)
         CoreController.unbind(context)
     }
 
     companion object {
+        /** 停止等待确认超时 (毫秒) */
+        const val STOP_TIMEOUT_MS = 4000L
+        /** 初次同步 Syncing 超时兜底 (毫秒) */
+        const val SYNC_TIMEOUT_MS = 4000L
+
         /** CoreController 待办动作的 key: 节点全表推送。同 key 覆盖, 只保留最新快照。 */
         private const val PENDING_PUSH_NODES = "pushNodes"
         @Volatile

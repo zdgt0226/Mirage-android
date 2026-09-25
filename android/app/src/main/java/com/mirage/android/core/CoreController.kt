@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
+import com.mirage.android.CoreService
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.util.concurrent.CopyOnWriteArraySet
 
@@ -106,7 +107,7 @@ object CoreController {
     fun bind(context: Context) {
         if (bindRequested) return
         ctx = context.applicationContext
-        val intent = Intent(context, Class.forName("com.mirage.android.CoreService"))
+        val intent = Intent(context, CoreService::class.java)
         val ok = runCatching {
             context.applicationContext.bindService(intent, conn, Context.BIND_AUTO_CREATE)
         }.getOrDefault(false)
@@ -166,7 +167,42 @@ object CoreController {
 
     // ── 控制 ──
     fun start(): Int = call { it.start() } ?: -100
-    fun stop() { call { it.stop() } }
+    fun stop(context: Context? = null, stopSeq: Long = 0L): Boolean {
+        if (context != null) {
+            ctx = context.applicationContext
+        }
+        val s = service
+        if (s != null) {
+            val ok = runCatching {
+                s.stop()
+                true
+            }.getOrDefault(false)
+            if (ok) {
+                android.util.Log.d("CoreController", "stop() via AIDL succeeded")
+                return true
+            }
+            android.util.Log.w("CoreController", "stop() via AIDL failed, falling back to Intent")
+        }
+
+        // 降级通道: service 未就绪/未绑定时通过显式 Intent 发送 ACTION_STOP
+        val targetCtx = context?.applicationContext ?: ctx
+        if (targetCtx != null) {
+            val intent = Intent(targetCtx, CoreService::class.java).apply {
+                action = CoreService.ACTION_STOP
+                if (stopSeq > 0) {
+                    putExtra("stop_sequence", stopSeq)
+                }
+            }
+            val ok = runCatching {
+                targetCtx.startService(intent) != null
+            }.getOrDefault(false)
+            android.util.Log.d("CoreController", "stop() via startService fallback, seq=$stopSeq, result=$ok")
+            return ok
+        }
+
+        android.util.Log.w("CoreController", "stop() failed: no service and no applicationContext")
+        return false
+    }
     fun setNode(uri: String): Boolean = call { it.setNode(uri) } ?: false
     fun setPoolSize(poolSize: Int): Boolean = call { it.setPoolSize(poolSize) } ?: false
     fun getPoolSize(): Int = call { it.poolSize } ?: 16

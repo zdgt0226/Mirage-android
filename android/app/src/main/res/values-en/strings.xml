@@ -202,6 +202,7 @@
     <string name="status_disconnecting">Disconnecting…</string>
     <string name="disconnecting_btn">Disconnecting…</string>
     <string name="status_error">Connection error: %1$s</string>
+    <string name="vpn_stop_timeout">Disconnect timed out</string>
     <string name="home_tun_summary">MTU %1$s · batch %2$s · %3$s · %4$s · %5$s</string>
     <string name="version_dialog_title">Version and runtime</string>
     <string name="manage_core">Manage core</string>
