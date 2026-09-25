@@ -37,6 +37,7 @@
                 android:layout_width="0dp"
                 android:layout_height="48dp"
                 android:layout_weight="1"
+                android:enabled="false"
                 android:text="@string/connect"
                 android:textAppearance="@style/TextAppearance.Mirage.Title"
                 app:cornerRadius="24dp" />
@@ -129,7 +130,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginStart="8dp"
-                        android:text="@string/status_idle"
+                        android:text="@string/status_syncing"
                         android:textAppearance="@style/TextAppearance.Mirage.Title"
                         android:textColor="@color/meow_disconnected"
                         android:textStyle="bold" />

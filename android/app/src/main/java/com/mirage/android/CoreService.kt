@@ -96,6 +96,16 @@ class CoreService : VpnService() {
         /** 启动结束后应进入的状态。 */
         fun stateAfterStart(rc: Int): ServiceState =
             if (rc == 0) ServiceState.Running else ServiceState.Stopped
+
+        /**
+         * onStartCommand 收到 ACTION_STOP 时，是否接受本次停止指令 (时序与幂等防护)。
+         *
+         * 若指定了 stopSeq 且严格小于当前已激活的 activeSessionSeq，说明此 ACTION_STOP 来自
+         * 上一轮连接、因系统队列排队而在新连接启动后才送达，必须丢弃以防误杀新启动的 VPN。
+         * 若 stopSeq == 0L (未带序号，如通知栏/磁贴无差别停止) 或 stopSeq >= activeSessionSeq，予以放行。
+         */
+        fun shouldAcceptStopCommand(stopSeq: Long, activeSessionSeq: Long): Boolean =
+            stopSeq <= 0L || stopSeq >= activeSessionSeq
     }
 
     data class ServiceConfig(
@@ -120,6 +130,8 @@ class CoreService : VpnService() {
     private val stateLock = Any()
     @Volatile
     private var serviceState = ServiceState.Stopped
+    @Volatile
+    private var activeSessionSeq: Long = 0L
     private var tunFd: ParcelFileDescriptor? = null
     private var scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
@@ -238,6 +250,11 @@ class CoreService : VpnService() {
         setActive(this)
         val action = intent?.action
         if (action == ACTION_STOP) {
+            val stopSeq = intent.getLongExtra("stop_sequence", 0L)
+            if (!StateMachine.shouldAcceptStopCommand(stopSeq, activeSessionSeq)) {
+                log("[core] 忽略过期 ACTION_STOP (stopSeq=$stopSeq < activeSessionSeq=$activeSessionSeq)")
+                return START_NOT_STICKY
+            }
             stopInternal()
             stopSelf()
             return START_NOT_STICKY
@@ -246,6 +263,10 @@ class CoreService : VpnService() {
             // 系统在内存不足/停止后若尝试重启服务，无启动参数时不自启，通知系统终止
             stopSelf(startId)
             return START_NOT_STICKY
+        }
+        val startSeq = intent.getLongExtra("start_sequence", 0L)
+        if (startSeq > 0L) {
+            activeSessionSeq = startSeq
         }
         // 启动中/已运行时不重入 (meow BaseService 的 onStartCommand 守卫同理)
         if (!StateMachine.acceptsStartCommand(serviceState)) {

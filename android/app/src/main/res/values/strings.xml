@@ -198,10 +198,12 @@
     <string name="home_rtt">隧道 RTT: %1$sms</string>
     <string name="status_connected_detail">已连接 (加密隧道保护中)</string>
     <string name="status_establishing">正在建立加密隧道…</string>
+    <string name="status_syncing">正在检查连接状态…</string>
     <string name="connecting_btn">正在连接…</string>
     <string name="status_disconnecting">正在断开连接…</string>
     <string name="disconnecting_btn">断开中…</string>
     <string name="status_error">连接异常: %1$s</string>
+    <string name="vpn_stop_timeout">断开连接超时</string>
     <string name="home_tun_summary">MTU: %1$s · 批处理: %2$s · %3$s · %4$s · %5$s</string>
     <string name="version_dialog_title">版本与运行环境详情</string>
     <string name="manage_core">管理内核</string>

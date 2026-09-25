@@ -55,6 +55,7 @@ class HomeFragment : Fragment() {
         FluidSpring.attachPressScale(binding.connectBtn)
 
         binding.connectBtn.setOnClickListener {
+            if (viewModel.vpnState.value is VpnState.Syncing || viewModel.vpnState.value is VpnState.Stopping) return@setOnClickListener
             com.mirage.android.util.Haptic.confirm(it)
             if (viewModel.vpnState.value.isRunning) {
                 viewModel.disconnect()
@@ -81,6 +82,7 @@ class HomeFragment : Fragment() {
 
         setupOutboundModeToggle()
 
+        updateVpnUi(viewModel.vpnState.value)
         observeState()
     }
 
@@ -119,18 +121,6 @@ class HomeFragment : Fragment() {
     private fun observeState() {
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                launch {
-                    // 自愈: 仅在状态处于稳态且有偏差时纠正，不干扰 Connecting/Stopping 中间态
-                    while (true) {
-                        delay(3000)
-                        val running = com.mirage.android.core.CoreController.isRunning()
-                        if (running && viewModel.vpnState.value !is VpnState.Connected) {
-                            updateVpnUi(VpnState.Connected(viewModel.selectedNode.value))
-                        } else if (!running && viewModel.vpnState.value !is VpnState.Disconnected && viewModel.vpnState.value !is VpnState.Connecting && viewModel.vpnState.value !is VpnState.Stopping) {
-                            updateVpnUi(VpnState.Disconnected)
-                        }
-                    }
-                }
                 launch {
                     viewModel.vpnState.collect { state ->
                         updateVpnUi(state)
@@ -199,10 +189,19 @@ class HomeFragment : Fragment() {
         android.util.Log.d("Mirage", "[ui] updateVpnUi state=${state}")
 
         when (state) {
+            is VpnState.Syncing -> {
+                binding.statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.meow_disconnected))
+                binding.statusText.text = getString(R.string.status_syncing)
+                binding.statusText.setTextColor(ContextCompat.getColor(requireContext(), R.color.meow_disconnected))
+                binding.connectBtn.isEnabled = false
+                binding.connectBtn.text = getString(R.string.connect)
+                binding.connectBtn.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.meow_disconnected))
+            }
             is VpnState.Connected -> {
                 binding.statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.meow_connected))
                 binding.statusText.text = getString(R.string.status_connected_detail)
                 binding.statusText.setTextColor(ContextCompat.getColor(requireContext(), R.color.meow_connected))
+                binding.connectBtn.isEnabled = true
                 binding.connectBtn.text = getString(R.string.disconnect)
                 binding.connectBtn.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.meow_error))
             }
@@ -210,6 +209,7 @@ class HomeFragment : Fragment() {
                 binding.statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.meow_ginger))
                 binding.statusText.text = getString(R.string.status_establishing)
                 binding.statusText.setTextColor(ContextCompat.getColor(requireContext(), R.color.meow_ginger))
+                binding.connectBtn.isEnabled = true
                 binding.connectBtn.text = getString(R.string.connecting_btn)
                 binding.connectBtn.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.meow_ginger))
             }
@@ -217,12 +217,15 @@ class HomeFragment : Fragment() {
                 binding.statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.meow_disconnected))
                 binding.statusText.text = getString(R.string.status_disconnecting)
                 binding.statusText.setTextColor(ContextCompat.getColor(requireContext(), R.color.meow_disconnected))
+                binding.connectBtn.isEnabled = false
                 binding.connectBtn.text = getString(R.string.disconnecting_btn)
+                binding.connectBtn.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.meow_disconnected))
             }
             is VpnState.Error -> {
                 binding.statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.meow_error))
                 binding.statusText.text = getString(R.string.status_error, state.message)
                 binding.statusText.setTextColor(ContextCompat.getColor(requireContext(), R.color.meow_error))
+                binding.connectBtn.isEnabled = true
                 binding.connectBtn.text = getString(R.string.connect)
                 binding.connectBtn.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.meow_blue))
             }
@@ -230,10 +233,12 @@ class HomeFragment : Fragment() {
                 binding.statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.meow_disconnected))
                 binding.statusText.text = getString(R.string.status_idle)
                 binding.statusText.setTextColor(ContextCompat.getColor(requireContext(), R.color.meow_disconnected))
+                binding.connectBtn.isEnabled = true
                 binding.connectBtn.text = getString(R.string.connect)
                 binding.connectBtn.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.meow_blue))
             }
         }
+        android.util.Log.d("Mirage", "[ui] updateVpnUi state=$state btnText='${binding.connectBtn.text}' enabled=${binding.connectBtn.isEnabled}")
     }
 
     override fun onResume() {

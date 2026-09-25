@@ -4,6 +4,7 @@ package com.mirage.android.data.model
  * VPN 连接状态。
  */
 sealed class VpnState {
+    object Syncing : VpnState()
     object Disconnected : VpnState()
     object Connecting : VpnState()
     data class Connected(val node: Node? = null) : VpnState()
