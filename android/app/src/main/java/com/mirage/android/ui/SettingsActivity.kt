@@ -21,6 +21,15 @@ import com.mirage.android.ui.common.FluidSpring
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import com.mirage.android.ui.theme.MirageTheme
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import com.google.android.material.bottomsheet.BottomSheetBehavior
+import com.google.android.material.bottomsheet.BottomSheetDialog
+
 
 /**
  * 设置页。
@@ -152,27 +161,51 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun showVersionDialog() {
         val activeCore = CoreManager.getInstance(this).getActiveCore()
-        val coreDesc = if (activeCore.isBuiltin) {
-            getString(R.string.core_builtin)
-        } else {
-            getString(R.string.core_custom, activeCore.name)
-        }
         val nativeVer = runCatching { MirageNative.version() }.getOrDefault("")
-        val info = getString(
-            R.string.version_info,
-            com.mirage.android.BuildConfig.VERSION_NAME,
-            com.mirage.android.BuildConfig.VERSION_CODE,
-            com.mirage.android.BuildConfig.BUILD_TAG,
-            com.mirage.android.BuildConfig.BUILD_TIME,
-            coreDesc,
-            nativeVer
-        )
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle(R.string.version_dialog_title)
-            .setMessage(info)
-            .setPositiveButton(R.string.manage_core) { _, _ -> showCoreDialog() }
-            .setNegativeButton(R.string.close, null)
-            .show()
+
+        val dialog = BottomSheetDialog(this)
+        val composeView = ComposeView(this).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindowOrReleasedFromPool)
+            setContent {
+                MirageTheme {
+                    VersionSheetContent(
+                        versionName = com.mirage.android.BuildConfig.VERSION_NAME,
+                        versionCode = com.mirage.android.BuildConfig.VERSION_CODE,
+                        buildTag = com.mirage.android.BuildConfig.BUILD_TAG,
+                        buildTime = com.mirage.android.BuildConfig.BUILD_TIME,
+                        isBuiltinCore = activeCore.isBuiltin,
+                        customCoreName = activeCore.name,
+                        nativeVer = nativeVer,
+                        onManageCore = {
+                            dialog.dismiss()
+                            showCoreDialog()
+                        },
+                        onDismiss = {
+                            dialog.dismiss()
+                        }
+                    )
+                }
+            }
+        }
+
+        dialog.setContentView(composeView)
+        dialog.dismissWithAnimation = true
+        dialog.behavior.apply {
+            isFitToContents = true
+            skipCollapsed = true
+            state = BottomSheetBehavior.STATE_EXPANDED
+        }
+
+        val decorView = dialog.window?.decorView ?: composeView
+        decorView.setViewTreeLifecycleOwner(this)
+        decorView.setViewTreeViewModelStoreOwner(this)
+        decorView.setViewTreeSavedStateRegistryOwner(this)
+
+        composeView.setViewTreeLifecycleOwner(this)
+        composeView.setViewTreeViewModelStoreOwner(this)
+        composeView.setViewTreeSavedStateRegistryOwner(this)
+
+        dialog.show()
     }
 
     private fun showBackupDialog() {
