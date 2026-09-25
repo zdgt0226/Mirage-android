@@ -197,6 +197,7 @@
     <string name="home_rtt">Tunnel RTT: %1$s ms</string>
     <string name="status_connected_detail">Connected — tunnel encrypted</string>
     <string name="status_establishing">Establishing tunnel…</string>
+    <string name="status_syncing">Checking connection status…</string>
     <string name="connecting_btn">Connecting…</string>
     <string name="status_disconnecting">Disconnecting…</string>
     <string name="disconnecting_btn">Disconnecting…</string>

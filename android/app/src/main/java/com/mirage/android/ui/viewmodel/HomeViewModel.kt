@@ -56,6 +56,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleConnection(onRequirePermission: () -> Unit, onProceedConnect: () -> Unit) {
+        if (vpnState.value is VpnState.Syncing) {
+            return
+        }
         if (vpnState.value.isRunning) {
             disconnect()
         } else {

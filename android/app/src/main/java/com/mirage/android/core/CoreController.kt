@@ -39,6 +39,7 @@ object CoreController {
             service = null
             bound = false
             running.value = false
+            bindRequested = false
             callbacks.forEach { cb -> runCatching { cb.onStateChanged(false) } }
         }
     }
@@ -83,6 +84,7 @@ object CoreController {
             service = null
             bound = false
             running.value = false
+            bindRequested = false
             callbacks.forEach { cb -> runCatching { cb.onStateChanged(false) } }
         }
     }
@@ -93,6 +95,7 @@ object CoreController {
      * unbindService 对未绑定的 connection 会抛 IllegalArgumentException, 因此必须
      * 单独记录「已请求绑定」这个事实, 不能复用 bound。
      */
+    @Volatile
     private var bindRequested = false
 
     /**

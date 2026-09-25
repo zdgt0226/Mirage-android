@@ -29,7 +29,7 @@ class VpnRepository(private val context: Context) {
     private val ruleRepo = RuleRepository.getInstance(context)
     private val dnsRepo = DnsRepository.getInstance(context)
 
-    private val _vpnState = MutableStateFlow<VpnState>(VpnState.Disconnected)
+    private val _vpnState = MutableStateFlow<VpnState>(VpnState.Syncing)
     val vpnState: StateFlow<VpnState> = _vpnState.asStateFlow()
 
     private val _trafficStats = MutableStateFlow(TrafficStats())
@@ -478,7 +478,7 @@ class VpnRepository(private val context: Context) {
                             }
                         }
                     }
-                } else {
+                } else if (CoreController.isBound()) {
                     if (_vpnState.value !is VpnState.Disconnected && _vpnState.value !is VpnState.Connecting && _vpnState.value !is VpnState.Stopping) {
                         withContext(Dispatchers.Main) {
                             _vpnState.value = VpnState.Disconnected

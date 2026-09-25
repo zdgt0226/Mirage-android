@@ -198,6 +198,7 @@
     <string name="home_rtt">隧道 RTT: %1$sms</string>
     <string name="status_connected_detail">已连接 (加密隧道保护中)</string>
     <string name="status_establishing">正在建立加密隧道…</string>
+    <string name="status_syncing">正在检查连接状态…</string>
     <string name="connecting_btn">正在连接…</string>
     <string name="status_disconnecting">正在断开连接…</string>
     <string name="disconnecting_btn">断开中…</string>
