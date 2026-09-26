@@ -5,6 +5,7 @@ import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import androidx.core.content.ContextCompat
 import com.mirage.android.CoreService
 import com.mirage.android.core.CoreController
 import com.mirage.android.core.ICoreCallback
@@ -165,26 +166,105 @@ class VpnRepository(private val context: Context) {
         }
     }
 
-    private val broadcastReceiver = object : android.content.BroadcastReceiver() {
-        override fun onReceive(ctx: Context?, intent: Intent?) {
-            when (intent?.action) {
-                CoreService.ACTION_VPN_STOPPED -> {
-                    scope.launch {
-                        syncingTimeoutJob?.cancel()
-                        syncingTimeoutJob = null
-                        stopConfirmation?.complete(Unit)
-                        _vpnState.value = VpnState.Disconnected
-                        _connections.value = emptyList()
-                        stopTelemetry()
+    /**
+     * 广播裁决器 (纯 JVM 逻辑，无 Android 依赖，便于单元测试)。
+     *
+     * 针对 API < 33 动态 receiver 默认 exported、外部恶意应用可能注入广播伪造状态的防御：
+     * 广播仅作为唤醒/提示信号，不作为权威状态来源。
+     *
+     * 规则：
+     * 1. 若 [isBound] == true，必须以 AIDL 权威状态 [isCoreRunning] 为准：
+     *    - [isCoreRunning] == true 时，无论收到 STARTED 还是仿冒的 STOPPED，均判定为 CONNECTED，且绝不完成停止确认；
+     *    - [isCoreRunning] == false 时，属于 AIDL 权威核实的停止，判定为 DISCONNECTED；仅当广播事件为 STOPPED 时允许 completeStopConfirmation。
+     * 2. 若 [isBound] == false，由于尚未与 CoreService 建立 Binder 管道，降级采信广播提示：
+     *    - STARTED -> CONNECTED
+     *    - STOPPED -> DISCONNECTED，但因无 AIDL 权威凭据，绝不可完成 stopConfirmation。
+     * 3. 广播分支无论何种情况均不得调用 stopTelemetry()，保留遥测自愈纠偏能力（由调用层保证）。
+     */
+    internal object BroadcastArbiter {
+
+        enum class TargetState {
+            CONNECTED,
+            DISCONNECTED,
+            NO_CHANGE
+        }
+
+        data class Verdict(
+            val targetState: TargetState,
+            val completeStopConfirmation: Boolean
+        )
+
+        fun judge(
+            action: String?,
+            isBound: Boolean,
+            isCoreRunning: Boolean? = null
+        ): Verdict {
+            if (action != CoreService.ACTION_VPN_STOPPED && action != CoreService.ACTION_VPN_STARTED) {
+                return Verdict(TargetState.NO_CHANGE, completeStopConfirmation = false)
+            }
+
+            return if (isBound) {
+                // 已绑定时以 AIDL 权威查询为准，彻底免疫外部仿冒广播
+                if (isCoreRunning == true) {
+                    Verdict(TargetState.CONNECTED, completeStopConfirmation = false)
+                } else {
+                    // AIDL 权威核实已停止 (isCoreRunning == false)
+                    val shouldConfirmStop = (action == CoreService.ACTION_VPN_STOPPED)
+                    Verdict(TargetState.DISCONNECTED, completeStopConfirmation = shouldConfirmStop)
+                }
+            } else {
+                // 未绑定时才采信广播提示
+                when (action) {
+                    CoreService.ACTION_VPN_STARTED -> {
+                        Verdict(TargetState.CONNECTED, completeStopConfirmation = false)
+                    }
+                    CoreService.ACTION_VPN_STOPPED -> {
+                        // 未绑定时无 AIDL 权威确认，绝不可冒充停止确认
+                        Verdict(TargetState.DISCONNECTED, completeStopConfirmation = false)
+                    }
+                    else -> {
+                        Verdict(TargetState.NO_CHANGE, completeStopConfirmation = false)
                     }
                 }
-                CoreService.ACTION_VPN_STARTED -> {
-                    scope.launch {
-                        syncingTimeoutJob?.cancel()
-                        syncingTimeoutJob = null
+            }
+        }
+    }
+
+    private val broadcastReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(ctx: Context?, intent: Intent?) {
+            val action = intent?.action ?: return
+            if (action != CoreService.ACTION_VPN_STOPPED && action != CoreService.ACTION_VPN_STARTED) {
+                return
+            }
+            scope.launch {
+                syncingTimeoutJob?.cancel()
+                syncingTimeoutJob = null
+
+                // 纵深防御: 广播只作「提示」，不直接作为权威状态。
+                // 收到广播后若 CoreController.isBound()，以 CoreController.isRunning() 为准决定置 Connected/Disconnected；
+                // 未绑定时才采信广播。
+                // 广播分支绝不调用 stopTelemetry()，避免外部伪造广播停掉唯一的纠偏轮询。
+                // 只有 AIDL 权威确认的停止才可以 complete stopConfirmation 与停遥测。
+                val isBound = CoreController.isBound()
+                val isRunning = if (isBound) CoreController.isRunning() else null
+                val verdict = BroadcastArbiter.judge(action, isBound, isRunning)
+
+                when (verdict.targetState) {
+                    BroadcastArbiter.TargetState.CONNECTED -> {
                         _vpnState.value = VpnState.Connected(nodeRepo.getSelectedNode())
                         startTelemetry()
                     }
+                    BroadcastArbiter.TargetState.DISCONNECTED -> {
+                        if (verdict.completeStopConfirmation) {
+                            stopConfirmation?.complete(Unit)
+                        }
+                        _vpnState.value = VpnState.Disconnected
+                        _connections.value = emptyList()
+                        // 注意: 广播分支绝不在此调用 stopTelemetry()！
+                        // 即使判定为 Disconnected，遥测停止也严格收归 AIDL 权威回调 (callback.onStateChanged(false))
+                        // 或 stopVpn() 主动流程，保留遥测自愈纠偏能力。
+                    }
+                    BroadcastArbiter.TargetState.NO_CHANGE -> {}
                 }
             }
         }
@@ -204,11 +284,17 @@ class VpnRepository(private val context: Context) {
             addAction(CoreService.ACTION_VPN_STOPPED)
             addAction(CoreService.ACTION_VPN_STARTED)
         }
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(broadcastReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            context.registerReceiver(broadcastReceiver, filter)
-        }
+        // 注册动态广播接收器:
+        // 使用 ContextCompat.registerReceiver 统一所有 API 级别。
+        // 在 Android 13+ (API 33+) 传递 Context.RECEIVER_NOT_EXPORTED；
+        // 在 API < 33 上，ContextCompat 会自动注入应用专属动态权限保护，
+        // 杜绝外部应用跨进程注入伪造的 VPN_STOPPED / VPN_STARTED 广播。
+        ContextCompat.registerReceiver(
+            context,
+            broadcastReceiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         startTelemetry()
 
         // Syncing 初始状态超时兜底: 若在指定超时内未收到任何权威状态回调，降级置为 Disconnected 恢复按钮
@@ -589,6 +675,7 @@ class VpnRepository(private val context: Context) {
         stopConfirmation?.cancel()
         stopConfirmation = null
         stopTelemetry()
+        runCatching { context.unregisterReceiver(broadcastReceiver) }
         CoreController.unregisterCallback(callback)
         CoreController.unbind(context)
     }

@@ -984,9 +984,9 @@ Compose 侧无额外对齐成本：Kotlin 已是 2.1.0，自带 `org.jetbrains.k
 | :-- | :--- | :--- |
 | A | Gradle 8.13 / AGP 8.13.0 / `compileSdk 36`；`minSdk ≤ 28` 门禁 | 已合入 `main` |
 | B | `targetSdk 36`、三 Activity insets、预测式返回走 androidx、FGS 兜底、16 KB zip 门禁 | 已合入 `main`（PR #7） |
-| UI-1 | 排版五档、Haptic 回退、图标归一 | 已提交 `ui/fluid-foundation` (`02d0611`)，**未推** |
-| UI-2 | 弹簧铺到交互面（按压反馈、拖拽、面板切换） | 进行中 |
-| UI-3 | 四个弹层的 `BottomSheetBehavior` 定档与滚动契约 | 已实现，两端核验通过（提交 `d545ddc`，分支 `ui/sheet-behavior`，待合入） |
+| UI-1 | 排版五档、Haptic 回退、图标归一 | 已合入 `main`（PR #11） |
+| UI-2 | 弹簧铺到交互面（按压反馈、拖拽、面板切换） | 已合入 `main`（PR #11） |
+| UI-3 | 四个弹层的 `BottomSheetBehavior` 定档与滚动契约 | 已合入 `main`（PR #12） |
 
 **UI-3 四个面板的最终配置与选择依据**：
 - `NodePickerSheet`：`fitToContents = true`
@@ -1196,7 +1196,7 @@ adb -s <serial> shell wm size reset && adb -s <serial> shell wm density reset
     | 仅 UI 冷启动（`:core` 存活） | 约 500ms | 约 100ms |
     | 后台热切回 | 中位数 70ms（52–118） | 中位数 34ms（29–53） |
     - 注：代码里 `VpnRepository.kt` 附近注释写的「真机实测约 120–170ms」只对 SO-02K 热切回首次未预热那一下成立（118ms），不适用于冷启动场景。
-  - **修复状态（两项均已修复，在分支 `fix/vpn-state-sync`，尚未合入 main）**：
+  - **修复状态（两项均已修复，已合入 main，PR #15）**：
     - `3c33c92`：telemetry 补 `isBound()` 守卫；新增 `VpnState.Syncing` 作初值（状态文字中性、按钮禁用直到首次权威同步）；删除 `HomeFragment` 只刷 View 不改 ViewModel 的自愈轮询；`CoreController.bindRequested` 在 `binderDied`/`onServiceDisconnected` 复位。
     - `7c31f6a`：`stopVpn()` 等待服务确认（4s 超时，超时后二次核验真实状态再决定落 `Disconnected` 还是 `Error`）；`CoreController.stop()` 未绑定时降级发送 `ACTION_STOP` intent；引入 `start_sequence`/`stop_sequence` 防排队 STOP 误杀新启动；`Syncing` 4s 超时兜底。
     - 双端实测：两端各 3 轮连断正常、各 10 次快速点击后最终状态一致、34 项单测通过、0 FATAL。
