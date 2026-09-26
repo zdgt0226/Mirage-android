@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 pub const ABSTRACT_SOCKET_NAME: &[u8] = b"mirage_cmd.sock";
 
@@ -92,18 +92,25 @@ pub fn start_command_server(
             }
         };
 
-        loop {
+        'accept_loop: loop {
             tokio::select! {
                 _ = stop_notify.notified() => {
                     info!("[CMD-BUS] 收到停止信号，退出命令总线服务");
-                    break;
+                    break 'accept_loop;
                 }
                 res = listener.accept() => {
                     let (socket, _) = match res {
                         Ok(conn) => conn,
                         Err(e) => {
-                            debug!("[CMD-BUS] accept 错误: {e}");
-                            break;
+                            warn!("[CMD-BUS] accept 暂时性错误 (退避 100ms): {e}");
+                            tokio::select! {
+                                _ = stop_notify.notified() => {
+                                    info!("[CMD-BUS] 收到停止信号，退出命令总线服务");
+                                    break 'accept_loop;
+                                }
+                                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {}
+                            }
+                            continue 'accept_loop;
                         }
                     };
 

@@ -207,19 +207,38 @@ fn flight_map() -> &'static FlightMap {
 
 /// RAII Guard: 无论发起者由于何种原因退出 (成功、失败、timeout、任务 cancel/drop、panic)，
 /// 均在 Drop 时自动从 flight_map 中清理该域名条目，杜绝泄漏与跨请求死锁。
+/// 仅当 flight_map 中的当前条目与自己持有的 receiver 属于同一个 channel 时才清理，
+/// 避免 clear_direct_cache 后新发起方插入的同名条目被旧 guard 误删。
 struct FlightGuard {
     domain: String,
+    rx: watch::Receiver<Option<std::net::Ipv4Addr>>,
 }
 
 impl Drop for FlightGuard {
     fn drop(&mut self) {
         let mut flights = flight_map().lock().unwrap_or_else(|e| e.into_inner());
-        flights.remove(&self.domain);
+        if let Some(current_rx) = flights.get(&self.domain) {
+            if current_rx.same_channel(&self.rx) {
+                flights.remove(&self.domain);
+            }
+        }
     }
 }
 
 /// 异步向上游查询真实 IP (带 Single-Flight 防击穿并发聚合、双上游竞速与内存高速缓存)。
 pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
+    let domain_clean = domain.trim_end_matches('.').to_ascii_lowercase();
+    resolve_upstream_with(&domain_clean, || resolve_upstream_internal(&domain_clean)).await
+}
+
+pub(crate) async fn resolve_upstream_with<F, Fut>(
+    domain: &str,
+    resolver: F,
+) -> Option<std::net::Ipv4Addr>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Option<std::net::Ipv4Addr>>,
+{
     let domain_clean = domain.trim_end_matches('.').to_ascii_lowercase();
     // 1. 优先查高速缓存
     {
@@ -242,6 +261,7 @@ pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
             flights.insert(domain_clean.clone(), rx.clone());
             let guard = FlightGuard {
                 domain: domain_clean.clone(),
+                rx: rx.clone(),
             };
             (rx, Some(guard), Some(tx))
         }
@@ -256,7 +276,7 @@ pub async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
     }
 
     // 发起者持有 guard: 若在此被 cancel / drop / panic，FlightGuard 会在 Drop 时自动将 domain 从 flight_map 中清理，杜绝泄漏
-    let result = resolve_upstream_internal(&domain_clean).await;
+    let result = resolver().await;
 
     // 广播结果并显式 drop guard (Drop 内会从 flight_map 移除)
     if let Some(tx) = tx {
@@ -854,13 +874,31 @@ mod tests {
 
     #[tokio::test]
     async fn test_flight_map_raii_cleanup_on_cancel() {
+        let _guard = crate::direct::acquire_test_guard();
         clear_direct_cache();
         let domain = "cancel-test.example.com";
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+
         // 验证取消执行时，FlightGuard 自动将 domain 从 flight_map 中清理
         let handle = tokio::spawn(async move {
-            let _ = resolve_upstream(domain).await;
+            let _ = resolve_upstream_with(domain, || async move {
+                let _ = started_tx.send(());
+                std::future::pending::<Option<std::net::Ipv4Addr>>().await
+            })
+            .await;
         });
-        // 立即中止任务 (模拟 VPN 重连、任务被 drop、超时中止等场景)
+
+        // 确保上游解析已调度且条目已确实插入 flight_map
+        started_rx.await.expect("任务必须成功启动并挂起");
+        {
+            let flights = flight_map().lock().unwrap_or_else(|e| e.into_inner());
+            assert!(
+                flights.contains_key(domain),
+                "挂起期间 flight_map 必须包含该域名条目"
+            );
+        }
+
+        // 中止任务 (模拟 VPN 重连、任务被 drop、超时中止等场景)
         handle.abort();
         let _ = handle.await;
 
@@ -870,5 +908,65 @@ mod tests {
             !flights.contains_key(domain),
             "FlightGuard 必须在任务 abort/cancel 时自动将 domain 从 flight_map 中清除！"
         );
+    }
+
+    #[test]
+    fn test_flight_guard_does_not_remove_other_entry() {
+        let _guard = crate::direct::acquire_test_guard();
+        clear_direct_cache();
+        let domain = "stale-guard.example.com".to_string();
+
+        // 模拟第 1 个发起方插入 channel A 并创建 guard A
+        let (tx_a, rx_a) = watch::channel(None);
+        let guard_a = FlightGuard {
+            domain: domain.clone(),
+            rx: rx_a.clone(),
+        };
+        {
+            let mut flights = flight_map().lock().unwrap_or_else(|e| e.into_inner());
+            flights.insert(domain.clone(), rx_a);
+        }
+
+        // 模拟 VPN 重连/断开清空缓存与 flight_map
+        clear_direct_cache();
+
+        // 模拟第 2 个新发起方为同一域名插入 channel B 并创建 guard B
+        let (tx_b, rx_b) = watch::channel(None);
+        let guard_b = FlightGuard {
+            domain: domain.clone(),
+            rx: rx_b.clone(),
+        };
+        {
+            let mut flights = flight_map().lock().unwrap_or_else(|e| e.into_inner());
+            flights.insert(domain.clone(), rx_b.clone());
+        }
+
+        // 旧 guard A 此时发生 drop (如旧任务超时退出或取消)
+        drop(guard_a);
+
+        // 验证: 旧 guard A 绝不能删掉新发起方 B 的条目！
+        {
+            let flights = flight_map().lock().unwrap_or_else(|e| e.into_inner());
+            assert!(
+                flights.contains_key(&domain),
+                "旧 guard drop 不得删除新发起方插入的同名条目"
+            );
+            assert!(
+                flights.get(&domain).unwrap().same_channel(&rx_b),
+                "flight_map 中保留的必须是新发起方 B 的 receiver"
+            );
+        }
+
+        // 当新 guard B drop 时，条目才被正常清理
+        drop(guard_b);
+        {
+            let flights = flight_map().lock().unwrap_or_else(|e| e.into_inner());
+            assert!(
+                !flights.contains_key(&domain),
+                "自己的 guard B drop 时应当清理条目"
+            );
+        }
+        drop(tx_a);
+        drop(tx_b);
     }
 }
