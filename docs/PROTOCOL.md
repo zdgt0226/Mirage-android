@@ -25,13 +25,17 @@
 ### 1.2 加密信道握手 (全部在 TLS 仿真流之上)
 
 ```
-客户端 → 服务端: 会话令牌 (hello_auth: 口令派生 + 时间戳抗重放, 16B tag)
-                 (PFS 开时: 客户端 X25519 临时公钥, pfs.rs)
-服务端 → 客户端: 密钥派生确认 + TIME_SYNC (时间同步, 加密信道内下发)
-协商: cipher agility (两端有 AES-NI → AES-256-GCM, 否则 ChaCha20-Poly1305)
+客户端 → 服务端: 会话令牌 (hello_auth: 口令派生 + 时间戳抗重放, 16B tag,
+                 v0.15 起 tag 绑定 ClientHello.random)
+                 (PFS 开时: ClientHello.random = 客户端 X25519 临时公钥的 Elligator2 表示, pfs.rs)
+服务端 → 客户端: ServerHello (random 每连接新鲜; PFS 时为服务端临时公钥的 Elligator2 表示)
+客户端 → 服务端: 伪 CCS + Finished (体长随协商套件: 0x1302 → 69B, 其余 53B)
+服务端 → 客户端: TIME_SYNC (时间同步, 加密信道内下发; v0.15 起客户端缺失即断开, fail-closed)
+协商: cipher agility (两端有 AES-NI → AES-256-GCM, 否则 ChaCha20-Poly1305; CIPHER_ACK 缺失即断开)
 ```
 
-密钥派生: 口令 + HKDF → 会话密钥; PFS 时再混入 ECDH 共享秘密。
+密钥派生: 口令 + HKDF (salt = client_random ‖ server_random) → 会话密钥; PFS 时再混入 ECDH 共享秘密。
+**协议版本**: 与上游 mirage-rs **v0.15** 协议同版 (v0.15 为协议断代版, 不兼容 v0.14 及以前的服务端)。
 
 ### 1.3 隧道池 (WarmPool)
 
@@ -85,9 +89,9 @@ App 查 DNS → 198.19.0.53 (TUN DNS) → 引擎应答 198.18.0.0/16 内的 fake
 | 多浏览器 Profile 轮换 | ✅ |
 | ChaCha20-Poly1305 | ✅ |
 | AES-256-GCM (cipher agility) | ✅ |
-| PFS (一次性 X25519) | ✅ (须与服务端同开) |
+| PFS (一次性 X25519, v0.15 起 Elligator2 编码) | ✅ (须与服务端同开) |
 | UDP 中继 | ✅ |
-| UDP mux (v0.9.0) | ⬜ 未启用 (服务端兼容, 移动端走 legacy per-flow) |
+| UDP mux (v0.9.0) | ✅ 可选 (节点 `udp_mux` 开启时; 默认走 legacy per-flow) |
 | TLS record padding (v0.8.0) | ⬜ 未启用 (默认关) |
 | TCP Brutal CC | ⬜ 移动端无内核模块, 不支持 (配置会被安全忽略) |
 | WireGuard / SS 上游 | ⬜ 服务端特性, 客户端不涉及 |

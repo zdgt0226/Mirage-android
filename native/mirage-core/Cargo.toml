@@ -20,6 +20,9 @@ poly1305 = "0.9.0"
 rand = "0.10.1"
 regex = "1.12.4"
 ring = "0.17"
+# PFS 临时公钥 Elligator2 编码 (与上游 mirage-rs v0.15 一致, 线上格式须两端同版)
+elligator2 = { version = "0.1", features = ["x25519"] }
+x25519-dalek = { version = "3.0", default-features = false, features = ["static_secrets", "zeroize"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
 sha2 = "0.11.0"

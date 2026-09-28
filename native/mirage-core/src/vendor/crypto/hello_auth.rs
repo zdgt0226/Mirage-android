@@ -16,21 +16,36 @@ fn ts_mask(password: &str, random_prefix: &[u8; 8]) -> [u8; 8] {
     mask
 }
 
-fn poly1305_tag(password_bytes: &[u8], ts_bytes: &[u8; 8], random_prefix: &[u8; 8]) -> [u8; 16] {
+/// Token v2 域分隔常量 (防跨版本差分碰撞)。
+pub const TOKEN_DOMAIN: &[u8] = b"mirage-token-v2";
+
+/// QUIC lean 每流认证绑定上下文 (与 TCP fake-TLS 的 client_random 域分隔)。
+pub const QUIC_LEAN_BIND: &[u8] = b"mirage-quic-lean-v2";
+
+fn poly1305_tag(
+    password_bytes: &[u8],
+    ts_bytes: &[u8; 8],
+    random_prefix: &[u8; 8],
+    bind: &[u8],
+) -> [u8; 16] {
     let mut hasher = Sha256::new();
     hasher.update(password_bytes);
     hasher.update(ts_bytes);
     hasher.update(random_prefix);
+    hasher.update(TOKEN_DOMAIN);
     let one_time_key = hasher.finalize();
 
     let poly = Poly1305::new(&one_time_key);
-    let tag = poly.compute_unpadded(ts_bytes);
+    let mut msg = Vec::with_capacity(8 + bind.len());
+    msg.extend_from_slice(ts_bytes);
+    msg.extend_from_slice(bind);
+    let tag = poly.compute_unpadded(&msg);
     let mut out = [0u8; 16];
     out.copy_from_slice(&tag);
     out
 }
 
-pub fn make_session_token(password: &str) -> [u8; 32] {
+pub fn make_session_token(password: &str, bind: &[u8]) -> [u8; 32] {
     let mut random_prefix = [0u8; 8];
     rand::fill(&mut random_prefix);
     
@@ -43,7 +58,7 @@ pub fn make_session_token(password: &str) -> [u8; 32] {
         hidden_ts[i] = ts_bytes[i] ^ mask[i];
     }
     
-    let tag = poly1305_tag(password.as_bytes(), &ts_bytes, &random_prefix);
+    let tag = poly1305_tag(password.as_bytes(), &ts_bytes, &random_prefix, bind);
     
     let mut token = [0u8; 32];
     token[0..8].copy_from_slice(&random_prefix);
@@ -93,11 +108,32 @@ impl TokenReplayCache {
         let mut guard = self.seen.lock().unwrap_or_else(|e| e.into_inner());
         let (hwm, cache) = &mut *guard;
 
-        // hwm = 已见的最高桶 (单调)。ts 容忍窗口 ±tol + 桶量化 → 一个仍有效的 token 桶
-        // 最低可到 hwm - 2*tol/bucket (未来向 token 可把 hwm 推到 now_bucket + tol/bucket)。
-        // retain_buckets 已按此推导。参考用 hwm 而非 current_bucket, 旧 token 重放不会把
-        // 参考拉回复活已淘汰桶。
-        *hwm = (*hwm).max(current_bucket);
+        // 检查时钟大幅回拨:
+        // 若 current_bucket + retain_buckets < *hwm, 说明当前 token 的时间戳落后 hwm
+        // 超过了整个保留窗口。
+        //
+        // 为什么清空安全:
+        // 在回拨前已缓存的旧 token, 其 ts 相对新系统时间 now 落在未来, 且超出了容差范围 (> retain_buckets > tol)。
+        // 任何对旧 token 的重放都会直接在 check_and_insert 前被 ts_within_tolerance 拦截,
+        // 根本走不到此处, 故清空旧缓存不会引发历史 token 的重放漏洞。
+        // 反之若不清空, 新时间的桶会被过时的未来 hwm 立即淘汰, 导致时钟追上 hwm 前重放全面失效。
+        //
+        // 为什么不破坏 F1 ("旧 token 重放不能把 hwm 拉回"):
+        // 在调用本方法前, token 已通过 ts_within_tolerance(ts, now, tol) 门控, 合法 token 的 ts 必在 now ± tol 内。
+        // 在时钟单调或正常容差波动下, hwm 最多比 current_bucket 领先 2*tol/bucket + 1 <= retain_buckets,
+        // 因此单个旧 token (即使在容差边缘重放) 绝不会满足 current_bucket + retain_buckets < *hwm,
+        // 只有服务器系统时间 now 本身发生超出保留窗口的大幅回拨时才会触发。
+        if current_bucket.saturating_add(retain_buckets) < *hwm {
+            tracing::warn!(
+                "[REPLAY_CACHE] 检测到系统时钟大幅回拨: current_bucket={}, hwm={}, 重置缓存与 hwm",
+                current_bucket,
+                *hwm
+            );
+            cache.clear();
+            *hwm = current_bucket;
+        } else {
+            *hwm = (*hwm).max(current_bucket);
+        }
         let hwm_val = *hwm;
         cache.retain(|&k, _| hwm_val.saturating_sub(k) <= retain_buckets);
 
@@ -119,12 +155,17 @@ impl TokenReplayCache {
 
 /// token 时间戳是否落在 ±tolerance 窗口内 (双向对称: 客户端可能快也可能慢)。
 fn ts_within_tolerance(ts: u64, now: u64, tolerance_secs: u64) -> bool {
-    now <= ts + tolerance_secs && ts <= now + tolerance_secs
+    now <= ts.saturating_add(tolerance_secs) && ts <= now.saturating_add(tolerance_secs)
 }
 
 static REPLAY_CACHE: OnceLock<TokenReplayCache> = OnceLock::new();
 
-pub fn verify_session_token(password: &str, token: &[u8; 32], tolerance_secs: u64) -> bool {
+pub fn verify_session_token(
+    password: &str,
+    token: &[u8; 32],
+    bind: &[u8],
+    tolerance_secs: u64,
+) -> bool {
     let mut random_prefix = [0u8; 8];
     random_prefix.copy_from_slice(&token[0..8]);
     
@@ -137,7 +178,7 @@ pub fn verify_session_token(password: &str, token: &[u8; 32], tolerance_secs: u6
         ts_bytes[i] = hidden_ts[i] ^ mask[i];
     }
     
-    let expected_tag = poly1305_tag(password.as_bytes(), &ts_bytes, &random_prefix);
+    let expected_tag = poly1305_tag(password.as_bytes(), &ts_bytes, &random_prefix, bind);
     // 常量时间比 16B tag (握手 token 校验是真正的网络侧信道面)。用 subtle 而非手写累加器,
     // 带优化屏障, 与全仓 ct 比较统一。
     use subtle::ConstantTimeEq;
@@ -146,7 +187,9 @@ pub fn verify_session_token(password: &str, token: &[u8; 32], tolerance_secs: u6
     }
     
     let ts = u64::from_be_bytes(ts_bytes);
-    let now = crate::time_sync::now_sec();
+    // 服务端作为时间权威, 校验 token 必须用纯本地时钟 local_now_sec(),
+    // 避免进程内作为客户端出站时学到的 TIME_OFFSET 污染服务端鉴权时间。
+    let now = crate::time_sync::local_now_sec();
 
     if !ts_within_tolerance(ts, now, tolerance_secs) {
         return false;
@@ -163,6 +206,22 @@ pub fn verify_session_token(password: &str, token: &[u8; 32], tolerance_secs: u6
     true
 }
 
+/// 多用户认证 (P1): 对一组 password 逐个试, 返回**首个 token tag 命中** (且 ts/replay 通过) 的索引。
+///
+/// 关键正确性: `verify_session_token` 内含 replay `check_and_insert`, 但**非匹配的 password 在
+/// tag 常量时间比对处就返回 false, 根本走不到 replay 插入** —— 故本循环里 replay 对同一 token
+/// **只在命中那次插一次**, 与单用户语义完全一致 (无双插、无跨凭据误报)。tag 由 poly1305(password_key,
+/// ts, prefix, bind) 生成, 不同 password 命中同一 token 的概率 ~2^-128, 故至多一个凭据匹配。
+/// O(N) HMAC/握手; 小团队 (几十用户) 可忽略。
+pub fn identify_session_token(
+    passwords: &[String],
+    token: &[u8; 32],
+    bind: &[u8],
+    tolerance_secs: u64,
+) -> Option<usize> {
+    passwords.iter().position(|pw| verify_session_token(pw, token, bind, tolerance_secs))
+}
+
 /// 会话 bootstrap 加密帧 (客户端读 TIME_SYNC / 服务端读 first_chunk) 解密失败时的**统一排查
 /// 提示**。两侧 (`pool` 客户端 + `control` 服务端) 共用同一文案, 避免诊断分散/漏项 (审计 #8)。
 ///
@@ -177,6 +236,48 @@ pub fn session_decrypt_failure_hint() -> &'static str {
      ③两端高级特征是否一致: `pfs`/`tls_padding`/`cipher_agility` 一端开一端没开 (或版本过老不支持) \
      都会改会话密钥或分帧派生 → 必然失配 (见 README 安全声明 / tuning 各项注释)。若三项都排除, \
      可能是链路损坏或协议版本不匹配。"
+}
+
+#[cfg(test)]
+mod multiuser_tests {
+    use super::*;
+
+    #[test]
+    fn identify_matches_correct_user() {
+        // 串行: 生成 token 读全局 TIME_OFFSET, 与会改 offset 的测试 (time_sync / 服务端时钟隔离) 并行会超容差。
+        let _t = crate::time_sync::tests::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let pws = vec!["alice-pw".to_string(), "bob-pw".to_string(), "carol-pw".to_string()];
+        let bind = [0x42u8; 32];
+        // bob 的 token 必须只被 bob (index 1) 认出。
+        let tok = make_session_token("bob-pw", &bind);
+        assert_eq!(identify_session_token(&pws, &tok, &bind, 60), Some(1));
+        // alice 的 token → index 0。
+        let tok_a = make_session_token("alice-pw", &bind);
+        assert_eq!(identify_session_token(&pws, &tok_a, &bind, 60), Some(0));
+    }
+
+    #[test]
+    fn identify_none_when_no_credential_matches() {
+        // 串行: 生成 token 读全局 TIME_OFFSET, 与会改 offset 的测试 (time_sync / 服务端时钟隔离) 并行会超容差。
+        let _t = crate::time_sync::tests::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let pws = vec!["alice-pw".to_string(), "bob-pw".to_string()];
+        let bind = [0x42u8; 32];
+        let tok = make_session_token("stranger-pw", &bind); // 不在列表
+        assert_eq!(identify_session_token(&pws, &tok, &bind, 60), None);
+    }
+
+    #[test]
+    fn identify_replay_inserts_once_not_per_credential() {
+        // 串行: 生成 token 读全局 TIME_OFFSET, 与会改 offset 的测试 (time_sync / 服务端时钟隔离) 并行会超容差。
+        let _t = crate::time_sync::tests::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 同一 token 连认两次: 第一次命中, 第二次因 replay 应 None (证明命中那次插了、且只插一次;
+        // 非匹配凭据在 tag 比对处返回 false 不碰 replay, 故不会把别的用户的桶污染)。
+        let pws = vec!["u0".to_string(), "u1".to_string(), "u2".to_string()];
+        let bind = [0x55u8; 32];
+        let tok = make_session_token("u2", &bind);
+        assert_eq!(identify_session_token(&pws, &tok, &bind, 60), Some(2), "首次命中 u2");
+        assert_eq!(identify_session_token(&pws, &tok, &bind, 60), None, "重放同 token 必拒 (replay 已插)");
+    }
 }
 
 #[cfg(test)]
@@ -217,7 +318,7 @@ mod tolerance_tests {
 
 #[cfg(test)]
 mod replay_tests {
-    use super::TokenReplayCache;
+    use super::*;
 
     #[test]
     fn first_seen_ok_replay_denied() {
@@ -253,5 +354,68 @@ mod replay_tests {
         assert!(c.check_and_insert(1300, b"now", 2));
         // 桶 100 已淘汰, 这里返回 true 只是证明桶确实被清 (内存有界); 真实场景 ts 校验已挡
         assert!(c.check_and_insert(1000, b"ancient", 2));
+    }
+
+    #[test]
+    fn clock_rollback_resets_cache_and_detects_replay() {
+        let c = TokenReplayCache::new();
+        // 初始在桶 200 (ts = 2000), retain = 2 桶
+        assert!(c.check_and_insert(2000, b"future-tok", 2));
+
+        // 时钟大幅回拨至桶 100 (ts = 1000): 100 + 2 < 200, 触发大幅回拨分支
+        // 第一次插入新时代的 token: 应该放行 (清空旧缓存并重置 hwm 为 100)
+        assert!(c.check_and_insert(1000, b"tok-after-rollback", 2));
+
+        // 同一 token 在回拨后第二次插入: 必须检出为重放 (返回 false)!
+        // (旧实现中因为 hwm 仍为 200, 桶 100 在插入后立即被 retain(<=200-2) 淘汰, 导致重放检测失效)
+        assert!(
+            !c.check_and_insert(1000, b"tok-after-rollback", 2),
+            "回拨后同一 token 第二次插入必须被拒 (重放检测正常生效)"
+        );
+    }
+
+    #[test]
+    fn server_verification_unaffected_by_client_time_offset() {
+        let _g = crate::time_sync::tests::TEST_LOCK.lock().unwrap();
+        let _restore = crate::time_sync::tests::OffsetGuard;
+        crate::time_sync::tests::reset_offset();
+
+        let local = crate::time_sync::local_now_sec();
+        // 模拟客户端出站学到了一个大的 offset (+500s)
+        crate::time_sync::set_offset_from_server_time(local + 500);
+
+        // 验证 local_now_sec() 依然是真实本地时间, 客户端 now_sec() 偏移了 500s
+        // 可能跨秒边界, 容 1s; 关键是没被 +500 的 offset 带走。
+        assert!(crate::time_sync::local_now_sec() - local <= 1);
+        let diff = crate::time_sync::now_sec() as i64 - local as i64;
+        assert!((498..=502).contains(&diff));
+
+        // 构造一个基于服务端本地时间的合法 token (客户端时间正常的情况)
+        let pw = "server-test-pw";
+        let bind = [0x77u8; 32];
+        let mut prefix = [0u8; 8];
+        rand::fill(&mut prefix);
+        let mask = ts_mask(pw, &prefix);
+        let mut hidden_ts = [0u8; 8];
+        let ts_bytes = local.to_be_bytes();
+        for i in 0..8 {
+            hidden_ts[i] = ts_bytes[i] ^ mask[i];
+        }
+        let tag = poly1305_tag(pw.as_bytes(), &ts_bytes, &prefix, &bind);
+        let mut token = [0u8; 32];
+        token[0..8].copy_from_slice(&prefix);
+        token[8..16].copy_from_slice(&hidden_ts);
+        token[16..32].copy_from_slice(&tag);
+
+        // verify_session_token (服务端鉴权) 使用 local_now_sec, 容差 60s,
+        // 即使 TIME_OFFSET 达到 500s, 基于服务端真实时间的 token 依然通过校验!
+        assert!(verify_session_token(pw, &token, &bind, 60), "服务端校验必须不受客户端 offset 污染");
+    }
+
+    #[test]
+    fn ts_within_tolerance_max_u64_no_panic() {
+        assert!(!ts_within_tolerance(u64::MAX, 1000, 60));
+        assert!(!ts_within_tolerance(1000, u64::MAX, 60));
+        assert!(!ts_within_tolerance(u64::MAX, u64::MAX - 100, 60));
     }
 }

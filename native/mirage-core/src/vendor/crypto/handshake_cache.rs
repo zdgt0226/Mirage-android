@@ -5,6 +5,8 @@ use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, warn};
 use rand::RngExt;
+use ring::agreement::{self, EphemeralPrivateKey};
+use ring::rand::SystemRandom;
 
 static HANDSHAKE_CACHE: OnceLock<Mutex<Vec<Vec<u8>>>> = OnceLock::new();
 static WARMING_UP: AtomicBool = AtomicBool::new(false);
@@ -116,28 +118,23 @@ pub async fn prewarm(camouflage_host: &str) {
 }
 
 pub async fn get_server_hello(camouflage_host: &str, client_hello: &[u8]) -> Vec<u8> {
-    get_server_hello_pfs(camouflage_host, client_hello, None).await
+    get_server_hello_pfs(camouflage_host, client_hello, None).await.0
 }
 
 /// 同 `get_server_hello`, 但可用 `server_random_override` 把回放模板的 ServerHello.random
 /// (flight[11..43]) 覆写成指定 32B —— PFS 用它注入服务端一次性 X25519 公钥 (见 crypto::pfs)。
+/// 返回 (flight, 实际发出的 server_random)，保证线上发出的 random 与参与密钥派生的 random 严格一致。
 /// 覆写在**所有返回路径末尾**统一施加, 故 patch/fallback 各分支都生效。
 pub async fn get_server_hello_pfs(
     camouflage_host: &str,
     client_hello: &[u8],
     server_random_override: Option<&[u8; 32]>,
-) -> Vec<u8> {
+) -> (Vec<u8>, [u8; 32]) {
     let client_session_id = get_session_id(client_hello).unwrap_or(&[]);
 
-    // 末尾统一覆写 ServerHello.random (若 PFS 指定了)。flight 恒以 0x16 ServerHello 记录起头,
-    // random 在 [11..43] (5B record header + 4B hs header + 2B version = 11)。
-    let apply = |mut flight: Vec<u8>| -> Vec<u8> {
-        if let Some(pk) = server_random_override {
-            if flight.len() >= 43 && flight[0] == 0x16 {
-                flight[11..43].copy_from_slice(pk);
-            }
-        }
-        flight
+    // 末尾统一覆写 ServerHello.random 并返回 (flight, server_random)。
+    let apply = |flight: Vec<u8>| -> (Vec<u8>, [u8; 32]) {
+        apply_server_random(flight, server_random_override)
     };
 
     if cache().lock().await.is_empty() {
@@ -166,7 +163,8 @@ pub async fn get_server_hello_pfs(
                 attempts += 1;
             }
             if cache().lock().await.is_empty() {
-                return apply(fallback_server_hello(client_hello, client_session_id));
+                let fb = fallback_server_hello(client_hello, client_session_id);
+                return apply(patch_server_hello(&fb, client_session_id));
             }
         }
     }
@@ -180,11 +178,7 @@ pub async fn get_server_hello_pfs(
 }
 
 async fn fetch_real_server_hello(host: &str) -> anyhow::Result<Vec<u8>> {
-    let target = if host.contains(':') {
-        host.to_string()
-    } else {
-        format!("{}:443", host)
-    };
+    let target = crate::net_util::host_with_default_port(host, 443);
 
     let mut stream = tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -193,7 +187,7 @@ async fn fetch_real_server_hello(host: &str) -> anyhow::Result<Vec<u8>> {
 
     let mut session_id = [0u8; 32];
     rand::fill(&mut session_id);
-    let hostname = host.split(':').next().unwrap_or(host);
+    let hostname = crate::net_util::extract_hostname(host);
     // 模板 fetch **固定用 OkHttp CH** (无 MLKEM, 只提供 X25519/P256/P384) —— 这三个曲线是
     // 所有 profile (Chrome/FF/OkHttp) 的**交集**, camouflage 站据此协商出的曲线 (通常 X25519)
     // 任何 profile 的客户端都提供过 → 回放的 ServerHello 恒自洽、不会"选了没提供的曲线"= 非法 TLS。
@@ -267,7 +261,177 @@ async fn fetch_real_server_hello(host: &str) -> anyhow::Result<Vec<u8>> {
         ));
     }
 
+    // 校验 ServerHello 的 key_share 是可重生成的 group (X25519 32B 或 P-256 65B),
+    // 否则 key_share 跨连接恒定, 当作不合格模板返回 Err (让上层回落 fallback)。
+    match key_share_group(&buf) {
+        Some((0x001d, 32)) | Some((0x0017, 65)) => {}
+        Some((g, len)) => {
+            return Err(anyhow::anyhow!(
+                "camouflage host template has unsupported key_share group 0x{g:04x} (len {len})"
+            ));
+        }
+        None => {
+            return Err(anyhow::anyhow!(
+                "camouflage host template missing or malformed key_share extension"
+            ));
+        }
+    }
+
     Ok(buf)
+}
+
+/// 覆写 ServerHello.random (flight[11..43])。真 TLS 的 ServerHello.random **每次握手全新**,
+/// 故回放模板必须逐连接改写它, 否则同模板所有连接共享一个 random = 被动可辨指纹。
+/// - PFS 开 (`override_random` = Some): 注入服务端一次性 X25519 公钥 (客户端读它做 ECDH, 见 crypto::pfs)。
+/// - PFS 关 (None): 填 32B 新随机, 沿 handshake → control 管道传递参与会话密钥派生。
+///
+/// 返回 (改写后的 flight, 实际注入的 server_random)。
+/// flight 恒以 0x16 ServerHello 记录起头; random 在 [11..43] (5B record + 4B hs + 2B version)。
+fn apply_server_random(
+    mut flight: Vec<u8>,
+    override_random: Option<&[u8; 32]>,
+) -> (Vec<u8>, [u8; 32]) {
+    let mut server_random = [0u8; 32];
+    if flight.len() >= 43 && flight[0] == 0x16 {
+        match override_random {
+            Some(pk) => {
+                server_random = *pk;
+                flight[11..43].copy_from_slice(pk);
+            }
+            None => {
+                rand::fill(&mut server_random);
+                flight[11..43].copy_from_slice(&server_random);
+            }
+        }
+    }
+    (flight, server_random)
+}
+
+/// 为 ServerHello 生成指定 group 的全新合法公钥。
+/// - X25519 (0x001d): ring 生成 32B 公钥。真服务器公钥最高位 (RFC 7748 u 坐标 < 2^255-19) 恒为 0, 保持原样不随机化。
+/// - ECDH_P256 (0x0017): ring 生成 65B 未压缩公钥 (0x04 || X || Y)。
+/// - 未知 group 返回 None (调用方保持原样)。
+fn generate_key_share(group: u16) -> Option<Vec<u8>> {
+    let rng = SystemRandom::new();
+    match group {
+        0x001d => {
+            let private = EphemeralPrivateKey::generate(&agreement::X25519, &rng).ok()?;
+            let pk = private.compute_public_key().ok()?;
+            let pk_bytes = pk.as_ref();
+            if pk_bytes.len() == 32 {
+                Some(pk_bytes.to_vec())
+            } else {
+                None
+            }
+        }
+        0x0017 => {
+            let private = EphemeralPrivateKey::generate(&agreement::ECDH_P256, &rng).ok()?;
+            let pk = private.compute_public_key().ok()?;
+            let pk_bytes = pk.as_ref();
+            if pk_bytes.len() == 65 {
+                Some(pk_bytes.to_vec())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// 解析 ServerHello 扩展中的 key_share (0x0033):
+/// 返回 Option<(group, key_len, key_start_offset)>
+fn key_share_info(flight: &[u8]) -> Option<(u16, usize, usize)> {
+    if flight.len() < 9 || flight[0] != 0x16 {
+        return None;
+    }
+    let sh_rec_len = u16::from_be_bytes([flight[3], flight[4]]) as usize;
+    let rec_end = 5 + sh_rec_len;
+    if rec_end > flight.len() || rec_end < 9 {
+        return None;
+    }
+    // HandshakeType 必须是 ServerHello (0x02)
+    if flight[5] != 0x02 {
+        return None;
+    }
+    let hs_len = u32::from_be_bytes([0, flight[6], flight[7], flight[8]]) as usize;
+    let hs_end = 9 + hs_len;
+    if hs_end > rec_end || hs_end < 44 {
+        return None;
+    }
+    let sid_len = flight[43] as usize;
+    let cipher_off = 44 + sid_len;
+    if cipher_off + 5 > hs_end {
+        return None;
+    }
+    let ext_len_off = cipher_off + 3;
+    let ext_len = u16::from_be_bytes([flight[ext_len_off], flight[ext_len_off + 1]]) as usize;
+    let ext_start = ext_len_off + 2;
+    let ext_end = ext_start + ext_len;
+    if ext_end > hs_end {
+        return None;
+    }
+
+    let mut curr = ext_start;
+    while curr + 4 <= ext_end {
+        let ext_type = u16::from_be_bytes([flight[curr], flight[curr + 1]]);
+        let ext_data_len = u16::from_be_bytes([flight[curr + 2], flight[curr + 3]]) as usize;
+        let data_start = curr + 4;
+        let data_end = data_start + ext_data_len;
+        if data_end > ext_end {
+            break;
+        }
+        if ext_type == 0x0033 {
+            // key_share ServerHello: group (2B) + key_exchange_len (2B) + key_exchange
+            if ext_data_len >= 4 {
+                let group = u16::from_be_bytes([flight[data_start], flight[data_start + 1]]);
+                let klen = u16::from_be_bytes([flight[data_start + 2], flight[data_start + 3]]) as usize;
+                let key_start = data_start + 4;
+                let key_end = key_start + klen;
+                if key_end == data_end {
+                    return Some((group, klen, key_start));
+                }
+            }
+            break;
+        }
+        curr = data_end;
+    }
+    None
+}
+
+/// 解析 ServerHello 扩展中的 key_share group 与公钥长度: (group, klen)。
+pub(crate) fn key_share_group(flight: &[u8]) -> Option<(u16, usize)> {
+    key_share_info(flight).map(|(g, klen, _)| (g, klen))
+}
+
+/// 解析 ServerHello 扩展, 查找 key_share (0x0033) 并用全新真公钥替换 key_exchange 内容。
+/// 全程边界检查, 遇到越界或畸形结构安全退回 (不改 key_share)。
+fn patch_key_share(buf: &mut [u8], _sh_rec_len: usize) {
+    if let Some((group, klen, key_start)) = key_share_info(buf) {
+        let key_end = key_start + klen;
+        if (group == 0x001d && klen == 32) || (group == 0x0017 && klen == 65) {
+            if let Some(new_key) = generate_key_share(group) {
+                buf[key_start..key_end].copy_from_slice(&new_key);
+            }
+        }
+    }
+}
+
+/// 遍历 ServerHello 之后的所有记录: 记录头保持, content type 0x17 (ApplicationData) 的记录体
+/// 替换为等长随机字节; 0x14 (CCS) 不动。按记录头长度遍历, 遇到截断/畸形记录停止遍历保持剩余原样。
+fn randomize_encrypted_records(buf: &mut [u8], sh_rec_len: usize) {
+    let mut pos = 5 + sh_rec_len;
+    while pos + 5 <= buf.len() {
+        let ct = buf[pos];
+        let rec_len = u16::from_be_bytes([buf[pos + 3], buf[pos + 4]]) as usize;
+        let body_end = pos + 5 + rec_len;
+        if body_end > buf.len() {
+            break; // 截断/畸形记录, 停止遍历保持剩余原样
+        }
+        if ct == 0x17 {
+            rand::fill(&mut buf[pos + 5..body_end]);
+        }
+        pos = body_end;
+    }
 }
 
 fn patch_server_hello(flight: &[u8], client_session_id: &[u8]) -> Vec<u8> {
@@ -307,6 +471,9 @@ fn patch_server_hello(flight: &[u8], client_session_id: &[u8]) -> Vec<u8> {
     result[6] = (new_hs_len >> 16) as u8;
     result[7] = (new_hs_len >> 8) as u8;
     result[8] = (new_hs_len & 0xFF) as u8;
+
+    patch_key_share(&mut result, new_record_len as usize);
+    randomize_encrypted_records(&mut result, new_record_len as usize);
     
     result
 }
@@ -362,8 +529,12 @@ fn fallback_server_hello(client_hello: &[u8], client_session_id: &[u8]) -> Vec<u
     hs_body.push(0x00); // compression_method
 
     // extensions: supported_versions(TLS1.3) + key_share(X25519 合法 32B 公钥)
-    let mut ks = [0u8; 32];
-    rand::fill(&mut ks);
+    let ks = generate_key_share(0x001d).unwrap_or_else(|| {
+        let mut k = vec![0u8; 32];
+        rand::fill(&mut k[..]);
+        k[31] &= 0x7f;
+        k
+    });
     let mut exts = Vec::with_capacity(48);
     exts.extend_from_slice(&[0x00, 0x2b, 0x00, 0x02, 0x03, 0x04]); // supported_versions
     exts.extend_from_slice(&[0x00, 0x33, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20]); // key_share X25519 len=32
@@ -397,7 +568,35 @@ fn fallback_server_hello(client_hello: &[u8], client_session_id: &[u8]) -> Vec<u
 
 #[cfg(test)]
 mod tests {
-    use super::{fallback_server_hello, pick_cipher};
+    use super::{apply_server_random, fallback_server_hello, generate_key_share, key_share_group, patch_server_hello, pick_cipher};
+
+    #[test]
+    fn server_random_per_connection_and_pfs_override() {
+        // 造个最小合法起头的 flight: 0x16 + 占位到 ≥43B, random 段全 0。
+        let base = {
+            let mut v = vec![0u8; 60];
+            v[0] = 0x16;
+            v
+        };
+        // PFS 关: 两次覆写 random 应各不相同 (每连接新随机), 且都非全 0 (确实写了)。
+        let (a, r_a) = apply_server_random(base.clone(), None);
+        let (b, r_b) = apply_server_random(base.clone(), None);
+        assert_ne!(&a[11..43], &b[11..43], "PFS 关时 ServerHello.random 必须每连接不同");
+        assert_ne!(&a[11..43], &[0u8; 32], "random 必须被真正写入");
+        assert_eq!(&a[11..43], &r_a);
+        assert_eq!(&b[11..43], &r_b);
+        // PFS 开: random == 注入的公钥。
+        let pk = [0x5Au8; 32];
+        let (c, r_c) = apply_server_random(base.clone(), Some(&pk));
+        assert_eq!(&c[11..43], &pk, "PFS 开时 random 必须 == 注入的 X25519 公钥");
+        assert_eq!(r_c, pk);
+        // 非 ServerHello (首字节非 0x16) 不动。
+        let mut not_sh = base.clone();
+        not_sh[0] = 0x17;
+        let (d, r_d) = apply_server_random(not_sh.clone(), None);
+        assert_eq!(d, not_sh);
+        assert_eq!(r_d, [0u8; 32]);
+    }
 
     // 构造一个最小合法 ClientHello 骨架, cipher 列表 = [1301,1302,1303].
     fn make_client_hello() -> Vec<u8> {
@@ -589,5 +788,245 @@ mod tests {
         });
         let res = fetch_real_server_hello(&addr.to_string()).await;
         assert!(res.is_err(), "只回 ServerHello 的不完整模板必须被拒, 得到: {:?}", res.map(|b| b.len()));
+    }
+
+    fn extract_key_share(flight: &[u8]) -> Option<(u16, Vec<u8>)> {
+        if flight.len() < 5 || flight[0] != 0x16 { return None; }
+        let rec_len = u16(flight, 3);
+        if flight.len() < 5 + rec_len || rec_len < 44 { return None; }
+        let sid_len = flight[43] as usize;
+        let cipher_off = 44 + sid_len;
+        if cipher_off + 5 > 5 + rec_len { return None; }
+        let ext_len_off = cipher_off + 3;
+        let ext_len = u16(flight, ext_len_off);
+        let ext_start = ext_len_off + 2;
+        let ext_end = ext_start + ext_len;
+        if ext_end > 5 + rec_len { return None; }
+        let mut curr = ext_start;
+        while curr + 4 <= ext_end {
+            let et = u16(flight, curr);
+            let el = u16(flight, curr + 2);
+            let dstart = curr + 4;
+            let dend = dstart + el;
+            if dend > ext_end { break; }
+            if et == 0x0033 && el >= 4 {
+                let group = u16(flight, dstart) as u16;
+                let klen = u16(flight, dstart + 2);
+                if dstart + 4 + klen == dend {
+                    return Some((group, flight[dstart + 4..dend].to_vec()));
+                }
+            }
+            curr = dend;
+        }
+        None
+    }
+
+    fn extract_enc_body(flight: &[u8]) -> Option<Vec<u8>> {
+        if flight.len() < 5 || flight[0] != 0x16 { return None; }
+        let sh_len = u16(flight, 3);
+        let mut pos = 5 + sh_len;
+        while pos + 5 <= flight.len() {
+            let ct = flight[pos];
+            let rlen = u16(flight, pos + 3);
+            let body_end = pos + 5 + rlen;
+            if body_end > flight.len() { break; }
+            if ct == 0x17 {
+                return Some(flight[pos + 5..body_end].to_vec());
+            }
+            pos = body_end;
+        }
+        None
+    }
+
+    #[test]
+    fn patch_server_hello_twice_different_keys_and_bodies_same_headers() {
+        let ch = make_client_hello();
+        let orig_sid = [0x11u8; 32];
+        let fb = fallback_server_hello(&ch, &orig_sid);
+
+        let new_sid = [0x22u8; 32];
+        let p1 = patch_server_hello(&fb, &new_sid);
+        let p2 = patch_server_hello(&fb, &new_sid);
+
+        // 总长度与所有记录头长度不变
+        assert_eq!(p1.len(), fb.len(), "总长度不变");
+        assert_eq!(p2.len(), fb.len(), "总长度不变");
+
+        let sh_len_fb = u16(&fb, 3);
+        let sh_len_p1 = u16(&p1, 3);
+        let sh_len_p2 = u16(&p2, 3);
+        assert_eq!(sh_len_p1, sh_len_fb, "ServerHello 记录长度不变");
+        assert_eq!(sh_len_p2, sh_len_fb, "ServerHello 记录长度不变");
+
+        // CCS 记录头与内容不变
+        let ccs_pos = 5 + sh_len_fb;
+        assert_eq!(&p1[ccs_pos..ccs_pos + 6], &[0x14, 0x03, 0x03, 0x00, 0x01, 0x01]);
+        assert_eq!(&p2[ccs_pos..ccs_pos + 6], &[0x14, 0x03, 0x03, 0x00, 0x01, 0x01]);
+
+        // 0x17 记录头不变
+        let enc_pos = ccs_pos + 6;
+        assert_eq!(&p1[enc_pos..enc_pos + 5], &fb[enc_pos..enc_pos + 5], "0x17 记录头不变");
+        assert_eq!(&p2[enc_pos..enc_pos + 5], &fb[enc_pos..enc_pos + 5], "0x17 记录头不变");
+
+        // session_id/random 逻辑不回归
+        assert_eq!(&p1[44..76], &new_sid, "p1 session_id 已替换");
+        assert_eq!(&p2[44..76], &new_sid, "p2 session_id 已替换");
+        assert_ne!(&p1[11..43], &p2[11..43], "两次 patch 的 server random 必须不同");
+
+        // key_share 公钥不同且合法
+        let (g1, ks1) = extract_key_share(&p1).expect("p1 须提取到 key_share");
+        let (g2, ks2) = extract_key_share(&p2).expect("p2 须提取到 key_share");
+        assert_eq!(g1, 0x001d);
+        assert_eq!(g2, 0x001d);
+        assert_eq!(ks1.len(), 32);
+        assert_eq!(ks2.len(), 32);
+        assert_ne!(ks1, ks2, "两次 patch 的 key_share 公钥必须不同");
+        assert_eq!(ks1[31] & 0x80, 0, "p1 key_share 最高位必须为 0");
+        assert_eq!(ks2[31] & 0x80, 0, "p2 key_share 最高位必须为 0");
+
+        // 0x17 记录体不同
+        let enc1 = extract_enc_body(&p1).expect("p1 须提取到 0x17 body");
+        let enc2 = extract_enc_body(&p2).expect("p2 须提取到 0x17 body");
+        assert_ne!(enc1, enc2, "两次 patch 的 0x17 加密记录体必须不同");
+    }
+
+    #[test]
+    fn x25519_key_share_msb_always_zero() {
+        for _ in 0..50 {
+            let k = generate_key_share(0x001d).expect("X25519 key generation");
+            assert_eq!(k.len(), 32);
+            assert_eq!(k[31] & 0x80, 0, "X25519 u 坐标最高位恒为 0");
+        }
+    }
+
+    #[test]
+    fn p256_key_share_patch() {
+        let sid = [0x33u8; 32];
+        let mut hs_body = Vec::new();
+        hs_body.extend_from_slice(&[0x03, 0x03]);
+        hs_body.extend_from_slice(&[0u8; 32]); // random
+        hs_body.push(32);
+        hs_body.extend_from_slice(&sid);
+        hs_body.extend_from_slice(&[0x13, 0x01]);
+        hs_body.push(0x00);
+
+        // group = 0x0017 (P-256), klen = 65, dummy key = [0x55; 65]
+        let mut exts = Vec::new();
+        exts.extend_from_slice(&[0x00, 0x33, 0x00, 0x45, 0x00, 0x17, 0x00, 0x41]);
+        exts.extend_from_slice(&[0x55; 65]);
+        hs_body.extend_from_slice(&(exts.len() as u16).to_be_bytes());
+        hs_body.extend_from_slice(&exts);
+
+        let mut flight = Vec::new();
+        flight.extend_from_slice(&[0x16, 0x03, 0x03]);
+        flight.extend_from_slice(&((4 + hs_body.len()) as u16).to_be_bytes());
+        flight.push(0x02);
+        flight.extend_from_slice(&(hs_body.len() as u32).to_be_bytes()[1..4]);
+        flight.extend_from_slice(&hs_body);
+
+        let patched1 = patch_server_hello(&flight, &sid);
+        let patched2 = patch_server_hello(&flight, &sid);
+
+        let (g1, ks1) = extract_key_share(&patched1).expect("extract P-256 ks1");
+        let (g2, ks2) = extract_key_share(&patched2).expect("extract P-256 ks2");
+        assert_eq!(g1, 0x0017);
+        assert_eq!(g2, 0x0017);
+        assert_eq!(ks1.len(), 65);
+        assert_eq!(ks2.len(), 65);
+        assert_eq!(ks1[0], 0x04, "P-256 uncompressed point prefix");
+        assert_eq!(ks2[0], 0x04, "P-256 uncompressed point prefix");
+        assert_ne!(ks1, ks2, "两次生成的 P-256 公钥不同");
+        assert_ne!(&ks1[..], &[0x55; 65], "dummy key 已被替换");
+    }
+
+    #[test]
+    fn malformed_truncated_does_not_panic() {
+        // 空输入
+        assert_eq!(patch_server_hello(&[], &[0x11; 32]), Vec::<u8>::new());
+        // 过短输入
+        let short = vec![0x16, 0x03, 0x03];
+        assert_eq!(patch_server_hello(&short, &[0x11; 32]), short);
+        // 首字节不是 0x16
+        let mut not_sh = vec![0x17, 0x03, 0x03];
+        not_sh.extend_from_slice(&[0u8; 50]);
+        assert_eq!(patch_server_hello(&not_sh, &[0x11; 32]), not_sh);
+
+        // 截断 extensions 或截断 key_share
+        let ch = make_client_hello();
+        let fb = fallback_server_hello(&ch, &[0x11; 32]);
+        let mut truncated = fb.clone();
+        truncated.truncate(60); // 截断在 ServerHello 内部
+        let p_trunc = patch_server_hello(&truncated, &[0x11; 32]);
+        assert!(!p_trunc.is_empty(), "不 panic 且安全返回");
+
+        // 未知 group 保持原样不 panic
+        let mut unknown_group = fb.clone();
+        // 找到 key_share group 0x001d 改为 0x0099
+        for i in 0..unknown_group.len() - 4 {
+            if unknown_group[i..i + 4] == [0x00, 0x33, 0x00, 0x24] {
+                unknown_group[i + 4] = 0x00;
+                unknown_group[i + 5] = 0x99;
+                let old_key = unknown_group[i + 8..i + 40].to_vec();
+                let patched = patch_server_hello(&unknown_group, &[0x11; 32]);
+                let (g, k) = extract_key_share(&patched).expect("extract unknown");
+                assert_eq!(g, 0x0099);
+                assert_eq!(k, old_key, "未知 group 保持原样公钥");
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn patch_preserves_template_is_complete() {
+        let ch = make_client_hello();
+        let sid = [0xAAu8; 32];
+        let fb = fallback_server_hello(&ch, &sid);
+        assert!(template_is_complete(&fb));
+
+        let new_sid = [0xBBu8; 32];
+        let patched = patch_server_hello(&fb, &new_sid);
+        assert!(template_is_complete(&patched), "patch 后的模板必须保持 template_is_complete == true");
+    }
+
+    #[test]
+    fn test_key_share_group_parsing() {
+        let ch = make_client_hello();
+        let sid = [0xAAu8; 32];
+        let fb = fallback_server_hello(&ch, &sid);
+        assert_eq!(key_share_group(&fb), Some((0x001d, 32)));
+
+        let mut unknown_group = fb.clone();
+        for i in 0..unknown_group.len() - 4 {
+            if unknown_group[i..i + 4] == [0x00, 0x33, 0x00, 0x24] {
+                unknown_group[i + 4] = 0x00;
+                unknown_group[i + 5] = 0x99;
+                break;
+            }
+        }
+        assert_eq!(key_share_group(&unknown_group), Some((0x0099, 32)));
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_unknown_key_share_template() {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ch = make_client_hello();
+        let mut unknown_sh = fallback_server_hello(&ch, &[0xAA; 32]);
+        for i in 0..unknown_sh.len() - 4 {
+            if unknown_sh[i..i + 4] == [0x00, 0x33, 0x00, 0x24] {
+                unknown_sh[i + 4] = 0x00;
+                unknown_sh[i + 5] = 0x99;
+                break;
+            }
+        }
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock.write_all(&unknown_sh).await;
+        });
+        let res = fetch_real_server_hello(&addr.to_string()).await;
+        assert!(res.is_err(), "未知 key_share group 模板必须被拒: {:?}", res);
     }
 }

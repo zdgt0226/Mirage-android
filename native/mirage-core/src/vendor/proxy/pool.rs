@@ -35,6 +35,8 @@ pub struct PoolConfig {
     pub quic_pre_packet: bool,
     /// QUIC Salamander 混淆密码 (Some=藏成随机 UDP, 两端须一致)。默认 None。
     pub quic_obfs: Option<String>,
+    /// QUIC 服务端证书 SPKI 指纹 (43 字符 base64url)。transport=quic 必填。
+    pub quic_pin: Option<String>,
 }
 
 /**
@@ -271,18 +273,27 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 use std::time::Duration;
 
-/// 客户端伪装握手产物: 会话 salt + 可选 PFS ECDH 共享秘密。
+/// 客户端伪装握手产物: client_random + server_random + 可选 PFS ECDH 共享秘密。
 struct ClientHandshake {
     client_random: [u8; 32],
+    server_random: [u8; 32],
     /// PFS 开时 = 与服务端临时公钥 ECDH 出的共享秘密; 关时 None。
     ecdh: Option<[u8; 32]>,
 }
 
-/// 读服务端 flight (ServerHello + CCS + 加密段), 返回捕获的 **ServerHello.random**。
+/// 服务端握手返回的元数据: 包含 ServerHello.random 与协商出的 cipher_suite。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerHandshake {
+    pub server_random: [u8; 32],
+    pub cipher_suite: u16,
+}
+
+/// 读服务端 flight (ServerHello + CCS + 加密段), 返回捕获的 **ServerHello.random** 与 **cipher_suite**。
 ///
-/// PFS 下 server_random = 服务端临时 X25519 公钥 (见 crypto::pfs); 非 PFS 下调用方忽略之。
-/// 仍要求集齐 0x16+0x14+0x17 三型才成功 (见 handshake-template-completeness)。
-pub async fn read_server_handshake<R: tokio::io::AsyncRead + Unpin>(stream: &mut R) -> Result<[u8; 32]> {
+/// PFS 下 server_random = 服务端临时 X25519 公钥 (见 crypto::pfs); 非 PFS 下参与会话密钥派生。
+/// 仍要求集齐 0x16+0x14+0x17 三型才成功 (见 handshake-template-completeness)。若 server_random
+/// 全 0 则必须 fail-closed 报错断开。
+pub async fn read_server_handshake<R: tokio::io::AsyncRead + Unpin>(stream: &mut R) -> Result<ServerHandshake> {
     // v0.4.5-alpha.17: 放弃超时随机化, 消除固定 12s/1.5s 阈值的客户端时序指纹.
     // GFW 若主动操纵服务端响应时序 (拦截/延迟 ServerHello) 测客户端恒定放弃时间可
     // 识别 Mirage 客户端. 每连接各随机一次 (非每轮, 保持单次握手内一致), 围绕原值
@@ -295,6 +306,7 @@ pub async fn read_server_handshake<R: tokio::io::AsyncRead + Unpin>(stream: &mut
     let mut saw_enc = false;
     // ServerHello.random (record body[6..38]): PFS 下即服务端临时公钥。首个 0x16 时捕获。
     let mut server_random = [0u8; 32];
+    let mut cipher_suite = 0x1301u16;
 
     loop {
         let t = if saw_ccs { post_ccs_timeout } else { pre_ccs_timeout };
@@ -310,17 +322,19 @@ pub async fn read_server_handshake<R: tokio::io::AsyncRead + Unpin>(stream: &mut
                         if ct == 0x15 {
                             return Err(anyhow::anyhow!("Server sent TLS alert"));
                         } else if ct == 0x16 {
-                            // 首个 ServerHello: 捕获 random (body[6..38])。ServerHello body 布局:
-                            // [0x02 type][3B len][2B version][32B random]... → random 在 [6..38]。
-                            //
-                            // PFS 边界: 假设**首条 0x16 record 就含完整 ServerHello 的 random**
-                            // (与服务端 get_server_hello_pfs 覆写 flight[11..43] 的假设对称:
-                            // 11-5=6, 帧头 5B)。random 在 body 前 38 字节内, fallback 是单条完整
-                            // record, fetch 模板首条通常也完整, 故实践中恒满足。若伪装站把
-                            // ServerHello 拆到首条 record < 38B (极罕见), 这里捕获不到 → server_random
-                            // 留全 0 → do_fake_tls 里 ECDH 失配 → fail-closed (安全, 见那里的 warn)。
+                            // 首个 ServerHello: 捕获 random (body[6..38]) 与 cipher_suite。ServerHello body 布局:
+                            // [0x02 type][3B len][2B version][32B random][1B sid_len][sid][2B cipher]...
                             if !saw_sh && body.len() >= 38 {
                                 server_random.copy_from_slice(&body[6..38]);
+                                if body.len() >= 39 {
+                                    let sid_len = body[38] as usize;
+                                    if body.len() >= 39 + sid_len + 2 {
+                                        cipher_suite = u16::from_be_bytes([
+                                            body[39 + sid_len],
+                                            body[40 + sid_len],
+                                        ]);
+                                    }
+                                }
                             }
                             saw_sh = true;
                         } else if ct == 0x14 {
@@ -330,7 +344,13 @@ pub async fn read_server_handshake<R: tokio::io::AsyncRead + Unpin>(stream: &mut
                         }
 
                         if saw_sh && saw_ccs && saw_enc {
-                            return Ok(server_random);
+                            if server_random == [0u8; 32] {
+                                return Err(anyhow::anyhow!("未能捕获有效的 ServerHello.random (全 0), 握手失败断开 (fail-closed)"));
+                            }
+                            return Ok(ServerHandshake {
+                                server_random,
+                                cipher_suite,
+                            });
                         }
                     }
                     Ok(Err(e)) => return Err(anyhow::anyhow!("Incomplete body: {}", e)),
@@ -350,7 +370,13 @@ pub async fn read_server_handshake<R: tokio::io::AsyncRead + Unpin>(stream: &mut
     if !saw_sh || !saw_ccs || !saw_enc {
         return Err(anyhow::anyhow!("Incomplete flight: sh={}, ccs={}, enc={}", saw_sh, saw_ccs, saw_enc));
     }
-    Ok(server_random)
+    if server_random == [0u8; 32] {
+        return Err(anyhow::anyhow!("未能捕获有效的 ServerHello.random (全 0), 握手失败断开 (fail-closed)"));
+    }
+    Ok(ServerHandshake {
+        server_random,
+        cipher_suite,
+    })
 }
 
 /// [弹性预热连接池 (WarmPool)]
@@ -368,6 +394,7 @@ pub struct WarmPool {
     metrics: Arc<PoolMetrics>,                // 反馈式弹性算法的运行时指标
     cfg: Arc<PoolConfig>,                     // 保留 config (transport/password/quic_sni 等, 供 Model X)
     shutdown: Arc<AtomicBool>,                // 停机标志位 (Drop / 关闭时优雅停止后台协程)
+    net_shutdown_notify: Arc<Notify>,         // 专用网络变更 watcher 停机通知 (不与 notify 混用)
     // Model X: transport=quic 时的共享 QUIC mux。connect() 直接在其上开精简流 (绕过 fake-TLS Tunnel)。
     #[cfg(feature = "quic")]
     quic_mux: Option<Arc<crate::proxy::quic::QuicMux>>,
@@ -388,11 +415,22 @@ impl WarmPool {
         let stats = Arc::new(RwLock::new(PoolStats::new()));
         let metrics = Arc::new(PoolMetrics::new());
         let shutdown = Arc::new(AtomicBool::new(false));
+        let net_shutdown_notify = Arc::new(Notify::new());
 
         // mux 架构: transport=quic 时建一个共享 QUIC mux (一个连接开多流)。TCP 路径无。
         #[cfg(feature = "quic")]
         let quic_mux = if cfg.transport == crate::config::Transport::Quic {
-            Some(crate::proxy::quic::QuicMux::new(&cfg.server_host, cfg.server_port, &cfg.quic_sni, cfg.quic_low_src_port, cfg.quic_pre_packet, cfg.quic_obfs.clone(), cfg.quic_window_mb, cfg.quic_erasure_cc))
+            Some(crate::proxy::quic::QuicMux::new(
+                &cfg.server_host,
+                cfg.server_port,
+                &cfg.quic_sni,
+                cfg.quic_low_src_port,
+                cfg.quic_pre_packet,
+                cfg.quic_obfs.clone(),
+                cfg.quic_window_mb,
+                cfg.quic_erasure_cc,
+                cfg.quic_pin.clone(),
+            ))
         } else {
             None
         };
@@ -405,6 +443,7 @@ impl WarmPool {
             metrics: metrics.clone(),
             cfg: cfg.clone(),
             shutdown: shutdown.clone(),
+            net_shutdown_notify: net_shutdown_notify.clone(),
             #[cfg(feature = "quic")]
             quic_mux: quic_mux.clone(),
         };
@@ -418,18 +457,30 @@ impl WarmPool {
             let flush_q = queue.clone();
             let mut net_rx = crate::net_monitor::subscribe();
             let shutdown_net = shutdown.clone();
+            let net_exit = net_shutdown_notify.clone();
             tokio::spawn(async move {
                 // changed() 只对订阅后的未来变更就绪, 启动瞬间不会误 flush。
-                while net_rx.changed().await.is_ok() {
+                // 监听 net_exit: WarmPool drop 时退出, 避免热重载每个 Mirage 出站泄漏任务直到下次网络变更。
+                loop {
                     if shutdown_net.load(Ordering::Relaxed) {
                         break;
                     }
-                    let mut q = flush_q.lock().await;
-                    let n = q.len();
-                    q.clear();
-                    drop(q);
-                    if n > 0 {
-                        info!("WarmPool: 检测到网络变更, 清空 {} 条旧隧道, builder 将用新路径重建", n);
+                    tokio::select! {
+                        _ = net_exit.notified() => {
+                            break;
+                        }
+                        res = net_rx.changed() => {
+                            if res.is_err() || shutdown_net.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            let mut q = flush_q.lock().await;
+                            let n = q.len();
+                            q.clear();
+                            drop(q);
+                            if n > 0 {
+                                info!("WarmPool: 检测到网络变更, 清空 {} 条旧隧道, builder 将用新路径重建", n);
+                            }
+                        }
                     }
                 }
             });
@@ -626,33 +677,21 @@ impl WarmPool {
             },
         };
 
-        // 5. v0.4 协议: 收 server 主动下发的 TIME_SYNC 帧, 写入全局 TIME_OFFSET.
-        //    帧格式: [0x01 type][0x01 ver][8B u64 BE server unix sec] = 10 字节
-        //    失败/超时降级: 用 local time 继续 (不阻塞连接), 仅 INFO 一次.
+        // 5. v0.4+ 协议: 收 server 主动下发的 TIME_SYNC 帧, 写入全局 TIME_OFFSET.
+        //    帧格式: [0x01 type][0x01/0x02 ver][8B u64 BE server unix sec] = 10 字节
+        //    v0.15 改为 fail-closed: v0.15 服务端恒发 TIME_SYNC, 超时 / 解密失败 / 非预期帧
+        //    均直接返回错误放弃该连接。杜绝迟到的 TIME_SYNC 帧污染上层数据、认证失败连接
+        //    (被转伪装站) 误入连接池等问题。
         // proto_ver 0x02 = 服务端开了 cipher agility, 需在下方协商。
-        let mut server_agility = false;
-        match tokio::time::timeout(
+        let server_agility = match tokio::time::timeout(
             std::time::Duration::from_secs(3),
             crypto_reader.recv_data()
         ).await {
-            Ok(Ok(data)) if data.len() == 10 && data[0] == 0x01
-                && (data[1] == crate::crypto::cipher::PROTO_VER_LEGACY
-                    || data[1] == crate::crypto::cipher::PROTO_VER_AGILITY) =>
-            {
-                server_agility = data[1] == crate::crypto::cipher::PROTO_VER_AGILITY;
-                let server_time = u64::from_be_bytes(data[2..10].try_into().unwrap());
-                crate::time_sync::set_offset_from_server_time(server_time);
-            }
-            Ok(Ok(data)) => {
-                tracing::warn!(
-                    "TIME_SYNC: unexpected frame (len={}, type={:?}), proceeding without sync",
-                    data.len(), data.first()
-                );
-            }
+            Ok(Ok(data)) => process_time_sync_frame(&data)?,
             Ok(Err(e)) => {
                 // 解密失败 = 服务端很可能拒了本次认证、把连接转发到了伪装站, 我们却在用
                 // 密码派生的会话密钥去解伪装站的 TLS 流量 → 解不开。这是"认证没过"的信号。
-                // 池子每次补货都会撞到, 故只详细提示一次 (避免刷屏)。两大常见原因见下。
+                // 池子每次补货都会撞到, 故只详细提示一次 (避免刷屏)。
                 static HINTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
                 if !HINTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     // 统一诊断文案 (与服务端 control.rs 共用, 见 hello_auth::session_decrypt_failure_hint)。
@@ -662,32 +701,44 @@ impl WarmPool {
                         crate::crypto::hello_auth::session_decrypt_failure_hint()
                     );
                 } else {
-                    tracing::debug!("TIME_SYNC: recv failed: {:?}, proceeding without sync", e);
+                    tracing::debug!("TIME_SYNC: recv failed: {:?}", e);
                 }
+                anyhow::bail!("TIME_SYNC 接收/解密失败: {:?}", e);
             }
             Err(_) => {
-                tracing::info!("TIME_SYNC: timeout waiting for server time (3s), proceeding with local time. Old server?");
+                tracing::warn!("TIME_SYNC: 等待服务端时间帧超时 (3s), 放弃建连 (fail-closed)");
+                anyhow::bail!("TIME_SYNC 等待超时 (3s)");
             }
-        }
+        };
 
         // 6. cipher agility 协商 (仅服务端广播 0x02 时): 发 CIPHER_NEGO(本机AES), 读 CIPHER_ACK,
         //    两端 rekey 到协商 cipher。协商在加密 ChaCha20 信道内完成, ClientHello 未动 (指纹不变)。
-        //    任何失败 → 保持 ChaCha20 (fail-safe, 不影响连接可用性)。
+        //    v0.15 fail-closed: 已发送 CIPHER_NEGO 后, CIPHER_ACK 超时 / 格式异常 / recv 错误
+        //    均直接报错断开, 避免两端密钥或密码套件状态不同步导致死隧道入池。
         if server_agility {
             let nego = crate::crypto::cipher::build_cipher_nego(crate::crypto::cipher::local_supports_aes());
-            if crypto_writer.send_data(&nego).await.is_ok() {
-                match tokio::time::timeout(std::time::Duration::from_secs(3), crypto_reader.recv_data()).await {
-                    Ok(Ok(ack)) => {
-                        if let Some(final_cipher) = crate::crypto::cipher::parse_cipher_ack(&ack) {
-                            crypto_writer.rekey(final_cipher);
-                            crypto_reader.rekey(final_cipher);
-                            tracing::debug!("cipher agility 协商为 {:?}", final_cipher);
-                        } else {
-                            tracing::warn!("cipher agility: CIPHER_ACK 格式异常, 维持 ChaCha20");
-                        }
-                    }
-                    _ => tracing::warn!("cipher agility: 未收到 CIPHER_ACK, 维持 ChaCha20"),
+            crypto_writer.send_data(&nego).await
+                .map_err(|e| anyhow::anyhow!("cipher agility: 发送 CIPHER_NEGO 失败: {e}"))?;
+            let ack = match tokio::time::timeout(std::time::Duration::from_secs(3), crypto_reader.recv_data()).await {
+                Ok(Ok(ack)) => ack,
+                Ok(Err(e)) => {
+                    tracing::warn!("cipher agility: 接收 CIPHER_ACK 失败: {e}");
+                    anyhow::bail!("cipher agility: 接收 CIPHER_ACK 失败: {e}");
                 }
+                Err(_) => {
+                    tracing::warn!("cipher agility: 等待 CIPHER_ACK 超时 (3s)");
+                    anyhow::bail!("cipher agility: 等待 CIPHER_ACK 超时 (3s)");
+                }
+            };
+            if let Some(final_cipher) = crate::crypto::cipher::parse_cipher_ack(&ack) {
+                if final_cipher != crypto_writer.cipher() {
+                    crypto_writer.rekey(final_cipher);
+                    crypto_reader.rekey(final_cipher);
+                }
+                tracing::debug!("cipher agility 协商为 {:?}", final_cipher);
+            } else {
+                tracing::warn!("cipher agility: CIPHER_ACK 格式异常");
+                anyhow::bail!("cipher agility: CIPHER_ACK 格式异常");
             }
         }
 
@@ -732,6 +783,7 @@ impl WarmPool {
                 TunnelWrite::Tcp(write_half),
                 &cfg.password,
                 &hs.client_random,
+                &hs.server_random,
                 &ecdh,
                 true,
             ),
@@ -740,6 +792,7 @@ impl WarmPool {
                 TunnelWrite::Tcp(write_half),
                 &cfg.password,
                 &hs.client_random,
+                &hs.server_random,
                 true,
             ),
         })
@@ -765,6 +818,7 @@ impl WarmPool {
                 TunnelWrite::Boxed(Box::new(write_half)),
                 &cfg.password,
                 &hs.client_random,
+                &hs.server_random,
                 &ecdh,
                 true,
             ),
@@ -773,6 +827,7 @@ impl WarmPool {
                 TunnelWrite::Boxed(Box::new(write_half)),
                 &cfg.password,
                 &hs.client_random,
+                &hs.server_random,
                 true,
             ),
         })
@@ -780,55 +835,45 @@ impl WarmPool {
 
 
     /// 伪装 TLS 握手 (发带 token 的 ClientHello / 读 server flight / 发假 Finished tail)。
-    /// 返回 client_random (会话密钥派生的 salt) + 可选 ecdh (PFS 开时)。
+    /// 返回 client_random 与 server_random (会话密钥派生的 64B salt) + 可选 ecdh (PFS 开时)。
     /// 对任意字节流生效 (物理 TCP / underlying 流)。
     async fn do_fake_tls<Rd, Wr>(rh: &mut Rd, wh: &mut Wr, cfg: &PoolConfig) -> Result<ClientHandshake>
     where
         Rd: tokio::io::AsyncRead + Unpin,
         Wr: tokio::io::AsyncWrite + Unpin,
     {
-        let token = crate::crypto::hello_auth::make_session_token(&cfg.password);
-        // PFS: 生成一次性 X25519 对, 公钥当 ClientHello.random 发出 (见 crypto::pfs)。
-        let ephemeral = if cfg.pfs {
-            Some(crate::crypto::pfs::Ephemeral::generate()?)
+        // 先确定 ClientHello.random (PFS 时是临时公钥), 再用它作 bind 生成 token。
+        let (ephemeral, client_random) = if cfg.pfs {
+            let e = crate::crypto::pfs::Ephemeral::generate()?;
+            let pk = e.public;
+            (Some(e), pk)
         } else {
-            None
+            let mut r = [0u8; 32];
+            rand::fill(&mut r);
+            (None, r)
         };
-        let (hello_bytes, client_random) = match &ephemeral {
-            Some(e) => (
-                crate::crypto::tls_raw::build_client_hello_with_random(
-                    &cfg.camouflage_host,
-                    &token,
-                    &e.public,
-                ),
-                e.public,
-            ),
-            None => crate::crypto::tls_raw::build_client_hello(&cfg.camouflage_host, &token),
-        };
+        let token = crate::crypto::hello_auth::make_session_token(&cfg.password, &client_random);
+        let hello_bytes = crate::crypto::tls_raw::build_client_hello_with_random(
+            &cfg.camouflage_host,
+            &token,
+            &client_random,
+        );
         wh.write_all(&hello_bytes).await?;
         wh.flush().await?;
-        let server_random = read_server_handshake(rh).await?;
-        let tail_bytes = crate::crypto::tls_raw::build_fake_client_tail();
+        let handshake = read_server_handshake(rh).await?;
+        if handshake.server_random == [0u8; 32] {
+            anyhow::bail!("未能从服务端 ServerHello 捕获到 server_random (全 0), 握手失败断开 (fail-closed)");
+        }
+        let tail_bytes = crate::crypto::tls_raw::build_fake_client_tail(handshake.cipher_suite);
         wh.write_all(&tail_bytes).await?;
         wh.flush().await?;
+        let server_random = handshake.server_random;
         // PFS: 与服务端临时公钥 (= server_random) 做 ECDH 得共享秘密。
         let ecdh = match ephemeral {
-            Some(e) => {
-                // server_random 全 0 = 没捕获到服务端临时公钥 (对端没开 pfs, 或 ServerHello
-                // 模板首条 record 不含完整 random —— 极罕见)。此时 ECDH 用全 0 公钥, master 必与
-                // 服务端失配 → fail-closed 连不上 (不会静默出明文, 但也连不通)。给个明确 warn。
-                if server_random == [0u8; 32] {
-                    tracing::warn!(
-                        "PFS: 未从服务端 ServerHello 捕获到临时公钥 (全 0) —— 对端很可能未开启 pfs, \
-                         或伪装站响应异常。本连接将因会话密钥失配而失败; 请确认服务端 config 也设 \
-                         \"pfs\": true。"
-                    );
-                }
-                Some(e.agree(&server_random)?)
-            }
+            Some(e) => Some(e.agree(&server_random)?),
             None => None,
         };
-        Ok(ClientHandshake { client_random, ecdh })
+        Ok(ClientHandshake { client_random, server_random, ecdh })
     }
 
     /// O(1) 复杂度提取连接.
@@ -857,7 +902,10 @@ impl WarmPool {
                 // 先获取通知句柄（关键：避免检查队列为空和发生通知之间的竞态条件 Race Condition）
                 let notified = self.notify.notified();
 
-                if let Some(tunnel) = self.queue.lock().await.pop_front() {
+                // pop 后立即释放 queue 锁, 别把它持有到整个 if-let body ——
+                // 否则 is_stale() 探测 (syscall) + tokio::spawn 期间都占着锁, 串行化其它 pool.get()。
+                let popped = self.queue.lock().await.pop_front();
+                if let Some(tunnel) = popped {
                     if tunnel.created_at.elapsed().as_secs() > tunnel.max_age_sec {
                         tracing::debug!("Tunnel reached max age ({}s), gracefully closing",
                             tunnel.created_at.elapsed().as_secs());
@@ -927,14 +975,16 @@ impl WarmPool {
                 // 物理 TCP 隧道 → Some(fd) 调 brutal。嵌套 (Mirage-over-X, Boxed) 隧道也在池里但
                 // 无裸 fd → None → 跳过 brutal (其拥塞控制由 underlying 出站的物理层负责)。
                 if let Some(fd) = t.get_raw_fd() {
-                    crate::proxy::brutal::set_brutal_rate(fd, new_rate);
+                    // 客户端出站不分组 (group_id=0, per-socket)。brutal 只在服务端部署,
+                    // 分组是服务端按客户端归一组的事; 客户端侧保持 v1 per-socket 语义。
+                    crate::proxy::brutal::set_brutal_rate(fd, new_rate, 0);
                 }
                 total += 1;
             }
         }
         if let Ok(actives) = self.brutal_state.active_fds.lock() {
             for &fd in actives.iter() {
-                crate::proxy::brutal::set_brutal_rate(fd, new_rate);
+                crate::proxy::brutal::set_brutal_rate(fd, new_rate, 0); // 客户端出站不分组
                 total += 1;
             }
         }
@@ -956,8 +1006,135 @@ impl Drop for WarmPool {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
         self.notify.notify_waiters();
+        // notify_one 而非 notify_waiters: 无等待者时存一个 permit —— watcher 若尚未首次 poll 或正处在
+        // 网络变更分支体内, 下一次 notified() 仍会立即完成, 不会漏唤醒而泄漏任务。
+        self.net_shutdown_notify.notify_one();
         if let Ok(mut q) = self.queue.try_lock() {
             q.clear();
         }
+    }
+}
+
+/// 处理接收到的 TIME_SYNC 帧数据, 返回是否启用 cipher agility (bool)。
+/// 抽成独立函数便于单元测试 (不依赖网络 IO)。
+pub(crate) fn process_time_sync_frame(data: &[u8]) -> anyhow::Result<bool> {
+    if data.len() == 10 && data[0] == 0x01
+        && (data[1] == crate::crypto::cipher::PROTO_VER_LEGACY
+            || data[1] == crate::crypto::cipher::PROTO_VER_AGILITY)
+    {
+        let server_agility = data[1] == crate::crypto::cipher::PROTO_VER_AGILITY;
+        let server_time = u64::from_be_bytes(data[2..10].try_into().unwrap());
+        crate::time_sync::set_offset_from_server_time(server_time);
+        Ok(server_agility)
+    } else {
+        tracing::warn!(
+            "TIME_SYNC: unexpected frame (len={}, type={:?})",
+            data.len(),
+            data.first()
+        );
+        anyhow::bail!(
+            "TIME_SYNC 非预期帧 (len={}, type={:?})",
+            data.len(),
+            data.first()
+        )
+    }
+}
+
+#[cfg(test)]
+mod pool_handshake_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn process_time_sync_frame_accepts_legacy_and_agility() {
+        let _g = crate::time_sync::tests::TEST_LOCK.lock().unwrap();
+        let _restore = crate::time_sync::tests::OffsetGuard;
+        crate::time_sync::tests::reset_offset();
+
+        let now = crate::time_sync::local_now_sec();
+        // 1. Legacy version (0x01)
+        let mut frame_legacy = [0u8; 10];
+        frame_legacy[0] = 0x01;
+        frame_legacy[1] = crate::crypto::cipher::PROTO_VER_LEGACY;
+        frame_legacy[2..10].copy_from_slice(&(now + 10).to_be_bytes());
+
+        let res = process_time_sync_frame(&frame_legacy);
+        assert!(res.is_ok());
+        assert!(!res.unwrap(), "Legacy proto_ver 不开启 agility");
+
+        // 2. Agility version (0x02)
+        let mut frame_agility = [0u8; 10];
+        frame_agility[0] = 0x01;
+        frame_agility[1] = crate::crypto::cipher::PROTO_VER_AGILITY;
+        frame_agility[2..10].copy_from_slice(&(now + 20).to_be_bytes());
+
+        let res = process_time_sync_frame(&frame_agility);
+        assert!(res.is_ok());
+        assert!(res.unwrap(), "Agility proto_ver 必须开启 agility");
+    }
+
+    #[test]
+    fn process_time_sync_frame_fails_closed_on_malformed_frame() {
+        // 长度不足
+        assert!(process_time_sync_frame(&[0x01, 0x01]).is_err());
+        // 长度过长
+        assert!(process_time_sync_frame(&[0x01; 11]).is_err());
+        // 错误帧类型 (type != 0x01)
+        let mut bad_type = [0x01u8; 10];
+        bad_type[0] = 0x02;
+        assert!(process_time_sync_frame(&bad_type).is_err());
+        // 错误协议版本 (ver != 0x01 && ver != 0x02)
+        let mut bad_ver = [0x01u8; 10];
+        bad_ver[1] = 0x03;
+        assert!(process_time_sync_frame(&bad_ver).is_err());
+    }
+
+    fn build_mock_server_flight(server_random: &[u8; 32], cipher: u16) -> Vec<u8> {
+        let mut flight = Vec::new();
+        // 1. ServerHello: 0x16, 0x03, 0x03, len, 0x02, hs_len(3B), 0x03, 0x03, random(32B), sid_len=0, ciphers...
+        let mut hs_body = vec![0x03, 0x03]; // TLS 1.2
+        hs_body.extend_from_slice(server_random);
+        hs_body.push(0); // session_id len
+        hs_body.extend_from_slice(&cipher.to_be_bytes()); // cipher
+        hs_body.push(0); // compression
+        hs_body.extend_from_slice(&[0x00, 0x00]); // extensions len = 0
+
+        let hs_len = hs_body.len() as u32;
+        let mut hs = vec![0x02]; // ServerHello
+        hs.extend_from_slice(&hs_len.to_be_bytes()[1..4]);
+        hs.extend_from_slice(&hs_body);
+
+        flight.extend_from_slice(&[0x16, 0x03, 0x03]);
+        flight.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+        flight.extend_from_slice(&hs);
+
+        // 2. ChangeCipherSpec: 0x14
+        flight.extend_from_slice(&[0x14, 0x03, 0x03, 0x00, 0x01, 0x01]);
+
+        // 3. EncryptedExtensions / AppData: 0x17
+        flight.extend_from_slice(&[0x17, 0x03, 0x03, 0x00, 0x10]);
+        flight.extend_from_slice(&[0xaa; 16]);
+
+        flight
+    }
+
+    #[tokio::test]
+    async fn read_server_handshake_fails_closed_on_all_zero_random() {
+        let flight = build_mock_server_flight(&[0u8; 32], 0x1301);
+        let mut cursor = Cursor::new(flight);
+        let res = read_server_handshake(&mut cursor).await;
+        assert!(res.is_err(), "server_random 为全 0 时必须 fail-closed 断开");
+    }
+
+    #[tokio::test]
+    async fn read_server_handshake_succeeds_on_valid_random() {
+        let expected_random = [0x5au8; 32];
+        let flight = build_mock_server_flight(&expected_random, 0x1302);
+        let mut cursor = Cursor::new(flight);
+        let res = read_server_handshake(&mut cursor).await;
+        assert!(res.is_ok(), "有效 server_random 应成功捕获");
+        let hs = res.unwrap();
+        assert_eq!(hs.server_random, expected_random);
+        assert_eq!(hs.cipher_suite, 0x1302);
     }
 }

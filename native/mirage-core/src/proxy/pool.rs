@@ -248,17 +248,53 @@ use tokio::time::timeout;
 /// 客户端伪装握手产物: 会话 salt + 可选 PFS ECDH 共享秘密。
 struct ClientHandshake {
     client_random: [u8; 32],
+    /// ServerHello.random: v0.15 起参与会话 master 派生 (服务端新鲜性), PFS 下即服务端临时公钥。
+    server_random: [u8; 32],
     /// PFS 开时 = 与服务端临时公钥 ECDH 出的共享秘密; 关时 None。
     ecdh: Option<[u8; 32]>,
 }
 
-/// 读服务端 flight (ServerHello + CCS + 加密段), 返回捕获的 **ServerHello.random**。
+/// 处理接收到的 TIME_SYNC 帧数据, 返回是否启用 cipher agility (bool)。
+/// 抽成独立函数便于单元测试 (不依赖网络 IO)。
+pub(crate) fn process_time_sync_frame(data: &[u8]) -> anyhow::Result<bool> {
+    if data.len() == 10
+        && data[0] == 0x01
+        && (data[1] == crate::crypto::cipher::PROTO_VER_LEGACY
+            || data[1] == crate::crypto::cipher::PROTO_VER_AGILITY)
+    {
+        let server_agility = data[1] == crate::crypto::cipher::PROTO_VER_AGILITY;
+        let server_time = u64::from_be_bytes(data[2..10].try_into().unwrap());
+        crate::time_sync::set_offset_from_server_time(server_time);
+        Ok(server_agility)
+    } else {
+        tracing::warn!(
+            "TIME_SYNC: unexpected frame (len={}, type={:?})",
+            data.len(),
+            data.first()
+        );
+        anyhow::bail!(
+            "TIME_SYNC 非预期帧 (len={}, type={:?})",
+            data.len(),
+            data.first()
+        )
+    }
+}
+
+/// 服务端握手返回的元数据: 包含 ServerHello.random 与协商出的 cipher_suite。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerHandshake {
+    pub server_random: [u8; 32],
+    pub cipher_suite: u16,
+}
+
+/// 读服务端 flight (ServerHello + CCS + 加密段), 返回捕获的 **ServerHello.random** 与 **cipher_suite**。
 ///
-/// PFS 下 server_random = 服务端临时 X25519 公钥 (见 crypto::pfs); 非 PFS 下调用方忽略之。
-/// 仍要求集齐 0x16+0x14+0x17 三型才成功 (见 handshake-template-completeness)。
+/// PFS 下 server_random = 服务端临时 X25519 公钥 (见 crypto::pfs); 非 PFS 下参与会话密钥派生。
+/// 仍要求集齐 0x16+0x14+0x17 三型才成功 (见 handshake-template-completeness)。若 server_random
+/// 全 0 则必须 fail-closed 报错断开。
 pub async fn read_server_handshake<R: tokio::io::AsyncRead + Unpin>(
     stream: &mut R,
-) -> Result<[u8; 32]> {
+) -> Result<ServerHandshake> {
     // v0.4.5-alpha.17: 放弃超时随机化, 消除固定 12s/1.5s 阈值的客户端时序指纹.
     // GFW 若主动操纵服务端响应时序 (拦截/延迟 ServerHello) 测客户端恒定放弃时间可
     // 识别 Mirage 客户端. 每连接各随机一次 (非每轮, 保持单次握手内一致), 围绕原值
@@ -271,6 +307,7 @@ pub async fn read_server_handshake<R: tokio::io::AsyncRead + Unpin>(
     let mut saw_enc = false;
     // ServerHello.random (record body[6..38]): PFS 下即服务端临时公钥。首个 0x16 时捕获。
     let mut server_random = [0u8; 32];
+    let mut cipher_suite = 0x1301u16;
 
     loop {
         let t = if saw_ccs {
@@ -290,17 +327,19 @@ pub async fn read_server_handshake<R: tokio::io::AsyncRead + Unpin>(
                         if ct == 0x15 {
                             return Err(anyhow::anyhow!("Server sent TLS alert"));
                         } else if ct == 0x16 {
-                            // 首个 ServerHello: 捕获 random (body[6..38])。ServerHello body 布局:
-                            // [0x02 type][3B len][2B version][32B random]... → random 在 [6..38]。
-                            //
-                            // PFS 边界: 假设**首条 0x16 record 就含完整 ServerHello 的 random**
-                            // (与服务端 get_server_hello_pfs 覆写 flight[11..43] 的假设对称:
-                            // 11-5=6, 帧头 5B)。random 在 body 前 38 字节内, fallback 是单条完整
-                            // record, fetch 模板首条通常也完整, 故实践中恒满足。若伪装站把
-                            // ServerHello 拆到首条 record < 38B (极罕见), 这里捕获不到 → server_random
-                            // 留全 0 → do_fake_tls 里 ECDH 失配 → fail-closed (安全, 见那里的 warn)。
+                            // 首个 ServerHello: 捕获 random (body[6..38]) 与 cipher_suite。ServerHello body 布局:
+                            // [0x02 type][3B len][2B version][32B random][1B sid_len][sid][2B cipher]...
                             if !saw_sh && body.len() >= 38 {
                                 server_random.copy_from_slice(&body[6..38]);
+                                if body.len() >= 39 {
+                                    let sid_len = body[38] as usize;
+                                    if body.len() >= 39 + sid_len + 2 {
+                                        cipher_suite = u16::from_be_bytes([
+                                            body[39 + sid_len],
+                                            body[40 + sid_len],
+                                        ]);
+                                    }
+                                }
                             }
                             saw_sh = true;
                         } else if ct == 0x14 {
@@ -310,7 +349,13 @@ pub async fn read_server_handshake<R: tokio::io::AsyncRead + Unpin>(
                         }
 
                         if saw_sh && saw_ccs && saw_enc {
-                            return Ok(server_random);
+                            if server_random == [0u8; 32] {
+                                return Err(anyhow::anyhow!("未能捕获有效的 ServerHello.random (全 0), 握手失败断开 (fail-closed)"));
+                            }
+                            return Ok(ServerHandshake {
+                                server_random,
+                                cipher_suite,
+                            });
                         }
                     }
                     Ok(Err(e)) => return Err(anyhow::anyhow!("Incomplete body: {}", e)),
@@ -335,7 +380,15 @@ pub async fn read_server_handshake<R: tokio::io::AsyncRead + Unpin>(
             saw_enc
         ));
     }
-    Ok(server_random)
+    if server_random == [0u8; 32] {
+        return Err(anyhow::anyhow!(
+            "未能捕获有效的 ServerHello.random (全 0), 握手失败断开 (fail-closed)"
+        ));
+    }
+    Ok(ServerHandshake {
+        server_random,
+        cipher_suite,
+    })
 }
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -629,78 +682,80 @@ impl WarmPool {
             None => Self::handshake_over_tcp(cfg, brutal_state).await?,
         };
 
-        // 5. v0.4 协议: 收 server 主动下发的 TIME_SYNC 帧, 写入全局 TIME_OFFSET.
-        //    帧格式: [0x01 type][0x01 ver][8B u64 BE server unix sec] = 10 字节
-        //    失败/超时降级: 用 local time 继续 (不阻塞连接), 仅 INFO 一次.
+        // 5. v0.4+ 协议: 收 server 主动下发的 TIME_SYNC 帧, 写入全局 TIME_OFFSET.
+        //    帧格式: [0x01 type][0x01/0x02 ver][8B u64 BE server unix sec] = 10 字节
+        //    v0.15 改为 fail-closed: v0.15 服务端恒发 TIME_SYNC, 超时 / 解密失败 / 非预期帧
+        //    均直接返回错误放弃该连接。杜绝迟到的 TIME_SYNC 帧污染上层数据、认证失败连接
+        //    (被转伪装站) 误入连接池等问题。
         // proto_ver 0x02 = 服务端开了 cipher agility, 需在下方协商。
-        let mut server_agility = false;
-        match tokio::time::timeout(std::time::Duration::from_secs(3), crypto_reader.recv_data())
-            .await
+        let server_agility = match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            crypto_reader.recv_data(),
+        )
+        .await
         {
-            Ok(Ok(data))
-                if data.len() == 10
-                    && data[0] == 0x01
-                    && (data[1] == crate::crypto::cipher::PROTO_VER_LEGACY
-                        || data[1] == crate::crypto::cipher::PROTO_VER_AGILITY) =>
-            {
-                server_agility = data[1] == crate::crypto::cipher::PROTO_VER_AGILITY;
-                let server_time = u64::from_be_bytes(data[2..10].try_into().unwrap());
-                crate::time_sync::set_offset_from_server_time(server_time);
-            }
-            Ok(Ok(data)) => {
-                tracing::warn!(
-                    "TIME_SYNC: unexpected frame (len={}, type={:?}), proceeding without sync",
-                    data.len(),
-                    data.first()
-                );
-            }
+            Ok(Ok(data)) => process_time_sync_frame(&data)?,
             Ok(Err(e)) => {
                 // 解密失败 = 服务端很可能拒了本次认证、把连接转发到了伪装站, 我们却在用
                 // 密码派生的会话密钥去解伪装站的 TLS 流量 → 解不开。这是"认证没过"的信号。
-                // 池子每次补货都会撞到, 故只详细提示一次 (避免刷屏)。两大常见原因见下。
+                // 池子每次补货都会撞到, 故只详细提示一次 (避免刷屏)。
                 static HINTED: std::sync::atomic::AtomicBool =
                     std::sync::atomic::AtomicBool::new(false);
                 if !HINTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    // 统一诊断文案 (与服务端 control.rs 共用, 见 hello_auth::session_decrypt_failure_hint)。
                     tracing::warn!(
-                        "隧道认证疑似失败 (TIME_SYNC 解密失败: {:?})。排查: ①密码与服务端是否一致; \
-                         ②本机系统时钟与服务端相差是否超过服务端容差 (默认 ±60s) —— 两端各跑 `date -u` \
-                         对一下, 并确认 NTP 正常且**不走本代理** (否则隧道挂→NTP不同步→时钟更偏 死循环)。",
-                        e
+                        "隧道认证疑似失败 (TIME_SYNC 解密失败: {:?})。{}",
+                        e,
+                        crate::crypto::hello_auth::session_decrypt_failure_hint()
                     );
                 } else {
-                    tracing::debug!("TIME_SYNC: recv failed: {:?}, proceeding without sync", e);
+                    tracing::debug!("TIME_SYNC: recv failed: {:?}", e);
                 }
+                anyhow::bail!("TIME_SYNC 接收/解密失败: {:?}", e);
             }
             Err(_) => {
-                tracing::info!("TIME_SYNC: timeout waiting for server time (3s), proceeding with local time. Old server?");
+                tracing::warn!("TIME_SYNC: 等待服务端时间帧超时 (3s), 放弃建连 (fail-closed)");
+                anyhow::bail!("TIME_SYNC 等待超时 (3s)");
             }
-        }
+        };
 
         // 6. cipher agility 协商 (仅服务端广播 0x02 时): 发 CIPHER_NEGO(本机AES), 读 CIPHER_ACK,
         //    两端 rekey 到协商 cipher。协商在加密 ChaCha20 信道内完成, ClientHello 未动 (指纹不变)。
-        //    任何失败 → 保持 ChaCha20 (fail-safe, 不影响连接可用性)。
+        //    v0.15 fail-closed: 已发送 CIPHER_NEGO 后, CIPHER_ACK 超时 / 格式异常 / recv 错误
+        //    均直接报错断开, 避免两端密钥或密码套件状态不同步导致死隧道入池。
         if server_agility {
             let nego = crate::crypto::cipher::build_cipher_nego(
                 crate::crypto::cipher::local_supports_aes(),
             );
-            if crypto_writer.send_data(&nego).await.is_ok() {
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(3),
-                    crypto_reader.recv_data(),
-                )
+            crypto_writer
+                .send_data(&nego)
                 .await
-                {
-                    Ok(Ok(ack)) => {
-                        if let Some(final_cipher) = crate::crypto::cipher::parse_cipher_ack(&ack) {
-                            crypto_writer.rekey(final_cipher);
-                            crypto_reader.rekey(final_cipher);
-                            tracing::debug!("cipher agility 协商为 {:?}", final_cipher);
-                        } else {
-                            tracing::warn!("cipher agility: CIPHER_ACK 格式异常, 维持 ChaCha20");
-                        }
-                    }
-                    _ => tracing::warn!("cipher agility: 未收到 CIPHER_ACK, 维持 ChaCha20"),
+                .map_err(|e| anyhow::anyhow!("cipher agility: 发送 CIPHER_NEGO 失败: {e}"))?;
+            let ack = match tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                crypto_reader.recv_data(),
+            )
+            .await
+            {
+                Ok(Ok(ack)) => ack,
+                Ok(Err(e)) => {
+                    tracing::warn!("cipher agility: 接收 CIPHER_ACK 失败: {e}");
+                    anyhow::bail!("cipher agility: 接收 CIPHER_ACK 失败: {e}");
                 }
+                Err(_) => {
+                    tracing::warn!("cipher agility: 等待 CIPHER_ACK 超时 (3s)");
+                    anyhow::bail!("cipher agility: 等待 CIPHER_ACK 超时 (3s)");
+                }
+            };
+            if let Some(final_cipher) = crate::crypto::cipher::parse_cipher_ack(&ack) {
+                if final_cipher != crypto_writer.cipher() {
+                    crypto_writer.rekey(final_cipher);
+                    crypto_reader.rekey(final_cipher);
+                }
+                tracing::debug!("cipher agility 协商为 {:?}", final_cipher);
+            } else {
+                tracing::warn!("cipher agility: CIPHER_ACK 格式异常");
+                anyhow::bail!("cipher agility: CIPHER_ACK 格式异常");
             }
         }
 
@@ -811,6 +866,7 @@ impl WarmPool {
                 TunnelWrite::Tcp(write_half),
                 &cfg.password,
                 &hs.client_random,
+                &hs.server_random,
                 &ecdh,
                 true,
             ),
@@ -819,6 +875,7 @@ impl WarmPool {
                 TunnelWrite::Tcp(write_half),
                 &cfg.password,
                 &hs.client_random,
+                &hs.server_random,
                 true,
             ),
         })
@@ -848,6 +905,7 @@ impl WarmPool {
                 TunnelWrite::Boxed(Box::new(write_half)),
                 &cfg.password,
                 &hs.client_random,
+                &hs.server_random,
                 &ecdh,
                 true,
             ),
@@ -856,6 +914,7 @@ impl WarmPool {
                 TunnelWrite::Boxed(Box::new(write_half)),
                 &cfg.password,
                 &hs.client_random,
+                &hs.server_random,
                 true,
             ),
         })
@@ -873,49 +932,40 @@ impl WarmPool {
         Rd: tokio::io::AsyncRead + Unpin,
         Wr: tokio::io::AsyncWrite + Unpin,
     {
-        let token = crate::crypto::hello_auth::make_session_token(&cfg.password);
-        // PFS: 生成一次性 X25519 对, 公钥当 ClientHello.random 发出 (见 crypto::pfs)。
-        let ephemeral = if cfg.pfs {
-            Some(crate::crypto::pfs::Ephemeral::generate()?)
+        // v0.15 协议新鲜性: 先定 ClientHello.random (PFS 时 = 客户端临时公钥的 Elligator2 表示),
+        // 再以它为 bind 生成 token (与上游 mirage-rs pool::do_fake_tls 一致)。
+        let (ephemeral, client_random) = if cfg.pfs {
+            let e = crate::crypto::pfs::Ephemeral::generate()?;
+            let pk = e.public;
+            (Some(e), pk)
         } else {
-            None
+            let mut r = [0u8; 32];
+            rand::fill(&mut r);
+            (None, r)
         };
-        let (hello_bytes, client_random) = match &ephemeral {
-            Some(e) => (
-                crate::crypto::tls_raw::build_client_hello_with_random(
-                    &cfg.camouflage_host,
-                    &token,
-                    &e.public,
-                ),
-                e.public,
-            ),
-            None => crate::crypto::tls_raw::build_client_hello(&cfg.camouflage_host, &token),
-        };
+        let token = crate::crypto::hello_auth::make_session_token(&cfg.password, &client_random);
+        let hello_bytes = crate::crypto::tls_raw::build_client_hello_with_random(
+            &cfg.camouflage_host,
+            &token,
+            &client_random,
+        );
         wh.write_all(&hello_bytes).await?;
         wh.flush().await?;
-        let server_random = read_server_handshake(rh).await?;
-        let tail_bytes = crate::crypto::tls_raw::build_fake_client_tail();
+        // read_server_handshake 在 server_random 全 0 时已 fail-closed 报错。
+        let handshake = read_server_handshake(rh).await?;
+        // 伪造 Client Finished 长度随协商套件 (0x1302 → 69B 体, 其余 53B), 与服务端结构化校验一致。
+        let tail_bytes = crate::crypto::tls_raw::build_fake_client_tail(handshake.cipher_suite);
         wh.write_all(&tail_bytes).await?;
         wh.flush().await?;
-        // PFS: 与服务端临时公钥 (= server_random) 做 ECDH 得共享秘密。
+        let server_random = handshake.server_random;
+        // PFS: 与服务端临时公钥 (= server_random 的 Elligator2 表示) 做 ECDH 得共享秘密。
         let ecdh = match ephemeral {
-            Some(e) => {
-                // server_random 全 0 = 没捕获到服务端临时公钥 (对端没开 pfs, 或 ServerHello
-                // 模板首条 record 不含完整 random —— 极罕见)。此时 ECDH 用全 0 公钥, master 必与
-                // 服务端失配 → fail-closed 连不上 (不会静默出明文, 但也连不通)。给个明确 warn。
-                if server_random == [0u8; 32] {
-                    tracing::warn!(
-                        "PFS: 未从服务端 ServerHello 捕获到临时公钥 (全 0) —— 对端很可能未开启 pfs, \
-                         或伪装站响应异常。本连接将因会话密钥失配而失败; 请确认服务端 config 也设 \
-                         \"pfs\": true。"
-                    );
-                }
-                Some(e.agree(&server_random)?)
-            }
+            Some(e) => Some(e.agree(&server_random)?),
             None => None,
         };
         Ok(ClientHandshake {
             client_random,
+            server_random,
             ecdh,
         })
     }
@@ -1109,14 +1159,14 @@ impl WarmPool {
                 // 物理 TCP 隧道 → Some(fd) 调 brutal。嵌套 (Mirage-over-X, Boxed) 隧道也在池里但
                 // 无裸 fd → None → 跳过 brutal (其拥塞控制由 underlying 出站的物理层负责)。
                 if let Some(fd) = t.get_raw_fd() {
-                    crate::proxy::brutal::set_brutal_rate(fd, new_rate);
+                    crate::proxy::brutal::set_brutal_rate(fd, new_rate, 0); // 客户端出站不分组
                 }
                 total += 1;
             }
         }
         if let Ok(actives) = self.brutal_state.active_fds.lock() {
             for &fd in actives.iter() {
-                crate::proxy::brutal::set_brutal_rate(fd, new_rate);
+                crate::proxy::brutal::set_brutal_rate(fd, new_rate, 0); // 客户端出站不分组
                 total += 1;
             }
         }
