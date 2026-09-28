@@ -40,8 +40,21 @@ async fn main() {
                 continue;
             }
         };
-        let token = mirage_core::crypto::hello_auth::make_session_token(&pwd);
-        let (ch, _cr) = mirage_core::crypto::tls_raw::build_with_profile(prof, &sni, &token);
+        // v0.15: token 绑定 ClientHello.random —— 先定 random, 再以它为 bind 生成 token。
+        let mut client_random = [0u8; 32];
+        rand::fill(&mut client_random);
+        let token = mirage_core::crypto::hello_auth::make_session_token(&pwd, &client_random);
+        let ch = match prof {
+            mirage_core::crypto::tls_raw::Profile::Chromium => {
+                mirage_core::crypto::tls_raw::build_chromium(sni.as_bytes(), &token, &client_random)
+            }
+            mirage_core::crypto::tls_raw::Profile::Firefox => {
+                mirage_core::crypto::tls_raw::build_firefox(sni.as_bytes(), &token, &client_random)
+            }
+            mirage_core::crypto::tls_raw::Profile::OkHttp => {
+                mirage_core::crypto::tls_raw::build_okhttp(sni.as_bytes(), &token, &client_random)
+            }
+        };
         eprintln!("[{name}] Sending ClientHello (len={})...", ch.len());
         if let Err(e) = sock.write_all(&ch).await {
             eprintln!("[{name}] write error: {e}");

@@ -26,14 +26,19 @@ pub const NONCE_SIZE: usize = 12;
 pub const TAG_SIZE: usize = 16;
 pub const MAX_RECORD_SIZE: usize = 16384;
 
-/// 生成会话主密钥 (Session Master Key)
-fn derive_master(password: &str, salt: &[u8]) -> [u8; 32] {
-    let hk = Hkdf::<Sha256>::new(Some(salt), password.as_bytes());
+pub const SESSION_INFO_V2: &[u8] = b"mirage-session-v2";
+pub const SESSION_INFO_V2_PFS: &[u8] = b"mirage-session-v2-pfs";
+
+/// 生成会话主密钥 (Session Master Key)。
+/// v0.15 断代: 废弃旧的 "pyrealiy-session" 协议常量，salt 改为 client_random || server_random (64 字节)，
+/// 引入双向新鲜度保证，彻底阻断重放与密钥流复用漏洞。
+fn derive_master(password: &str, client_random: &[u8; 32], server_random: &[u8; 32]) -> [u8; 32] {
+    let mut salt = [0u8; 64];
+    salt[..32].copy_from_slice(client_random);
+    salt[32..].copy_from_slice(server_random);
+    let hk = Hkdf::<Sha256>::new(Some(&salt), password.as_bytes());
     let mut okm = [0u8; 32];
-    // ⚠️ 协议冻结常量: "pyrealiy" 是 "pyreality" 的历史拼写错误。**切勿"修正"** ——
-    // 客户端/服务端必须用完全相同的 info 字节才能派生同一密钥, 改了会让新旧版本
-    // 密钥不兼容、静默解密失败。要动必须两端同步 + bump 协议版本。
-    hk.expand(b"pyrealiy-session", &mut okm).unwrap();
+    hk.expand(SESSION_INFO_V2, &mut okm).unwrap();
     okm
 }
 
@@ -74,21 +79,21 @@ pub struct CryptoWriter<W: AsyncWrite + Unpin> {
     cipher_kind: Cipher,
     /// 加密临时区: [chunk_bytes, content_type=0x17] → seal_in_place 后附 tag
     buffer: Vec<u8>,
-    /// 出线组帧区: [5B TLS header, encrypted_buffer]. 单次 write_all 送出,
-    /// 修 alpha.21 之前的两次 write_all + flush 碎片化问题.
-    framed: Vec<u8>,
     is_initiator: bool,
     rng: fastrand::Rng,
     /// TLS record padding 开关 (从全局 cipher::tls_padding_enabled() 取)。
     padding: bool,
-    /// 已发记录数, 用于只填握手后前 PAD_FIRST_N 条 (跨 rekey 不重置, 表流内位置)。
+    /// 已发记录数, 用于只整形握手后前 scheme.len() 条 (跨 rekey 不重置, 表流内位置)。
     records_sent: u32,
+    /// 本连接生效的填充整形方案 (new() 时从全局快照; config 换方案对新连接生效)。
+    scheme: std::sync::Arc<Vec<(usize, usize)>>,
 }
 
-/// TLS padding: 只填握手后前 N 条记录 (GFW ML 主要认前几包长度序列)。
-const PAD_FIRST_N: u32 = 4;
-/// 每条最多追加的零字节数 (均匀随机 [0, PAD_MAX])。
-const PAD_MAX: usize = 256;
+// 填充整形方案 (paddingScheme, 借鉴 AnyTLS / XTLS Vision): 握手后前 N 条记录的目标 plaintext
+// 大小取自对应区间, 把一大条 inner TLS 握手记录切分+填充成一串定长小记录, 抹掉封装 TLS 握手的
+// burst 长度序列 (USENIX Sec 2024 Xue et al. 主检测向量)。第 N 条后回落吞吐分桶、不填充。收端恒剥
+// 尾零 + 逐记录重组, 故纯发端生效、wire 向后兼容。默认方案见 cipher::DEFAULT_PAD_SCHEME; B' 起可由
+// config `tls_padding_scheme` 覆盖 + 热重载 (CryptoWriter::new 快照 cipher::padding_scheme())。
 
 impl<W: AsyncWrite + Unpin> CryptoWriter<W> {
     pub fn new(writer: W, master_key: &[u8; 32], is_initiator: bool) -> Self {
@@ -103,11 +108,11 @@ impl<W: AsyncWrite + Unpin> CryptoWriter<W> {
             cipher_kind: Cipher::ChaCha20Poly1305,
             // 预分配最大容量，杜绝运行时内存分配开销
             buffer: Vec::with_capacity(MAX_RECORD_SIZE + TAG_SIZE),
-            framed: Vec::with_capacity(5 + MAX_RECORD_SIZE + TAG_SIZE),
             is_initiator,
             rng: fastrand::Rng::new(),
             padding: crate::crypto::cipher::tls_padding_enabled(),
             records_sent: 0,
+            scheme: crate::crypto::cipher::padding_scheme(),
         }
     }
 
@@ -118,12 +123,28 @@ impl<W: AsyncWrite + Unpin> CryptoWriter<W> {
     }
 
     /// 切换 AEAD 算法 (cipher agility 协商后)。重派生该 cipher 的密钥 + **nonce 归零**
-    /// (新 (key,algo) 组合, 归零不复用)。只应在协商确定后调一次。
+    /// (新 (key,algo) 组合, 归零不复用)。只应在协商算法改变时调一次。
+    ///
+    /// 防呆: 只允许从 bootstrap (ChaCha20) 切到**别的** cipher。rekey 回 ChaCha20 (含同 cipher) 一律拒绝 ——
+    /// ChaCha20 的 HKDF 后缀为空, 回切会重新派生出 bootstrap 密钥且 nonce 归零 = (key,nonce) 复用。
     pub fn rekey(&mut self, cipher: Cipher) {
+        if cipher == self.cipher_kind || cipher == Cipher::ChaCha20Poly1305 {
+            debug_assert!(
+                false,
+                "rekey refused: identical/bootstrap cipher {:?}",
+                cipher
+            );
+            return;
+        }
         let info: &[u8] = if self.is_initiator { b"c2s" } else { b"s2c" };
         self.cipher = expand_key(&self.master, info, cipher);
         self.cipher_kind = cipher;
         self.nonce = 0;
+    }
+
+    /// 当前发送 nonce。
+    pub fn nonce(&self) -> u64 {
+        self.nonce
     }
 
     /// 当前 cipher (供协商/调试)。
@@ -143,35 +164,38 @@ impl<W: AsyncWrite + Unpin> CryptoWriter<W> {
         let mut offset = 0;
 
         while offset < plaintext.len() {
-            // 分桶随机化帧大小，模拟真实 HTTPS 碎片特征
-            let r: f64 = self.rng.f64();
-            let limit = if r <= 0.50 {
-                16384
-            } else if r <= 0.85 {
-                8192
-            } else {
-                4096
-            };
+            let remaining = plaintext.len() - offset;
+            self.buffer.clear(); // 复用 Buffer, 零分配
 
-            let end = std::cmp::min(offset + limit, plaintext.len());
-            let chunk = &plaintext[offset..end];
-            offset = end;
-
-            // 复用 Buffer，零分配 (Zero-Allocation)
-            self.buffer.clear();
-            self.buffer.extend_from_slice(chunk);
-            self.buffer.push(0x17); // inner content type = application_data
-
-            // TLS 1.3 原生零填充: 握手后前 N 条记录在 content_type 之后追加随机数量的零,
-            // 抹掉包长序列指纹。收端恒剥零 (见 recv_data)。content 自身尾零在 0x17 之前不受影响。
-            if self.padding && self.records_sent < PAD_FIRST_N {
-                // 保证 chunk + 0x17 + pad ≤ MAX_RECORD_SIZE (buffer 此刻 = chunk+1)。
-                let room = MAX_RECORD_SIZE.saturating_sub(self.buffer.len());
-                let cap = PAD_MAX.min(room);
-                if cap > 0 {
-                    let pad = self.rng.usize(0..=cap);
-                    self.buffer.resize(self.buffer.len() + pad, 0);
+            let scheme_idx = self.records_sent as usize;
+            if self.padding && scheme_idx < self.scheme.len() {
+                // paddingScheme 整形: 本记录 plaintext (含 content_type + 零填充) 定长 = rng[lo,hi]。
+                // 取 target-1 字节数据 (留 1B content_type), 不足则纯零填充补满 → 记录大小恒 = target,
+                // 与真实数据量无关, 切断 inner TLS 握手 burst 的长度关联。
+                let (lo, hi) = self.scheme[scheme_idx];
+                let target = self.rng.usize(lo..=hi);
+                let take = target.saturating_sub(1).min(remaining);
+                self.buffer
+                    .extend_from_slice(&plaintext[offset..offset + take]);
+                offset += take;
+                self.buffer.push(0x17); // inner content type = application_data
+                if self.buffer.len() < target {
+                    self.buffer.resize(target, 0); // 零填充补满至 target (收端恒剥尾零)
                 }
+            } else {
+                // 第 N 条之后 (或未开 padding): 吞吐分桶随机化帧大小, 不填充。
+                let r: f64 = self.rng.f64();
+                let limit = if r <= 0.50 {
+                    16384
+                } else if r <= 0.85 {
+                    8192
+                } else {
+                    4096
+                };
+                let end = std::cmp::min(offset + limit, plaintext.len());
+                self.buffer.extend_from_slice(&plaintext[offset..end]);
+                offset = end;
+                self.buffer.push(0x17); // inner content type = application_data
             }
             self.records_sent = self.records_sent.saturating_add(1);
 
@@ -187,17 +211,14 @@ impl<W: AsyncWrite + Unpin> CryptoWriter<W> {
                 .seal_in_place_append_tag(nonce_bytes, aead::Aad::empty(), &mut self.buffer)
                 .map_err(|e| anyhow!("encryption failed: {:?}", e))?;
 
-            // 单次 write_all 送出 [5B header + encrypted body], 避免:
-            // - 分成两次 write_all 每次都在 TCP_NODELAY=on 下变成独立小包
-            // - 帧间 flush 让 kernel 立刻 send 每一小片, 网络碎片化
-            // 老代码 (alpha.21 之前) 每帧 3 次 syscall (header/body/flush),
-            // 新代码 1 次 write_all, syscall 数量 3× 降.
-            let body_len = self.buffer.len() as u16;
-            self.framed.clear();
-            self.framed.extend_from_slice(&[0x17, 0x03, 0x03]);
-            self.framed.extend_from_slice(&body_len.to_be_bytes());
-            self.framed.extend_from_slice(&self.buffer);
-            self.writer.write_all(&self.framed).await?;
+            // header + body 分两次写进内嵌 BufWriter —— BufWriter 把两者合进同一内部缓冲,
+            // flush 时一次 syscall 送出, wire 字节与旧的"先拼 framed 再单次 write_all"完全一致。
+            // 省掉每帧把 sealed body (≤16KB) 拷进 framed 的那次 memcpy (buffer→framed→BufWriter 的双拷贝
+            // 减为单拷贝)。不碎片化: coalescing 由 BufWriter 负责, 非靠调用方预拼。
+            let bl = (self.buffer.len() as u16).to_be_bytes();
+            let header = [0x17, 0x03, 0x03, bl[0], bl[1]];
+            self.writer.write_all(&header).await?;
+            self.writer.write_all(&self.buffer).await?;
         }
         // 显式 flush 保证数据推向 OS 网络层
         self.writer.flush().await?;
@@ -210,6 +231,11 @@ impl<W: AsyncWrite + Unpin> CryptoWriter<W> {
         self.buffer.extend_from_slice(b"\x01\x00"); // Alert: warning(1), close_notify(0)
         self.buffer.push(0x15); // inner content type = alert (21)
 
+        // nonce 用尽守卫 (与 send_data 一致): (key,nonce) 复用会毁 AEAD 安全。2^64 帧物理不可达,
+        // 仅一致性 —— 关闭帧也不例外。
+        if self.nonce == u64::MAX {
+            return Err(anyhow!("AEAD nonce 耗尽, 拒绝复用"));
+        }
         let nonce_bytes = format_nonce(self.nonce);
         self.nonce += 1;
 
@@ -217,13 +243,11 @@ impl<W: AsyncWrite + Unpin> CryptoWriter<W> {
             .seal_in_place_append_tag(nonce_bytes, aead::Aad::empty(), &mut self.buffer)
             .map_err(|e| anyhow!("encryption failed: {:?}", e))?;
 
-        // 单次 write_all + flush (关闭是终态, 必须立即刷到网络层保证对端 EOF)
-        let body_len = self.buffer.len() as u16;
-        self.framed.clear();
-        self.framed.extend_from_slice(&[0x17, 0x03, 0x03]);
-        self.framed.extend_from_slice(&body_len.to_be_bytes());
-        self.framed.extend_from_slice(&self.buffer);
-        self.writer.write_all(&self.framed).await?;
+        // header + body 分写进 BufWriter (合并同 send_data), 随后 flush (关闭是终态, 立即刷保证对端 EOF)。
+        let bl = (self.buffer.len() as u16).to_be_bytes();
+        let header = [0x17, 0x03, 0x03, bl[0], bl[1]];
+        self.writer.write_all(&header).await?;
+        self.writer.write_all(&self.buffer).await?;
         self.writer.flush().await?;
         Ok(())
     }
@@ -240,7 +264,9 @@ pub struct CryptoReader<R> {
     master: [u8; 32],
     cipher_kind: Cipher,
     is_initiator: bool,
-    buffer: Vec<u8>,
+    /// 解密复用缓冲: 构造时一次性分配到最大记录尺寸, 之后每帧 read+open_in_place 都复用它,
+    /// 杜绝 recv 热路径的每帧 alloc + zero-fill (见 recv_data_borrowed)。
+    scratch: Vec<u8>,
 }
 
 impl<R: AsyncRead + Unpin> CryptoReader<R> {
@@ -254,7 +280,8 @@ impl<R: AsyncRead + Unpin> CryptoReader<R> {
             master: *master_key,
             cipher_kind: Cipher::ChaCha20Poly1305,
             is_initiator,
-            buffer: Vec::with_capacity(MAX_RECORD_SIZE + 64),
+            // 一次性预分配到最大记录尺寸; 之后每帧解密复用, 热路径零 alloc/zero-fill。
+            scratch: vec![0u8; MAX_RECORD_SIZE + 1 + TAG_SIZE],
         }
     }
 
@@ -263,11 +290,25 @@ impl<R: AsyncRead + Unpin> CryptoReader<R> {
     }
 
     /// 切换 AEAD 算法 (cipher agility 协商后, 与对端 writer 的 rekey 同步)。重派生密钥 + nonce 归零。
+    /// 防呆同 CryptoWriter::rekey: 拒绝同 cipher 或回切 bootstrap ChaCha20 (会复用 bootstrap 密钥+归零 nonce)。
     pub fn rekey(&mut self, cipher: Cipher) {
+        if cipher == self.cipher_kind || cipher == Cipher::ChaCha20Poly1305 {
+            debug_assert!(
+                false,
+                "rekey refused: identical/bootstrap cipher {:?}",
+                cipher
+            );
+            return;
+        }
         let info: &[u8] = if self.is_initiator { b"s2c" } else { b"c2s" };
         self.cipher = expand_key(&self.master, info, cipher);
         self.cipher_kind = cipher;
         self.nonce = 0;
+    }
+
+    /// 当前接收 nonce。
+    pub fn nonce(&self) -> u64 {
+        self.nonce
     }
 
     /// 当前 cipher (供协商/调试)。
@@ -275,8 +316,10 @@ impl<R: AsyncRead + Unpin> CryptoReader<R> {
         self.cipher_kind
     }
 
-    /// 接收并解密 TLS 1.3 格式的加密数据块 (复用内部 buffer，避免每帧重复堆内存分配)
-    pub async fn recv_data(&mut self) -> Result<Vec<u8>> {
+    /// 接收并解密一帧, 返回**借用**内部复用缓冲的明文切片 (零 alloc / 零 zero-fill / 零 copy-out)。
+    /// 热路径 (纯"读隧道→写目标"的 relay 循环) 用它: 切片借用到下次 recv 前有效, 期间不碰 reader。
+    /// 需 owned 明文 (跨 channel / 需留存) 的调用方用 [`recv_data`] (薄 wrapper, 多一次 to_vec)。
+    pub async fn recv_data_borrowed(&mut self) -> Result<&[u8]> {
         let mut header = [0u8; 5];
         self.reader.read_exact(&mut header).await?;
 
@@ -290,9 +333,8 @@ impl<R: AsyncRead + Unpin> CryptoReader<R> {
             return Err(anyhow!("TLS record exceeds max size"));
         }
 
-        // 复用内部缓冲区读取密文
-        self.buffer.resize(len, 0);
-        self.reader.read_exact(&mut self.buffer).await?;
+        // 读入复用缓冲的前 len 字节 —— scratch 构造时已按最大尺寸分配, 此处无每帧 alloc/zero-fill。
+        self.reader.read_exact(&mut self.scratch[..len]).await?;
 
         if self.nonce == u64::MAX {
             return Err(anyhow!("AEAD nonce 耗尽, 拒绝复用"));
@@ -300,104 +342,97 @@ impl<R: AsyncRead + Unpin> CryptoReader<R> {
         let nonce_bytes = format_nonce(self.nonce);
         self.nonce += 1;
 
-        // In-place 极速解密
+        // In-place 极速解密 (就地在 scratch 上)
         let plaintext_slice = self
             .cipher
-            .open_in_place(nonce_bytes, aead::Aad::empty(), &mut self.buffer)
+            .open_in_place(nonce_bytes, aead::Aad::empty(), &mut self.scratch[..len])
             .map_err(|e| anyhow!("decryption failed: {:?}", e))?;
 
-        let plaintext_len = plaintext_slice.len();
-        self.buffer.truncate(plaintext_len);
-
-        if self.buffer.is_empty() {
-            return Err(anyhow!("empty plaintext received"));
-        }
-
-        // TLS 1.3 原生 padding: 从尾剥零
-        while self.buffer.last() == Some(&0) {
-            self.buffer.pop();
-        }
-        if self.buffer.is_empty() {
-            return Err(anyhow!("padding-only record (no content type)"));
-        }
-        let inner_type = self.buffer.pop().unwrap();
-
-        let payload_len = self.buffer.len() as u64;
-        if self.is_initiator {
-            crate::monitor::add_down(payload_len);
-        } else {
-            crate::monitor::add_up(payload_len);
-        }
-        crate::monitor::mark_tunnel_active();
-
-        if inner_type == 0x17 {
-            Ok(self.buffer.clone())
-        } else if inner_type == 0x15 {
-            Err(anyhow!("peer sent TLS alert (close_notify)"))
-        } else {
-            Err(anyhow!("unknown TLS inner content type {:#x}", inner_type))
-        }
+        // 剥零 + 取 inner_type + monitor 计数, 返回 content 长度 (切片索引, 不搬字节)。
+        let content_len = Self::process_plaintext(self.is_initiator, plaintext_slice)?;
+        Ok(&self.scratch[..content_len])
     }
 
-    /// 接收、解密并直接写入目标 AsyncWrite (复用实例内部 buffer 避免每次循环重复分配堆内存，提升高吞吐流式传输效率)
+    /// MIRAGE_MOBILE: 接收解密一帧并直接写入 `writer` (TUN TCP relay 热路径, 复用内部缓冲零拷贝出)。
+    /// 返回写入的字节数; 对端 close_notify 时返回 `Ok(None)` (正常关闭, 非错误)。
     pub async fn recv_data_to<W: AsyncWrite + Unpin>(
         &mut self,
         writer: &mut W,
     ) -> Result<Option<usize>> {
         let mut header = [0u8; 5];
         self.reader.read_exact(&mut header).await?;
-
         if header[0] != 0x17 || header[1] != 0x03 || header[2] != 0x03 {
             return Err(anyhow!("invalid TLS header magic bytes"));
         }
-
         let len = u16::from_be_bytes([header[3], header[4]]) as usize;
         if len > MAX_RECORD_SIZE + 1 + TAG_SIZE {
             return Err(anyhow!("TLS record exceeds max size"));
         }
-
-        self.buffer.resize(len, 0);
-        self.reader.read_exact(&mut self.buffer).await?;
-
+        self.reader.read_exact(&mut self.scratch[..len]).await?;
         if self.nonce == u64::MAX {
             return Err(anyhow!("AEAD nonce 耗尽, 拒绝复用"));
         }
         let nonce_bytes = format_nonce(self.nonce);
         self.nonce += 1;
-
         let plaintext_slice = self
             .cipher
-            .open_in_place(nonce_bytes, aead::Aad::empty(), &mut self.buffer)
+            .open_in_place(nonce_bytes, aead::Aad::empty(), &mut self.scratch[..len])
             .map_err(|e| anyhow!("decryption failed: {:?}", e))?;
+        match Self::process_plaintext_mobile(self.is_initiator, plaintext_slice)? {
+            Some(n) => {
+                writer.write_all(&self.scratch[..n]).await?;
+                Ok(Some(n))
+            }
+            None => Ok(None),
+        }
+    }
 
-        let plaintext_len = plaintext_slice.len();
-        self.buffer.truncate(plaintext_len);
+    /// 接收并解密一帧, 返回 owned 明文 (兼容既有调用方; 内部走 [`recv_data_borrowed`] + 一次 to_vec)。
+    pub async fn recv_data(&mut self) -> Result<Vec<u8>> {
+        Ok(self.recv_data_borrowed().await?.to_vec())
+    }
 
-        if self.buffer.is_empty() {
+    /// open_in_place 后的明文处理 (剥尾零 + 取 inner_content_type + 流量计数)。
+    /// 返回 content 长度 (0x17); 0x15=close_notify / 其它=非法, 均报错。**逐字节等价于旧 recv_data**。
+    /// 布局: `[content...][inner_type=0x17][zero padding...]` —— 剥尾零停在 0x17, content 自身尾零在其前不误剥。
+    fn process_plaintext(is_initiator: bool, pt: &[u8]) -> Result<usize> {
+        match Self::process_plaintext_mobile(is_initiator, pt)? {
+            Some(n) => Ok(n),
+            None => Err(anyhow!("peer sent TLS alert (close_notify)")),
+        }
+    }
+
+    /// MIRAGE_MOBILE: 同 process_plaintext, 但 close_notify (0x15) 返回 `Ok(None)` 而非报错,
+    /// 供 [`recv_data_to`] 区分"对端正常关闭"与真错误; 并在成功解密后打隧道活跃标记 (移动端网络
+    /// 健康检测用, 见 crate::monitor::mark_tunnel_active)。
+    fn process_plaintext_mobile(is_initiator: bool, pt: &[u8]) -> Result<Option<usize>> {
+        if pt.is_empty() {
             return Err(anyhow!("empty plaintext received"));
         }
-
-        while self.buffer.last() == Some(&0) {
-            self.buffer.pop();
+        // 从尾剥零, end 指向第一个非零字节(inner_type)之后
+        let mut end = pt.len();
+        while end > 0 && pt[end - 1] == 0 {
+            end -= 1;
         }
-        if self.buffer.is_empty() {
+        // 剥零后若空 = 整帧全零, 畸形。
+        if end == 0 {
             return Err(anyhow!("padding-only record (no content type)"));
         }
-        let inner_type = self.buffer.pop().unwrap();
+        let inner_type = pt[end - 1];
+        let content_len = end - 1;
 
-        let payload_len = self.buffer.len() as u64;
-        if self.is_initiator {
+        let payload_len = content_len as u64;
+        if is_initiator {
             crate::monitor::add_down(payload_len);
         } else {
             crate::monitor::add_up(payload_len);
         }
-        crate::monitor::mark_tunnel_active();
+
+        crate::monitor::mark_tunnel_active(); // MIRAGE_MOBILE
 
         if inner_type == 0x17 {
-            writer.write_all(&self.buffer).await?;
-            Ok(Some(self.buffer.len()))
+            Ok(Some(content_len))
         } else if inner_type == 0x15 {
-            // 对端正常 close_notify 优雅关闭
             Ok(None)
         } else {
             Err(anyhow!("unknown TLS inner content type {:#x}", inner_type))
@@ -413,10 +448,11 @@ pub fn create_crypto_pair<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     reader: R,
     writer: W,
     password: &str,
-    salt: &[u8],
+    client_random: &[u8; 32],
+    server_random: &[u8; 32],
     is_initiator: bool,
 ) -> (CryptoReader<R>, CryptoWriter<W>) {
-    let master = derive_master(password, salt);
+    let master = derive_master(password, client_random, server_random);
     (
         CryptoReader::new(reader, &master, is_initiator),
         CryptoWriter::new(writer, &master, is_initiator),
@@ -425,17 +461,24 @@ pub fn create_crypto_pair<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 
 /// 前向保密 (PFS) master: 在口令派生的基础上**混入临时 X25519 ECDH 共享秘密**。
 ///
-/// - salt 仍是 client_random (= 客户端临时公钥, 见 crypto::pfs)。
+/// - salt 同样为 client_random || server_random (64 字节)。
 /// - IKM = password || ecdh —— ecdh 是一次性的, 私钥用完即弃, 故口令泄露也解不了已录流量。
-/// - **新 info label `pyrealiy-session-pfs`**: 刻意与非 PFS 的 `pyrealiy-session` 域分隔 →
-///   pfs 与非 pfs 两端派生出不同密钥, 一端开一端没开会解密失败 (两端必须同开 pfs)。
-fn derive_master_pfs(password: &str, salt: &[u8], ecdh: &[u8; 32]) -> [u8; 32] {
+/// - info label 为独立的 "mirage-session-v2-pfs", 与非 PFS 严格域分隔。
+fn derive_master_pfs(
+    password: &str,
+    client_random: &[u8; 32],
+    server_random: &[u8; 32],
+    ecdh: &[u8; 32],
+) -> [u8; 32] {
+    let mut salt = [0u8; 64];
+    salt[..32].copy_from_slice(client_random);
+    salt[32..].copy_from_slice(server_random);
     let mut ikm = Vec::with_capacity(password.len() + 32);
     ikm.extend_from_slice(password.as_bytes());
     ikm.extend_from_slice(ecdh);
-    let hk = Hkdf::<Sha256>::new(Some(salt), &ikm);
+    let hk = Hkdf::<Sha256>::new(Some(&salt), &ikm);
     let mut okm = [0u8; 32];
-    hk.expand(b"pyrealiy-session-pfs", &mut okm).unwrap();
+    hk.expand(SESSION_INFO_V2_PFS, &mut okm).unwrap();
     okm
 }
 
@@ -444,11 +487,12 @@ pub fn create_crypto_pair_pfs<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     reader: R,
     writer: W,
     password: &str,
-    salt: &[u8],
+    client_random: &[u8; 32],
+    server_random: &[u8; 32],
     ecdh: &[u8; 32],
     is_initiator: bool,
 ) -> (CryptoReader<R>, CryptoWriter<W>) {
-    let master = derive_master_pfs(password, salt, ecdh);
+    let master = derive_master_pfs(password, client_random, server_random, ecdh);
     (
         CryptoReader::new(reader, &master, is_initiator),
         CryptoWriter::new(writer, &master, is_initiator),
@@ -483,9 +527,18 @@ mod rekey_tests {
     async fn roundtrip_rekey_aes() {
         roundtrip(Some(Cipher::Aes256Gcm)).await;
     }
-    #[tokio::test]
-    async fn roundtrip_rekey_chacha() {
-        roundtrip(Some(Cipher::ChaCha20Poly1305)).await;
+    /// 回切 bootstrap ChaCha20 必须被拒 (否则重新派生出 bootstrap 密钥 + nonce 归零 = 复用)。
+    /// 只在 release (无 debug_assert) 下验"拒绝后 cipher/nonce 不变"; debug 下由下方 should_panic 覆盖。
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn rekey_back_to_bootstrap_chacha_refused() {
+        let (a, _b) = duplex(1024);
+        let mut w = CryptoWriter::new(a, &[7u8; 32], true);
+        w.rekey(Cipher::Aes256Gcm);
+        w.nonce = 5;
+        w.rekey(Cipher::ChaCha20Poly1305);
+        assert_eq!(w.cipher(), Cipher::Aes256Gcm, "回切 ChaCha 必须被拒");
+        assert_eq!(w.nonce(), 5, "被拒的 rekey 不得动 nonce");
     }
 
     #[tokio::test]
@@ -542,36 +595,59 @@ mod rekey_tests {
     }
 
     #[test]
-    fn pfs_master_deterministic_and_domain_separated() {
-        let salt = [1u8; 32];
-        let ecdh = [2u8; 32];
-        // 确定性: 同输入同密钥 (两端才能派同一 master)。
+    fn master_deterministic_and_depends_on_both_randoms() {
+        let c_rand = [1u8; 32];
+        let s_rand1 = [2u8; 32];
+        let s_rand2 = [3u8; 32];
+        // 确定性: 同输入同密钥
         assert_eq!(
-            derive_master_pfs("pw", &salt, &ecdh),
-            derive_master_pfs("pw", &salt, &ecdh),
+            derive_master("pw", &c_rand, &s_rand1),
+            derive_master("pw", &c_rand, &s_rand1),
         );
-        // 域分隔: PFS master 必须 != 非 PFS master (label 不同 → 一端开一端没开会解密失败)。
+        // 不同 server_random 必须派生不同 master (新鲜度注入)
         assert_ne!(
-            derive_master_pfs("pw", &salt, &ecdh),
-            derive_master("pw", &salt),
+            derive_master("pw", &c_rand, &s_rand1),
+            derive_master("pw", &c_rand, &s_rand2),
+            "同 client_random 不同 server_random 必须派生不同 master"
+        );
+        // 域分隔: PFS master 必须 != 非 PFS master
+        let ecdh = [4u8; 32];
+        assert_ne!(
+            derive_master_pfs("pw", &c_rand, &s_rand1, &ecdh),
+            derive_master("pw", &c_rand, &s_rand1),
             "PFS master 必须与非 PFS 域分隔",
         );
-        // ecdh 变 → master 变 (ecdh 真的进了派生; 这是 PFS 的根)。
+        // ecdh 变 → master 变
         assert_ne!(
-            derive_master_pfs("pw", &salt, &ecdh),
-            derive_master_pfs("pw", &salt, &[9u8; 32]),
+            derive_master_pfs("pw", &c_rand, &s_rand1, &ecdh),
+            derive_master_pfs("pw", &c_rand, &s_rand1, &[9u8; 32]),
             "不同 ecdh 必须派生不同 master",
         );
     }
 
     #[tokio::test]
-    async fn pfs_pair_roundtrips() {
-        // 两端同 (password, salt, ecdh) → create_crypto_pair_pfs 端到端解密通。
+    async fn non_pfs_pair_roundtrips() {
         let (a, b) = duplex(64 * 1024);
-        let salt = [7u8; 32];
-        let ecdh = [8u8; 32];
-        let (_ra, mut wa) = create_crypto_pair_pfs(tokio::io::empty(), a, "pw", &salt, &ecdh, true);
-        let (mut rb, _wb) = create_crypto_pair_pfs(b, tokio::io::sink(), "pw", &salt, &ecdh, false);
+        let c_rand = [7u8; 32];
+        let s_rand = [8u8; 32];
+        let (_ra, mut wa) = create_crypto_pair(tokio::io::empty(), a, "pw", &c_rand, &s_rand, true);
+        let (mut rb, _wb) = create_crypto_pair(b, tokio::io::sink(), "pw", &c_rand, &s_rand, false);
+        let msg = b"non-pfs v2 payload 0123456789";
+        wa.send_data(msg).await.unwrap();
+        assert_eq!(&rb.recv_data().await.unwrap(), msg);
+    }
+
+    #[tokio::test]
+    async fn pfs_pair_roundtrips() {
+        // 两端同 (password, c_rand, s_rand, ecdh) → create_crypto_pair_pfs 端到端解密通。
+        let (a, b) = duplex(64 * 1024);
+        let c_rand = [7u8; 32];
+        let s_rand = [8u8; 32];
+        let ecdh = [9u8; 32];
+        let (_ra, mut wa) =
+            create_crypto_pair_pfs(tokio::io::empty(), a, "pw", &c_rand, &s_rand, &ecdh, true);
+        let (mut rb, _wb) =
+            create_crypto_pair_pfs(b, tokio::io::sink(), "pw", &c_rand, &s_rand, &ecdh, false);
         let msg = b"pfs payload 0123456789";
         wa.send_data(msg).await.unwrap();
         assert_eq!(&rb.recv_data().await.unwrap(), msg);
@@ -581,16 +657,42 @@ mod rekey_tests {
     async fn pfs_mismatched_ecdh_fails_closed() {
         // 一端 ecdh 不同 (模拟 pfs 失配) → master 不同 → 解密必失败, 不静默出乱数据。
         let (a, b) = duplex(64 * 1024);
-        let salt = [7u8; 32];
-        let (_ra, mut wa) =
-            create_crypto_pair_pfs(tokio::io::empty(), a, "pw", &salt, &[8u8; 32], true);
-        let (mut rb, _wb) =
-            create_crypto_pair_pfs(b, tokio::io::sink(), "pw", &salt, &[9u8; 32], false);
+        let c_rand = [7u8; 32];
+        let s_rand = [8u8; 32];
+        let (_ra, mut wa) = create_crypto_pair_pfs(
+            tokio::io::empty(),
+            a,
+            "pw",
+            &c_rand,
+            &s_rand,
+            &[8u8; 32],
+            true,
+        );
+        let (mut rb, _wb) = create_crypto_pair_pfs(
+            b,
+            tokio::io::sink(),
+            "pw",
+            &c_rand,
+            &s_rand,
+            &[9u8; 32],
+            false,
+        );
         wa.send_data(b"boom").await.unwrap();
         assert!(
             rb.recv_data().await.is_err(),
             "ecdh 不一致必须解密失败 (fail-closed)"
         );
+    }
+
+    #[cfg(debug_assertions)] // 依赖 debug_assert!, release 测试下不触发
+    #[test]
+    #[should_panic(expected = "rekey refused")]
+    fn writer_rekey_identical_cipher_debug_assert() {
+        let (a, _b) = duplex(1024);
+        let master = [7u8; 32];
+        let mut w = CryptoWriter::new(a, &master, true);
+        // 初始为 ChaCha20Poly1305, 传入相同 cipher 触发防呆 debug_assert!
+        w.rekey(Cipher::ChaCha20Poly1305);
     }
 }
 
@@ -618,20 +720,35 @@ mod cipher_bench {
         gbps
     }
 
+    /// crypto **相对吞吐哨兵** (`#[ignore]`, 仅 CI 显式跑: `cargo test --release -- --ignored`)。
+    ///
+    /// 用**比值** (非绝对 GB/s) 当门 —— 两个 cipher 同机同条件跑, 比值抵消大部分绝对计时噪声。
+    /// AES-NI 机器上 AES-256-GCM 实测 ~2× ChaCha20 (cipher agility 选 AES 的前提)。设宽松下限
+    /// 1.3× 抗噪, 但 AES 回归到 ChaCha 水平 (没走 AES-NI / ring 算法配错 / 硬件加速丢失) 会跌破。
+    /// 仅在检测到 AES-NI 时断言 (无 AES-NI 的 arm 等平台只打印不断言, ChaCha 本就更快)。
     #[test]
     #[ignore]
-    fn compare_chacha_vs_aesgcm() {
+    fn aes_chacha_throughput_ratio_sentinel() {
         println!("\n== AEAD seal 吞吐 (16KB record, 本 CPU) ==");
         let cc = bench(&aead::CHACHA20_POLY1305, "ChaCha20-Poly1305");
         let aes = bench(&aead::AES_256_GCM, "AES-256-GCM");
-        println!("  → AES-256-GCM / ChaCha20 = {:.2}x", aes / cc);
+        let ratio = aes / cc;
+        println!("  → AES-256-GCM / ChaCha20 = {ratio:.2}x");
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("aes") && std::is_x86_feature_detected!("pclmulqdq") {
+            assert!(
+                ratio >= 1.3,
+                "AES/ChaCha 吞吐比 {ratio:.2}x < 1.3 哨兵下限 —— AES-NI 机器上 AES 该显著更快; \
+                 cipher agility 选 AES 的前提崩了 (没走 AES-NI / ring 算法配错)?"
+            );
+        }
     }
 }
 
 #[cfg(test)]
 mod padding_tests {
     use super::*;
-    use tokio::io::duplex;
+    use tokio::io::{duplex, AsyncReadExt};
 
     async fn roundtrip_with_padding(payloads: &[&[u8]]) {
         let (a, b) = duplex(256 * 1024);
@@ -679,5 +796,193 @@ mod padding_tests {
         let msg = b"no padding here\x00";
         w.send_data(msg).await.unwrap();
         assert_eq!(&r.recv_data().await.unwrap(), msg);
+    }
+
+    /// 大 payload (跨 paddingScheme 整形段 + 之后吞吐分桶) 必须逐记录重组后精确还原。
+    #[tokio::test]
+    async fn padding_large_payload_reassembles_exact() {
+        let (a, b) = duplex(512 * 1024);
+        let master = [11u8; 32];
+        let mut w = CryptoWriter::new(a, &master, true);
+        let mut r = CryptoReader::new(b, &master, false);
+        w.set_padding(true);
+        let big: Vec<u8> = (0..40_000u32).map(|i| (i * 7 + 3) as u8).collect();
+        w.send_data(&big).await.unwrap();
+        let mut got = Vec::new();
+        while got.len() < big.len() {
+            got.extend_from_slice(&r.recv_data().await.unwrap());
+        }
+        assert_eq!(got, big, "大 payload 逐记录重组必须精确还原");
+    }
+
+    /// paddingScheme: 前 N 条记录被**定长整形** (body ∈ 区间+tag) 且大 payload 被**切分**
+    /// 成小记录 (远小于原始 40KB), 抹掉 inner TLS 握手 burst 长度序列。
+    #[tokio::test]
+    async fn scheme_shapes_first_records_and_splits() {
+        let (a, mut b) = duplex(512 * 1024);
+        let master = [12u8; 32];
+        // 锁只护 "设默认 + new() 快照" (不跨 await); writer 快照后与全局解耦, 故读取阶段可释锁。
+        let mut w = {
+            let _g = crate::crypto::cipher::PAD_TEST_LOCK.lock().unwrap();
+            crate::crypto::cipher::set_padding_scheme(
+                crate::crypto::cipher::DEFAULT_PAD_SCHEME.to_vec(),
+            );
+            CryptoWriter::new(a, &master, true)
+        };
+        w.set_padding(true);
+        let big = vec![0xABu8; 40_000];
+        w.send_data(&big).await.unwrap();
+        // 原始读前 3 条记录头, 断言定长整形 + 切分 (每条 ≤ 区间上限+tag, 远小于 40000)。
+        for (i, &(lo, hi)) in crate::crypto::cipher::DEFAULT_PAD_SCHEME
+            .iter()
+            .take(3)
+            .enumerate()
+        {
+            let mut h = [0u8; 5];
+            b.read_exact(&mut h).await.unwrap();
+            assert_eq!([h[0], h[1], h[2]], [0x17, 0x03, 0x03]);
+            let body = u16::from_be_bytes([h[3], h[4]]) as usize;
+            assert!(
+                body >= lo + TAG_SIZE && body <= hi + TAG_SIZE,
+                "记录 {i} body {body} 不在方案 [{lo},{hi}]+tag 内"
+            );
+            let mut skip = vec![0u8; body];
+            b.read_exact(&mut skip).await.unwrap(); // 跳到下一条头
+        }
+    }
+}
+
+#[cfg(test)]
+mod recv_borrow_tests {
+    use super::*;
+    use tokio::io::duplex;
+
+    // Mirage 是字节流: writer 按分桶/padding 自由切记录 (一次 send_data 可能出多条记录),
+    // 故正确性断言 = **拼接所有 recv 帧 == 拼接所有发送明文**, 而非逐帧 1:1。
+
+    fn concat(msgs: &[&[u8]]) -> Vec<u8> {
+        let mut v = Vec::new();
+        for m in msgs {
+            v.extend_from_slice(m);
+        }
+        v
+    }
+
+    // 借用式读满 total 字节 (每帧复制进 acc 后才 recv 下一帧, 借用不跨调用)。
+    async fn read_borrowed<R: AsyncRead + Unpin>(r: &mut CryptoReader<R>, total: usize) -> Vec<u8> {
+        let mut acc = Vec::new();
+        while acc.len() < total {
+            let f = r.recv_data_borrowed().await.unwrap();
+            acc.extend_from_slice(f);
+        }
+        acc
+    }
+
+    async fn owned_stream<R: AsyncRead + Unpin>(r: &mut CryptoReader<R>, total: usize) -> Vec<u8> {
+        let mut acc = Vec::new();
+        while acc.len() < total {
+            acc.extend_from_slice(&r.recv_data().await.unwrap());
+        }
+        acc
+    }
+
+    async fn borrowed_stream_eq(msgs: &[&[u8]], padding: bool) {
+        let (a, b) = duplex(256 * 1024);
+        let master = [5u8; 32];
+        let mut w = CryptoWriter::new(a, &master, true);
+        w.set_padding(padding); // per-writer 开关, 不碰全局 (避免与并行测试撞全局 padding flag)
+        let mut r = CryptoReader::new(b, &master, false);
+        let want = concat(msgs);
+        for m in msgs {
+            w.send_data(m).await.unwrap();
+        }
+        let got = read_borrowed(&mut r, want.len()).await;
+        assert_eq!(got, want, "borrowed 流内容不符 (padding={padding})");
+    }
+
+    #[tokio::test]
+    async fn borrowed_various_sizes_no_pad() {
+        let big = vec![0xABu8; MAX_RECORD_SIZE + 5000]; // 跨记录 (>16KB, 必拆多条)
+        let msgs: Vec<&[u8]> = vec![
+            b"a",
+            b"hello world",
+            &big,
+            b"x",
+            b"trailing-zero\x00\x00".as_slice(),
+        ];
+        borrowed_stream_eq(&msgs, false).await;
+    }
+
+    #[tokio::test]
+    async fn borrowed_various_sizes_padded() {
+        // padding on → 剥零路径; content 自身尾零不得误剥。
+        let big = vec![0xCDu8; 9000];
+        let msgs: Vec<&[u8]> = vec![
+            b"a",
+            b"payload-1234567890",
+            &big,
+            b"end-with-zero\x00".as_slice(),
+            b"z",
+        ];
+        borrowed_stream_eq(&msgs, true).await;
+    }
+
+    // INV5: 同一 msg 集, owned 流与 borrowed 流逐字节相等 (且都 == 原文拼接)。
+    #[tokio::test]
+    async fn owned_and_borrowed_byte_equal() {
+        let big = vec![0x5Au8; 40000];
+        let msgs: Vec<&[u8]> = vec![b"one", &big, b"three", b"f\x00\x00".as_slice()];
+        let want = concat(&msgs);
+        let m = [8u8; 32];
+
+        let (a1, b1) = duplex(256 * 1024);
+        let mut w1 = CryptoWriter::new(a1, &m, true);
+        w1.set_padding(false); // 显式关 padding, 不读racy全局
+        let mut r1 = CryptoReader::new(b1, &m, false);
+        for x in &msgs {
+            w1.send_data(x).await.unwrap();
+        }
+        let owned = owned_stream(&mut r1, want.len()).await;
+
+        let (a2, b2) = duplex(256 * 1024);
+        let mut w2 = CryptoWriter::new(a2, &m, true);
+        w2.set_padding(false);
+        let mut r2 = CryptoReader::new(b2, &m, false);
+        for x in &msgs {
+            w2.send_data(x).await.unwrap();
+        }
+        let borrowed = read_borrowed(&mut r2, want.len()).await;
+
+        assert_eq!(owned, want, "owned 流 ≠ 原文");
+        assert_eq!(borrowed, owned, "borrowed 流 ≠ owned 流");
+    }
+
+    // 错误行为不变: bad magic 直接测 borrowed。
+    #[tokio::test]
+    async fn borrowed_bad_magic_errors() {
+        let (mut a, b) = duplex(1024);
+        let m = [1u8; 32];
+        let mut r = CryptoReader::new(b, &m, false);
+        a.write_all(&[0x16, 0x03, 0x03, 0x00, 0x05]).await.unwrap(); // 0x16 非 0x17
+        a.write_all(&[0u8; 5]).await.unwrap();
+        assert!(r.recv_data_borrowed().await.is_err(), "bad magic 必报错");
+    }
+
+    // P1 wire 契约: header/body 分写 BufWriter 后, 出线字节必须是 [0x17,0x03,0x03, len_be(2), body...]。
+    // 锁死组帧格式 (防 header 顺序/字节被误改, 独立于收端)。
+    #[tokio::test]
+    async fn frame_wire_contract() {
+        let mut sink: Vec<u8> = Vec::new();
+        let m = [7u8; 32];
+        {
+            let mut w = CryptoWriter::new(&mut sink, &m, true);
+            w.set_padding(false);
+            w.send_data(b"hello").await.unwrap();
+        }
+        assert_eq!(&sink[0..3], &[0x17, 0x03, 0x03], "TLS record header magic");
+        let body_len = u16::from_be_bytes([sink[3], sink[4]]) as usize;
+        assert_eq!(sink.len(), 5 + body_len, "总长 = 5B header + body_len");
+        // 未 padding: body = plaintext(5) + inner_type(1) + tag(16) = 22
+        assert_eq!(body_len, 5 + 1 + TAG_SIZE, "无 padding body 长度");
     }
 }

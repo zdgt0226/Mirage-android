@@ -1,3 +1,4 @@
+use anyhow::Context;
 use serde::Deserialize;
 
 /// 允许路由规则的列表字段既写**单个标量**也写**数组** —— 与 sing-box/Clash 一致。
@@ -38,6 +39,16 @@ pub struct GuiConfig {
     /// 日志/配置、改路由规则。浏览器访问 http://host:9090/?token=XXX 一次即种 cookie。
     #[serde(default)]
     pub token: Option<String>,
+    /// 可选: 统计 (出站/域名/设备/用户/全局总量/屏蔽名单) 持久化文件路径。设了则启动加载 + 周期/退出落盘,
+    /// 屏蔽/解封立即落盘 (0600 权限), 重启后 WebUI 排行/总量/规则不清零。不设 = 纯内存 (重启清零, 向后兼容)。
+    /// install.sh 默认按角色填 /var/lib/mirage-rs/stats_{server,client}.json (同机装两种角色时互不覆盖)。
+    #[serde(default)]
+    pub stats_persist_path: Option<String>,
+    /// 可选: 允许跨源 (CORS) 调用 API 的前端 origin 列表 (如 `["https://ui.example.com"]`)。
+    /// 供 UI 独立成项目后跨 origin 对接。默认空 = 不加 CORS 头 (仅同源, 向后兼容)。`["*"]` = 允许
+    /// 任意 origin (API 用 Bearer 鉴权非 cookie, 故 `*` 不配 credentials, 无 cookie 泄露面)。
+    #[serde(default)]
+    pub cors_origins: Vec<String>,
 }
 
 fn default_gui_listen() -> String {
@@ -65,10 +76,14 @@ pub struct Config {
     pub outbounds: Vec<OutboundConfig>,
     pub routing: RoutingConfig,
     pub advanced_dns: Option<AdvancedDnsConfig>,
-    pub api: Option<ApiConfig>,
     pub tuning: Option<TuningConfig>,
     #[serde(default)]
     pub gui: Option<GuiConfig>,
+    /// 自定义出站 fake-TLS 指纹模板路径 (捕获的真实浏览器 ClientHello, 见 `mirage tls-capture`)。
+    /// 设了则出站握手复刻该模板的 JA3/JA4, 仅替换 SNI(→camouflage_host)/session_id(token)/random(PFS 公钥);
+    /// 不设 = 内置 Chrome/FF/OkHttp 加权轮换。装载失败 (文件缺失/非法) 只 WARN 并落回轮换, 不阻断启动。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_hello_template: Option<String>,
 }
 
 /// 服务端的**上游出口**配置 —— 配了它, Mirage 服务端就不再直连目标, 而是把流量
@@ -80,7 +95,7 @@ pub struct Config {
 ///
 /// ⚠️ **仅作用于 TCP**。SS 的 UDP 是另一套包格式, 当前未实现 —— 配了 SS 上游时
 /// 服务端的 UDP 中继**仍走直连**, 意味着 TCP 与 UDP 的出口 IP 不同。启动时会 WARN。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UpstreamConfig {
     Shadowsocks {
@@ -117,6 +132,46 @@ pub enum UpstreamConfig {
         #[serde(default = "default_wg_udp")]
         udp: UdpPolicy,
     },
+}
+
+impl std::fmt::Debug for UpstreamConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Shadowsocks { server, server_port, password: _, method, udp } => {
+                f.debug_struct("Shadowsocks")
+                    .field("server", server)
+                    .field("server_port", server_port)
+                    .field("password", &"[REDACTED]")
+                    .field("method", method)
+                    .field("udp", udp)
+                    .finish()
+            }
+            Self::Wireguard {
+                private_key: _,
+                peer_public_key,
+                preshared_key,
+                endpoint,
+                address,
+                mtu,
+                persistent_keepalive,
+                dns,
+                udp,
+            } => {
+                let psk_redacted = preshared_key.as_ref().map(|_| "[REDACTED]");
+                f.debug_struct("Wireguard")
+                    .field("private_key", &"[REDACTED]")
+                    .field("peer_public_key", peer_public_key)
+                    .field("preshared_key", &psk_redacted)
+                    .field("endpoint", endpoint)
+                    .field("address", address)
+                    .field("mtu", mtu)
+                    .field("persistent_keepalive", persistent_keepalive)
+                    .field("dns", dns)
+                    .field("udp", udp)
+                    .finish()
+            }
+        }
+    }
 }
 
 /// 配置了上游出口时, 服务端对 UDP 的处理策略。
@@ -159,10 +214,19 @@ fn default_wg_udp() -> UdpPolicy {
 /// **不配 = 不鉴权**(向后兼容既有配置)。但 socks/mixed 入站一旦监听非回环地址而又不配它,
 /// 就是一个**开放代理** —— 任何能连到该端口的人都能白嫖隧道, 流量从你的服务端出去,
 /// 出口 IP 会被滥用/拉黑。故 `lib.rs` 在这种组合下启动时 WARN。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct InboundAuth {
     pub username: String,
     pub password: String,
+}
+
+impl std::fmt::Debug for InboundAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InboundAuth")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl InboundAuth {
@@ -199,7 +263,33 @@ pub enum Transport {
     Quic,
 }
 
-#[derive(Debug, Deserialize)]
+/// 多用户凭据 (mirage_server `users[]`)。每个 user 一个独立 password —— 握手按 token tag 认出
+/// 是哪个用户。password 是秘密, **绝不出 API/日志** (GET /api/users 只返 name + 用量)。
+#[derive(Clone, Deserialize, serde::Serialize)]
+pub struct MirageUser {
+    pub name: String,
+    pub password: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_kbps: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_gb: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_reset_day: Option<u8>,
+}
+
+impl std::fmt::Debug for MirageUser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MirageUser")
+            .field("name", &self.name)
+            .field("password", &"[REDACTED]")
+            .field("rate_limit_kbps", &self.rate_limit_kbps)
+            .field("quota_gb", &self.quota_gb)
+            .field("quota_reset_day", &self.quota_reset_day)
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InboundConfig {
     Socks {
@@ -231,6 +321,12 @@ pub enum InboundConfig {
         listen: String,
         port: u16,
         password: String,
+        /// 多用户凭据 (P1)。每个 user 一个独立 password, 握手时按 tag 认出是哪个用户 → per-user
+        /// 密钥隔离 + 统计。**协议零改动**: token 格式不变, 客户端仍只配自己那个 password。
+        /// 主 `password` 恒为凭据 "default" (向后兼容); users 追加。不配 = 单用户 (原行为)。
+        /// name 非空且唯一, password 非空 (校验见 check)。
+        #[serde(default)]
+        users: Vec<MirageUser>,
         camouflage_host: Option<String>,
         // 服务端 → 客户端 (下载) 方向的 brutal 速率上限, 单位 Mbps.
         // 不设 (或 = 0) 则不启用 brutal, 走系统默认 CC (BBR/Cubic).
@@ -266,6 +362,14 @@ pub enum InboundConfig {
         /// 一致**。默认关。仅 transport=quic。见 docs §7。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quic_obfs: Option<String>,
+        /// QUIC 服务端私钥路径 (PEM 格式, 默认 "quic_key.pem")。存在则读取, 不存在则生成并以 0600 保存。仅 transport=quic。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quic_key_path: Option<String>,
+        /// 是否允许服务端直连回环与链路本地目标 (默认 false, 拒绝 SSRF)。
+        /// 为 true 时放开回环 (127.0.0.0/8, ::1)、链路本地 (169.254.0.0/16, fe80::/10) 及云元数据地址。
+        /// ⚠️ 安全风险警告: 开启后认证客户端可直连本机管理 API (如 :9090) 或偷取云元数据凭据。
+        #[serde(default)]
+        allow_local_targets: bool,
     },
     Mixed {
         tag: String,
@@ -299,7 +403,94 @@ pub enum InboundConfig {
     },
 }
 
-#[derive(Debug, Deserialize)]
+impl std::fmt::Debug for InboundConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Socks { tag, listen, port, auth } => {
+                f.debug_struct("Socks")
+                    .field("tag", tag)
+                    .field("listen", listen)
+                    .field("port", port)
+                    .field("auth", auth)
+                    .finish()
+            }
+            Self::Shadowsocks { tag, listen, port, method, password: _ } => {
+                f.debug_struct("Shadowsocks")
+                    .field("tag", tag)
+                    .field("listen", listen)
+                    .field("port", port)
+                    .field("method", method)
+                    .field("password", &"[REDACTED]")
+                    .finish()
+            }
+            Self::Dns { tag, listen, port } => {
+                f.debug_struct("Dns")
+                    .field("tag", tag)
+                    .field("listen", listen)
+                    .field("port", port)
+                    .finish()
+            }
+            Self::MirageServer {
+                tag,
+                listen,
+                port,
+                password: _,
+                users,
+                camouflage_host,
+                brutal_rate_mbps,
+                auth_ts_tolerance_secs,
+                upstream,
+                pfs,
+                transport,
+                quic_window_mb,
+                quic_erasure_cc,
+                quic_obfs,
+                quic_key_path,
+                allow_local_targets,
+            } => {
+                let obfs_redacted = quic_obfs.as_ref().map(|_| "[REDACTED]");
+                f.debug_struct("MirageServer")
+                    .field("tag", tag)
+                    .field("listen", listen)
+                    .field("port", port)
+                    .field("password", &"[REDACTED]")
+                    .field("users", users)
+                    .field("camouflage_host", camouflage_host)
+                    .field("brutal_rate_mbps", brutal_rate_mbps)
+                    .field("auth_ts_tolerance_secs", auth_ts_tolerance_secs)
+                    .field("upstream", upstream)
+                    .field("pfs", pfs)
+                    .field("transport", transport)
+                    .field("quic_window_mb", quic_window_mb)
+                    .field("quic_erasure_cc", quic_erasure_cc)
+                    .field("quic_obfs", &obfs_redacted)
+                    .field("quic_key_path", quic_key_path)
+                    .field("allow_local_targets", allow_local_targets)
+                    .finish()
+            }
+            Self::Mixed { tag, listen, port, auth } => {
+                f.debug_struct("Mixed")
+                    .field("tag", tag)
+                    .field("listen", listen)
+                    .field("port", port)
+                    .field("auth", auth)
+                    .finish()
+            }
+            Self::Transparent { tag, listen, port, interface, proxy_local, dns_hijack } => {
+                f.debug_struct("Transparent")
+                    .field("tag", tag)
+                    .field("listen", listen)
+                    .field("port", port)
+                    .field("interface", interface)
+                    .field("proxy_local", proxy_local)
+                    .field("dns_hijack", dns_hijack)
+                    .finish()
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutboundConfig {
     #[serde(alias = "pyreality")]
@@ -350,6 +541,9 @@ pub enum OutboundConfig {
         /// (客户端出站 + 服务端入站同填)。默认关。仅 transport=quic。见 docs §7。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quic_obfs: Option<String>,
+        /// QUIC 服务端证书 SPKI 指纹 (43 字符 base64url SHA-256 SPKI 指纹)。transport=quic 时必填。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quic_pin: Option<String>,
     },
     /// Shadowsocks 出站: 选中流量经 SS 加密发往 SS 服务器。配 `underlying` 即 SS-over-X
     /// (如 underlying=mirage → SS 连接骑 Mirage 隧道 = 类 shadow-tls+ss 嵌套)。
@@ -438,6 +632,124 @@ pub enum OutboundConfig {
         #[serde(default = "default_urltest_interval")]
         interval: u64,
     },
+}
+
+impl std::fmt::Debug for OutboundConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Mirage {
+                tag,
+                server,
+                server_port,
+                password: _,
+                camouflage_host,
+                pool_size,
+                brutal_rate_mbps,
+                brutal_base_rtt_ms,
+                underlying,
+                pfs,
+                transport,
+                quic_window_mb,
+                quic_erasure_cc,
+                quic_sni,
+                quic_low_src_port,
+                quic_pre_packet,
+                quic_obfs,
+                quic_pin,
+            } => {
+                let obfs_redacted = quic_obfs.as_ref().map(|_| "[REDACTED]");
+                f.debug_struct("Mirage")
+                    .field("tag", tag)
+                    .field("server", server)
+                    .field("server_port", server_port)
+                    .field("password", &"[REDACTED]")
+                    .field("camouflage_host", camouflage_host)
+                    .field("pool_size", pool_size)
+                    .field("brutal_rate_mbps", brutal_rate_mbps)
+                    .field("brutal_base_rtt_ms", brutal_base_rtt_ms)
+                    .field("underlying", underlying)
+                    .field("pfs", pfs)
+                    .field("transport", transport)
+                    .field("quic_window_mb", quic_window_mb)
+                    .field("quic_erasure_cc", quic_erasure_cc)
+                    .field("quic_sni", quic_sni)
+                    .field("quic_low_src_port", quic_low_src_port)
+                    .field("quic_pre_packet", quic_pre_packet)
+                    .field("quic_obfs", &obfs_redacted)
+                    .field("quic_pin", quic_pin)
+                    .finish()
+            }
+            Self::Shadowsocks { tag, server, server_port, method, password: _, underlying } => {
+                f.debug_struct("Shadowsocks")
+                    .field("tag", tag)
+                    .field("server", server)
+                    .field("server_port", server_port)
+                    .field("method", method)
+                    .field("password", &"[REDACTED]")
+                    .field("underlying", underlying)
+                    .finish()
+            }
+            Self::Wireguard {
+                tag,
+                private_key: _,
+                peer_public_key,
+                preshared_key,
+                endpoint,
+                address,
+                mtu,
+                persistent_keepalive,
+                dns,
+            } => {
+                let psk_redacted = preshared_key.as_ref().map(|_| "[REDACTED]");
+                f.debug_struct("Wireguard")
+                    .field("tag", tag)
+                    .field("private_key", &"[REDACTED]")
+                    .field("peer_public_key", peer_public_key)
+                    .field("preshared_key", &psk_redacted)
+                    .field("endpoint", endpoint)
+                    .field("address", address)
+                    .field("mtu", mtu)
+                    .field("persistent_keepalive", persistent_keepalive)
+                    .field("dns", dns)
+                    .finish()
+            }
+            Self::Direct { tag } => f.debug_struct("Direct").field("tag", tag).finish(),
+            Self::Block { tag } => f.debug_struct("Block").field("tag", tag).finish(),
+            Self::Urltest { tag, outbounds, url, interval, tolerance, test_type } => {
+                f.debug_struct("Urltest")
+                    .field("tag", tag)
+                    .field("outbounds", outbounds)
+                    .field("url", url)
+                    .field("interval", interval)
+                    .field("tolerance", tolerance)
+                    .field("test_type", test_type)
+                    .finish()
+            }
+            Self::Fallback { tag, outbounds, url, interval } => {
+                f.debug_struct("Fallback")
+                    .field("tag", tag)
+                    .field("outbounds", outbounds)
+                    .field("url", url)
+                    .field("interval", interval)
+                    .finish()
+            }
+            Self::Selector { tag, outbounds } => {
+                f.debug_struct("Selector")
+                    .field("tag", tag)
+                    .field("outbounds", outbounds)
+                    .finish()
+            }
+            Self::LoadBalance { tag, outbounds, strategy, url, interval } => {
+                f.debug_struct("LoadBalance")
+                    .field("tag", tag)
+                    .field("outbounds", outbounds)
+                    .field("strategy", strategy)
+                    .field("url", url)
+                    .field("interval", interval)
+                    .finish()
+            }
+        }
+    }
 }
 
 fn default_probe_url() -> String {
@@ -548,6 +860,11 @@ pub struct AdvancedDnsConfig {
     pub cached_remote_host: Option<String>,
     #[serde(skip)]
     pub cached_remote_port: Option<u16>,
+    /// 全部 remote/proxy resolver (host, port), 供隧道-DNS **故障转移** (按序试, 失败换下一个)。
+    /// cached_remote_host/port = 其首个 (兼容 + 附带用途)。多 remote 只做 failover 不并发 race
+    /// (隧道路径 racing 每个各耗一条 WarmPool 隧道, 太贵)。
+    #[serde(skip)]
+    pub cached_remote_servers: Vec<(String, u16)>,
     /// 静态 DNS 解析 (类 dnsmasq `address=/domain/ip`): 域名 → 一个或多个 IP。
     /// 命中即直接回 A/AAAA, **绕过 fake-IP / 路由 / 上游** —— 该域名完全由本地接管。
     /// 匹配语义: 精确 + 子域 (`test.local` 同时命中 `api.test.local`), 最长键优先。
@@ -557,6 +874,14 @@ pub struct AdvancedDnsConfig {
     /// static_hosts 预处理结果: (小写域名, IP 列表), 按域名长度降序 (最长/最具体优先)。
     #[serde(skip)]
     pub cached_static: Vec<(String, Vec<std::net::IpAddr>)>,
+    /// DNS 规则层 (有序首匹配): 按域名 (DomainRuleSet) 选 DNS 出口 (resolve cn/remote) /
+    /// 返静态 IP (host) / 空答复 (reject)。在 static_hosts 之后、fakeip.exclude/routing 之前。
+    /// **与 fake-ip 无关**: fakeip 关时也生效 (纯 DNS 选路/答复)。不匹配则落回现有逻辑。
+    #[serde(default)]
+    pub rules: Vec<DnsRuleConfig>,
+    /// rules 预编译结果 (matcher + action + server + host_ips)。
+    #[serde(skip)]
+    pub cached_dns_rules: Vec<CompiledDnsRule>,
     /// DNS 应答 IP 版本策略 (见 IpStrategy)。默认 dual (A/AAAA 都应答)。
     #[serde(default)]
     pub ip_strategy: IpStrategy,
@@ -746,6 +1071,92 @@ pub struct FakeIpConfig {
     /// 不设 = 纯内存 (向后兼容)。install.sh 网关模式默认填 /var/lib/mirage-rs/fakeip.cache。
     #[serde(default)]
     pub persist_path: Option<String>,
+    /// fake-ip 排除域名规则。fake-ip 开启后默认接管全部代理域名解析; 命中的域名**不分配 fake-IP**,
+    /// DNS 改走真实解析 (cn/direct resolver) → 客户端直连真实 IP, 绕过代理隧道。用于把某些域名/服务
+    /// 排除在代理之外 (如内网服务、想直连的 CDN、fake-IP 下行为异常的站点)。
+    ///
+    /// 结构化格式, 字段命名对齐 `routing.rules` (见 [`DomainRuleSet`]):
+    /// `domain` (精确) / `domain_suffix` (根域+子域) / `domain_keyword` (子串) / `domain_regex` (正则)。
+    #[serde(default)]
+    pub exclude: DomainRuleSet,
+}
+
+/// DNS 规则动作 (advanced_dns.rules)。
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DnsRuleAction {
+    /// 选 DNS 出口解析 (真实 IP): 由 `server` 决定本地 cn 还是远端隧道。与 fake-ip 无关。
+    Resolve,
+    /// host 模式: 直接返回 `ip` 里的静态 IP (per-rule, 类 static_hosts 但走有序规则)。
+    Host,
+    /// 空答复 NODATA (广告拦截式, 不返 IP 也不报错)。
+    Reject,
+}
+
+/// DNS 解析出口选择 (advanced_dns.rules 的 `server`)。
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DnsServer {
+    /// 本地 cn/direct 上游 (114/223 等), 明文直查。
+    #[default]
+    Cn,
+    /// 远端 DNS 经隧道查 (default 出站的 Mirage 池, 防污染)。
+    Remote,
+}
+
+/// 一条 DNS 规则 (config `advanced_dns.rules[]`)。域名维度 flatten 复用 [`DomainRuleSet`]
+/// (与 routing.rules 同字段: domain/domain_suffix/domain_keyword/domain_regex)。
+#[derive(Debug, Deserialize)]
+pub struct DnsRuleConfig {
+    #[serde(flatten)]
+    pub domains: DomainRuleSet,
+    pub action: DnsRuleAction,
+    /// action=resolve 时选出口 (默认 cn)。
+    #[serde(default)]
+    pub server: DnsServer,
+    /// action=host 时返回的静态 IP (单值或数组, 混 v4/v6)。
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub ip: Vec<String>,
+}
+
+/// rules 预编译结果 (运行时)。
+#[derive(Debug)]
+pub struct CompiledDnsRule {
+    pub matcher: crate::dns::domain_match::DomainMatcher,
+    pub action: DnsRuleAction,
+    pub server: DnsServer,
+    pub host_ips: Vec<std::net::IpAddr>,
+}
+
+/// 一组域名匹配规则 (结构化)。字段命名对齐 `routing.rules` 的域名维度, `domain` 取 sing-box 风格
+/// 精确整域 (非其他工具少见的 `domain_full`)。运行时编成 [`crate::dns::domain_match::DomainMatcher`]。
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct DomainRuleSet {
+    /// 精确整域 (如 `router.lan` 只匹配 `router.lan`, 不含子域)。单值或数组。
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub domain: Vec<String>,
+    /// 后缀: 根域 + 子域 (如 `apple.com` 匹配 `apple.com` 与 `*.apple.com`)。
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub domain_suffix: Vec<String>,
+    /// 子串包含 (域名任意位置含该关键字)。
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub domain_keyword: Vec<String>,
+    /// 正则整串匹配 (忽略大小写; 非法项跳过并 WARN)。
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub domain_regex: Vec<String>,
+}
+
+impl DomainRuleSet {
+    pub fn is_empty(&self) -> bool {
+        self.domain.is_empty()
+            && self.domain_suffix.is_empty()
+            && self.domain_keyword.is_empty()
+            && self.domain_regex.is_empty()
+    }
+    /// 规则总条数 (供日志)。
+    pub fn len(&self) -> usize {
+        self.domain.len() + self.domain_suffix.len() + self.domain_keyword.len() + self.domain_regex.len()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -753,18 +1164,6 @@ pub struct DnsCacheConfig {
     pub enabled: bool,
     #[serde(default = "default_dns_cache_size")]
     pub max_entries: usize,
-}
-
-/// ⚠️ **已废弃且从未生效** —— 历史遗留 stub: 本结构解析后**从不被任何代码使用**,
-/// `secret` **不提供任何鉴权**。设了它 = 什么都没设(安全 footgun)。
-/// **API 鉴权请用 `gui.token`**(见 api/mod.rs::auth_mw)。
-/// 字段保留仅为在启动时**检测并警告**设置过它的用户, 未来版本移除。
-#[derive(Debug, Deserialize)]
-pub struct ApiConfig {
-    #[serde(default)]
-    pub listen: String,
-    #[serde(default)]
-    pub secret: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -813,6 +1212,12 @@ pub struct TuningConfig {
     /// content_type 解析失败断连) —— 与 cipher_agility 同类约束。ClientHello 不受影响。
     #[serde(default)]
     pub tls_padding: bool,
+    /// 可选自定义填充整形方案 (仅在 `tls_padding` 开启时生效)。格式: `;` 分隔的 `lo-hi` 区间, 每项
+    /// 对应握手后第 i 条记录的目标 plaintext 大小 (含 content_type + 零填充), 如 `64-256;256-800;100-1400`。
+    /// 不设 = 内置默认方案。改它 + 热重载即可**换填充特征而不重编** (当默认方案被指纹化时); 两端各自
+    /// 从 config 读, 发端-only 生效、无需协议协商。非法/越界项整串忽略并回落默认 (仅 WARN)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_padding_scheme: Option<String>,
     /// 客户端版本识别 (默认 false)。两端同开时, 客户端在握手后于加密信道内上报自身版本, 服务端
     /// WebUI「连接的客户端」显示各客户端版本 (便于运维知道谁该升级)。**两端必须同开** —— 与
     /// cipher_agility/tls_padding 同类约束 (单边开会多发/漏读一帧致该连接失败)。ClientHello 一字
@@ -915,8 +1320,10 @@ fn default_auth_ts_tolerance() -> u64 {
 impl Config {
     /// Loads configuration from a JSON file.
     pub fn load_from_file(path: &str) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let config: Config = serde_json::from_str(&content)?;
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("读取配置文件失败: {path}"))?;
+        let config: Config = serde_json::from_str(&content)
+            .with_context(|| format!("解析配置 JSON 失败: {path}"))?;
         Ok(config)
     }
 
@@ -939,9 +1346,44 @@ impl Config {
         Ok((config, issues))
     }
 
+    /// 校验用户硬错误 (空名、重名/撞保留名 default、空口令、重复口令)。
+    /// 仅返回必须拒写的硬错误, 不包含跨入站限额不一致等普通 issue。
+    pub fn user_hard_errors(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+        for ib in &self.inbounds {
+            if let InboundConfig::MirageServer { tag, password, users, .. } = ib {
+                let mut seen_names = std::collections::HashSet::new();
+                seen_names.insert("default".to_string());
+                let mut seen_passwords: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+                if !password.is_empty() {
+                    seen_passwords.insert(password.as_str(), "default");
+                }
+                for u in users {
+                    if u.name.trim().is_empty() {
+                        issues.push(format!("mirage_server 入站 `{tag}` 有 user 的 name 为空"));
+                    } else if !seen_names.insert(u.name.clone()) {
+                        issues.push(format!("mirage_server 入站 `{tag}` 的 user name `{}` 重复 (或撞保留名 default)", u.name));
+                    }
+                    if u.password.is_empty() {
+                        issues.push(format!("mirage_server 入站 `{tag}` 的 user `{}` password 为空", u.name));
+                    } else if let Some(prev) = seen_passwords.get(u.password.as_str()) {
+                        issues.push(format!(
+                            "mirage_server 入站 `{tag}` 的 user `{}` password 与 `{prev}` 重复 (口令相同会导致鉴权串号)",
+                            u.name
+                        ));
+                    } else {
+                        seen_passwords.insert(u.password.as_str(), u.name.as_str());
+                    }
+                }
+            }
+        }
+        issues
+    }
+
     /// 语义校验: 语法没问题但逻辑不成立的配置。
     pub fn semantic_issues(&self) -> Vec<String> {
         let mut issues = Vec::new();
+        issues.extend(self.user_hard_errors());
 
         // 收集全部 outbound tag, 顺带查重
         let mut tags: Vec<&str> = Vec::new();
@@ -968,6 +1410,12 @@ impl Config {
         // 这些错配的共同特征是**不会让进程起不来, 而是让每条连接静默失败** —— 服务看着健康,
         // 却什么都代理不了, 错误信息也指不到根因。所以必须在 check/启动阶段变成明确报错。
         for ob in &self.outbounds {
+            // pool_size=0 → 暖池永不建货, pool.get() 恒 10s 超时, 每条连接静默失败 (服务看着在跑, 全连不上)。
+            if let OutboundConfig::Mirage { tag, pool_size, .. } = ob {
+                if *pool_size == 0 {
+                    issues.push(format!("outbound `{tag}`: pool_size 不能为 0 (暖池会永远建不出连接, 全部代理静默超时)"));
+                }
+            }
             if let OutboundConfig::Wireguard {
                 tag, private_key, peer_public_key, preshared_key, endpoint, address, mtu, dns, ..
             } = ob
@@ -1114,7 +1562,7 @@ impl Config {
 
         // Mirage 出站的必填项非空
         for ob in &self.outbounds {
-            if let OutboundConfig::Mirage { tag, server, server_port, password, underlying, transport, quic_window_mb, .. } = ob {
+            if let OutboundConfig::Mirage { tag, server, server_port, password, underlying, transport, quic_window_mb, quic_pin, .. } = ob {
                 if server.trim().is_empty() {
                     issues.push(format!("mirage 出站 `{tag}` 的 server 为空"));
                 }
@@ -1124,6 +1572,13 @@ impl Config {
                     issues.push(format!("mirage 出站 `{tag}` 配了 transport=quic, 但本二进制未以 `--features quic` 编译"));
                 }
                 if *transport == Transport::Quic {
+                    match quic_pin {
+                        None => issues.push(format!("mirage 出站 `{tag}` 配了 transport=quic 但未配置 quic_pin (服务端证书 SPKI 指纹, 必填)")),
+                        Some(pin) if !is_valid_quic_pin(pin) => issues.push(format!(
+                            "mirage 出站 `{tag}` 的 quic_pin `{pin}` 格式非法 (须为 43 字符 base64url SHA-256 SPKI 指纹)"
+                        )),
+                        _ => {}
+                    }
                     if let Some(mb) = quic_window_mb {
                         if *mb == 0 || *mb > 256 {
                             issues.push(format!("mirage 出站 `{tag}` 的 quic_window_mb={mb} 不合理 (荐 2~64; 重排序线路用 2, 干净长肥用 16-64)"));
@@ -1166,16 +1621,19 @@ impl Config {
             }
         }
 
-        // 入站 tag 查重 + 端口 0 + 服务端空密码
+        // 入站 tag 查重 + 端口 0 + 监听冲突 + 服务端空密码
         let mut in_tags: Vec<&str> = Vec::new();
+        let mut in_binds: Vec<(&str, u16)> = Vec::new();
         for ib in &self.inbounds {
-            let (tag, port) = match ib {
-                InboundConfig::Socks { tag, port, .. }
-                | InboundConfig::Dns { tag, port, .. }
-                | InboundConfig::MirageServer { tag, port, .. }
-                | InboundConfig::Mixed { tag, port, .. }
-                | InboundConfig::Shadowsocks { tag, port, .. }
-                | InboundConfig::Transparent { tag, port, .. } => (tag.as_str(), *port),
+            let (tag, listen, port) = match ib {
+                InboundConfig::Socks { tag, listen, port, .. }
+                | InboundConfig::Dns { tag, listen, port, .. }
+                | InboundConfig::MirageServer { tag, listen, port, .. }
+                | InboundConfig::Mixed { tag, listen, port, .. }
+                | InboundConfig::Shadowsocks { tag, listen, port, .. }
+                | InboundConfig::Transparent { tag, listen, port, .. } => {
+                    (tag.as_str(), listen.as_str(), *port)
+                }
             };
             if in_tags.contains(&tag) {
                 issues.push(format!("inbound tag `{tag}` 重复定义"));
@@ -1183,6 +1641,18 @@ impl Config {
             in_tags.push(tag);
             if port == 0 {
                 issues.push(format!("inbound `{tag}` 的 port 为 0"));
+            }
+            // 监听地址:端口冲突 —— 两入站绑同一 listen:port, 启动时第二个 bind 会
+            // "address already in use", 而配置层此前零提示。精确匹配 (0.0.0.0 与
+            // 127.0.0.1 的通配重叠不在此拦, 那要按接口判, 非本 check 目标)。
+            if port != 0 {
+                if in_binds.contains(&(listen, port)) {
+                    issues.push(format!(
+                        "inbound `{tag}` 的监听 `{listen}:{port}` 与前一个入站冲突 \
+                         (启动时会 bind 失败: address already in use)"
+                    ));
+                }
+                in_binds.push((listen, port));
             }
             if let InboundConfig::Shadowsocks { tag, method, password, .. } = ib {
                 if password.is_empty() {
@@ -1197,9 +1667,31 @@ impl Config {
                     Err(e) => issues.push(format!("shadowsocks 入站 `{tag}` 的 method 非法: {e}")),
                 }
             }
-            if let InboundConfig::MirageServer { tag, password, upstream, transport, .. } = ib {
+            if let InboundConfig::MirageServer { tag, password, users, upstream, transport, auth_ts_tolerance_secs, .. } = ib {
                 if password.is_empty() {
                     issues.push(format!("mirage_server 入站 `{tag}` 的 password 为空 (任何人都能连)"));
+                }
+                for u in users {
+                    if let Some(kbps) = u.rate_limit_kbps {
+                        if kbps == 0 {
+                            issues.push(format!("mirage_server 入站 `{tag}` 的 user `{}` rate_limit_kbps 必须大于 0", u.name));
+                        }
+                    }
+                    if let Some(quota) = u.quota_gb {
+                        if !quota.is_finite() || quota <= 0.0 {
+                            issues.push(format!("mirage_server 入站 `{tag}` 的 user `{}` quota_gb 必须为有效正数 (>0)", u.name));
+                        }
+                    }
+                    if let Some(day) = u.quota_reset_day {
+                        if !(1..=28).contains(&day) {
+                            issues.push(format!("mirage_server 入站 `{tag}` 的 user `{}` quota_reset_day 必须在 1..=28 范围内", u.name));
+                        }
+                    }
+                }
+                // 容忍窗口直接推导 replay 去重桶数, 极大值会放大内存。3600s (1h) 已远超时钟漂移
+                // 与 TIME_SYNC bootstrap 所需, 上不封顶等于给配置错留个内存放大口。
+                if *auth_ts_tolerance_secs > 3600 {
+                    issues.push(format!("mirage_server 入站 `{tag}` 的 auth_ts_tolerance_secs={auth_ts_tolerance_secs} 过大 (上限 3600s; 越大 replay 去重桶越占内存)"));
                 }
                 #[cfg(not(feature = "quic"))]
                 if *transport == Transport::Quic {
@@ -1288,6 +1780,33 @@ impl Config {
             }
         }
 
+        // 跨入站同名用户限额一致性: collect_users 跨入站同名用户以先出现者为准,
+        // 后续入站对同名用户配置的不同限额会被静默忽略。在此检查并提示。
+        let mut global_users: std::collections::HashMap<&str, (&str, &MirageUser)> = std::collections::HashMap::new();
+        for ib in &self.inbounds {
+            if let InboundConfig::MirageServer { tag, users, .. } = ib {
+                for u in users {
+                    if let Some((prev_tag, prev_u)) = global_users.get(u.name.as_str()) {
+                        let diff_kbps = prev_u.rate_limit_kbps != u.rate_limit_kbps;
+                        let diff_reset = prev_u.quota_reset_day != u.quota_reset_day;
+                        let diff_quota = match (prev_u.quota_gb, u.quota_gb) {
+                            (Some(a), Some(b)) => (a - b).abs() > f64::EPSILON,
+                            (None, None) => false,
+                            _ => true,
+                        };
+                        if diff_kbps || diff_reset || diff_quota {
+                            issues.push(format!(
+                                "mirage_server 入站 `{tag}` 的 user `{}` 限额配置与入站 `{prev_tag}` 不一致 (全局注册表以先出现者为准, 后续配置被忽略)",
+                                u.name
+                            ));
+                        }
+                    } else {
+                        global_users.insert(u.name.as_str(), (tag.as_str(), u));
+                    }
+                }
+            }
+        }
+
         // DNS 上游地址校验: 直连/国内上游 (tag=direct/cn) 运行时要求解析成 IP —— 解不出会被
         // **静默跳过**回落公共 DNS。把这个运行期沉默失败前移到 check, 明确报错而非默默 fallback。
         // 支持 tcp://|udp:// 前缀 (剥后再验)。remote/proxy/default 上游允许域名, 不在此严格验 IP。
@@ -1306,6 +1825,20 @@ impl Config {
         }
 
         issues
+    }
+}
+
+/// 校验 quic_pin 是否为合法的 43 位 base64url (无填充) SHA-256 SPKI 指纹
+pub fn is_valid_quic_pin(pin: &str) -> bool {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+
+    if pin.len() != 43 {
+        return false;
+    }
+    match URL_SAFE_NO_PAD.decode(pin.as_bytes()) {
+        Ok(bytes) => bytes.len() == 32,
+        Err(_) => false,
     }
 }
 
@@ -1639,6 +2172,29 @@ mod validation_tests {
     }
 
     #[test]
+    fn duplicate_listen_bind_caught() {
+        let mut v = base();
+        v["inbounds"] = serde_json::json!([
+            { "type": "mixed",  "tag": "a", "listen": "0.0.0.0", "port": 1080 },
+            { "type": "socks",  "tag": "b", "listen": "0.0.0.0", "port": 1080 }
+        ]);
+        let is = issues_of(&v);
+        assert!(has(&is, "0.0.0.0:1080"), "同 listen:port 应报冲突, 实际: {is:?}");
+        assert!(has(&is, "bind 失败"), "应点明 bind 失败, 实际: {is:?}");
+    }
+
+    #[test]
+    fn distinct_listen_bind_ok() {
+        // 同端口不同 listen 地址 (精确匹配, 不误报) —— 通配重叠不在此 check 范围。
+        let mut v = base();
+        v["inbounds"] = serde_json::json!([
+            { "type": "mixed", "tag": "a", "listen": "127.0.0.1", "port": 1080 },
+            { "type": "socks", "tag": "b", "listen": "192.168.1.1", "port": 1080 }
+        ]);
+        assert!(!has(&issues_of(&v), "冲突"), "不同 listen 地址不该报冲突: {:?}", issues_of(&v));
+    }
+
+    #[test]
     fn group_member_and_self_reference() {
         let mut v = base();
         v["outbounds"] = serde_json::json!([
@@ -1894,6 +2450,39 @@ mod wg_upstream_tests {
         );
     }
 
+    /// mirage 出站 pool_size=0 必须 check 阶段拦下: 否则暖池永不建货, 每条连接静默 10s 超时。
+    #[test]
+    fn mirage_outbound_pool_size_zero_is_caught() {
+        let s = r#"{
+          "inbounds": [{ "type": "socks", "tag": "in", "listen": "127.0.0.1", "port": 1080 }],
+          "outbounds": [{ "type": "mirage", "tag": "proxy", "server": "h", "server_port": 443,
+                          "password": "pw", "camouflage_host": "www.apple.com", "pool_size": 0 }],
+          "routing": { "default_outbound": "proxy", "rules": [] }
+        }"#;
+        let cfg: Config = serde_json::from_str(s).expect("配置应能解析");
+        let issues = cfg.semantic_issues();
+        assert!(
+            issues.iter().any(|i| i.contains("pool_size")),
+            "pool_size=0 应被拦下: {issues:?}"
+        );
+    }
+
+    /// auth_ts_tolerance_secs 过大 (推导 replay 去重桶数) 必须 check 阶段拦下, 防内存放大。
+    #[test]
+    fn auth_ts_tolerance_over_cap_is_caught() {
+        let s = r#"{
+          "inbounds": [{ "type": "mirage_server", "tag": "srv", "listen": "0.0.0.0",
+                          "port": 443, "password": "pw", "auth_ts_tolerance_secs": 99999 }],
+          "outbounds": [{ "type": "direct", "tag": "direct" }],
+          "routing": { "default_outbound": "direct", "rules": [] }
+        }"#;
+        let cfg: Config = serde_json::from_str(s).expect("配置应能解析");
+        assert!(
+            cfg.semantic_issues().iter().any(|i| i.contains("auth_ts_tolerance_secs")),
+            "auth_ts_tolerance_secs 过大应被拦: {:?}", cfg.semantic_issues()
+        );
+    }
+
     /// 上游 WG 配错必须在 check 阶段就拦下 (而非留到每条连接静默失败)。
     #[test]
     fn wireguard_upstream_bad_config_is_caught() {
@@ -1994,6 +2583,99 @@ mod profile_tests {
             "profile 规则未知出站未被拦: {:?}", c.semantic_issues()
         );
     }
+
+    // 多用户凭据 (P1) 校验。
+    fn srv_with_users(users_json: &str) -> super::Config {
+        let s = format!(r#"{{
+            "schema_version":1,
+            "inbounds":[{{"type":"mirage_server","tag":"in","listen":"0.0.0.0","port":443,"password":"mainpw","users":{users_json}}}],
+            "outbounds":[{{"type":"direct","tag":"direct"}}],
+            "routing":{{"default_outbound":"direct","rules":[]}}
+        }}"#);
+        super::Config::parse_with_diagnostics(&s).expect("应解析").0
+    }
+
+    #[test]
+    fn users_valid_parses_no_issue() {
+        let c = srv_with_users(r#"[{"name":"alice","password":"a"},{"name":"bob","password":"b"}]"#);
+        assert!(!c.semantic_issues().iter().any(|i| i.contains("user")), "合法 users 不该报: {:?}", c.semantic_issues());
+    }
+
+    #[test]
+    fn users_empty_name_dup_and_empty_pw_caught() {
+        // 空名
+        assert!(srv_with_users(r#"[{"name":"","password":"x"}]"#).semantic_issues().iter().any(|i| i.contains("name 为空")), "空名未拦");
+        // 重名
+        assert!(srv_with_users(r#"[{"name":"u","password":"x"},{"name":"u","password":"y"}]"#).semantic_issues().iter().any(|i| i.contains("重复")), "重名未拦");
+        // 撞保留名 default
+        assert!(srv_with_users(r#"[{"name":"default","password":"x"}]"#).semantic_issues().iter().any(|i| i.contains("重复")), "撞 default 未拦");
+        // 空密码
+        assert!(srv_with_users(r#"[{"name":"u","password":""}]"#).semantic_issues().iter().any(|i| i.contains("password 为空")), "空密码未拦");
+    }
+
+    #[test]
+    fn users_duplicate_password_caught() {
+        // 与 default 主口令重复
+        let dup_default = srv_with_users(r#"[{"name":"u","password":"mainpw"}]"#);
+        let issues_default = dup_default.semantic_issues();
+        assert!(
+            issues_default.iter().any(|i| i.contains("user") && i.contains("password 与 `default` 重复")),
+            "撞 default 口令未拦: {:?}",
+            issues_default
+        );
+
+        // 两个用户之间口令重复
+        let dup_users = srv_with_users(r#"[{"name":"u1","password":"same"},{"name":"u2","password":"same"}]"#);
+        let issues_users = dup_users.semantic_issues();
+        assert!(
+            issues_users.iter().any(|i| i.contains("user") && i.contains("password 与 `u1` 重复")),
+            "多用户重口令未拦: {:?}",
+            issues_users
+        );
+    }
+
+    #[test]
+    fn users_limits_and_quota_validation() {
+        // 合法限速与配额
+        let valid = srv_with_users(r#"[{"name":"alice","password":"p","rate_limit_kbps":1000,"quota_gb":10.5,"quota_reset_day":15}]"#);
+        assert!(!valid.semantic_issues().iter().any(|i| i.contains("user")), "合法配额不该报错: {:?}", valid.semantic_issues());
+
+        // kbps == 0
+        let zero_kbps = srv_with_users(r#"[{"name":"alice","password":"p","rate_limit_kbps":0}]"#);
+        assert!(zero_kbps.semantic_issues().iter().any(|i| i.contains("rate_limit_kbps 必须大于 0")));
+
+        // quota_gb <= 0
+        let zero_quota = srv_with_users(r#"[{"name":"alice","password":"p","quota_gb":0.0}]"#);
+        assert!(zero_quota.semantic_issues().iter().any(|i| i.contains("quota_gb 必须为有效正数")));
+        let neg_quota = srv_with_users(r#"[{"name":"alice","password":"p","quota_gb":-5.0}]"#);
+        assert!(neg_quota.semantic_issues().iter().any(|i| i.contains("quota_gb 必须为有效正数")));
+
+        // quota_reset_day 越界
+        let day_0 = srv_with_users(r#"[{"name":"alice","password":"p","quota_reset_day":0}]"#);
+        assert!(day_0.semantic_issues().iter().any(|i| i.contains("quota_reset_day 必须在 1..=28")));
+        let day_29 = srv_with_users(r#"[{"name":"alice","password":"p","quota_reset_day":29}]"#);
+        assert!(day_29.semantic_issues().iter().any(|i| i.contains("quota_reset_day 必须在 1..=28")));
+    }
+
+    #[test]
+    fn users_cross_inbound_limit_inconsistency_caught() {
+        let json = r#"{
+            "inbounds": [
+                {"type": "mirage_server", "tag": "in1", "listen": "0.0.0.0", "port": 443, "password": "p1",
+                 "users": [{"name": "alice", "password": "pa", "rate_limit_kbps": 1000}]},
+                {"type": "mirage_server", "tag": "in2", "listen": "0.0.0.0", "port": 8443, "password": "p2",
+                 "users": [{"name": "alice", "password": "pa", "rate_limit_kbps": 2000}]}
+            ],
+            "outbounds": [{"type": "direct", "tag": "direct"}],
+            "routing": {"default_outbound": "direct", "rules": []}
+        }"#;
+        let (cfg, _) = Config::parse_with_diagnostics(json).unwrap();
+        let issues = cfg.semantic_issues();
+        assert!(
+            issues.iter().any(|i| i.contains("alice") && i.contains("限额配置与入站 `in1` 不一致")),
+            "跨入站同名用户限额不一致应被提示: {issues:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2023,5 +2705,153 @@ mod prop_tests {
             obj.push('}');
             let _ = serde_json::from_str::<Config>(&obj);
         }
+    }
+}
+
+#[cfg(test)]
+mod secret_debug_tests {
+    use super::*;
+
+    #[test]
+    fn test_mirage_user_debug_redacts_password() {
+        let user = MirageUser {
+            name: "alice".to_string(),
+            password: "super_secret_password_123".to_string(),
+            rate_limit_kbps: Some(1000),
+            quota_gb: Some(10.0),
+            quota_reset_day: Some(1),
+        };
+        let debug_str = format!("{:?}", user);
+        assert!(!debug_str.contains("super_secret_password_123"));
+        assert!(debug_str.contains("[REDACTED]"));
+        assert!(debug_str.contains("alice"));
+
+        // 验证 serde round-trip
+        let json = serde_json::to_string(&user).unwrap();
+        assert!(json.contains("super_secret_password_123"));
+        let deserialized: MirageUser = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.name, user.name);
+        assert_eq!(deserialized.password, user.password);
+    }
+
+    #[test]
+    fn test_inbound_auth_debug_redacts_password() {
+        let auth = InboundAuth {
+            username: "bob".to_string(),
+            password: "auth_secret_password_456".to_string(),
+        };
+        let debug_str = format!("{:?}", auth);
+        assert!(!debug_str.contains("auth_secret_password_456"));
+        assert!(debug_str.contains("[REDACTED]"));
+        assert!(debug_str.contains("bob"));
+    }
+
+    #[test]
+    fn test_inbound_config_debug_redacts_secrets() {
+        let ms_json = r#"{
+            "type": "mirage_server",
+            "tag": "in_ms",
+            "listen": "0.0.0.0",
+            "port": 443,
+            "password": "server_main_password_789",
+            "quic_obfs": "quic_obfs_secret_abc",
+            "users": [{"name": "carol", "password": "carol_user_password_xyz"}]
+        }"#;
+        let ib_ms: InboundConfig = serde_json::from_str(ms_json).unwrap();
+        let debug_ms = format!("{:?}", ib_ms);
+        assert!(!debug_ms.contains("server_main_password_789"));
+        assert!(!debug_ms.contains("quic_obfs_secret_abc"));
+        assert!(!debug_ms.contains("carol_user_password_xyz"));
+        assert!(debug_ms.contains("[REDACTED]"));
+
+        let ss_json = r#"{
+            "type": "shadowsocks",
+            "tag": "in_ss",
+            "listen": "0.0.0.0",
+            "port": 8388,
+            "method": "aes-256-gcm",
+            "password": "ss_inbound_password_def"
+        }"#;
+        let ib_ss: InboundConfig = serde_json::from_str(ss_json).unwrap();
+        let debug_ss = format!("{:?}", ib_ss);
+        assert!(!debug_ss.contains("ss_inbound_password_def"));
+        assert!(debug_ss.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_outbound_config_debug_redacts_secrets() {
+        let mirage_json = r#"{
+            "type": "mirage",
+            "tag": "out_m",
+            "server": "1.2.3.4",
+            "server_port": 443,
+            "password": "client_mirage_password_111",
+            "camouflage_host": "example.com",
+            "quic_obfs": "client_quic_obfs_222"
+        }"#;
+        let ob_m: OutboundConfig = serde_json::from_str(mirage_json).unwrap();
+        let debug_m = format!("{:?}", ob_m);
+        assert!(!debug_m.contains("client_mirage_password_111"));
+        assert!(!debug_m.contains("client_quic_obfs_222"));
+        assert!(debug_m.contains("[REDACTED]"));
+
+        let ss_json = r#"{
+            "type": "shadowsocks",
+            "tag": "out_ss",
+            "server": "1.2.3.4",
+            "server_port": 8388,
+            "method": "aes-256-gcm",
+            "password": "client_ss_password_333"
+        }"#;
+        let ob_ss: OutboundConfig = serde_json::from_str(ss_json).unwrap();
+        let debug_ss = format!("{:?}", ob_ss);
+        assert!(!debug_ss.contains("client_ss_password_333"));
+        assert!(debug_ss.contains("[REDACTED]"));
+
+        let wg_json = r#"{
+            "type": "wireguard",
+            "tag": "out_wg",
+            "private_key": "private_key_secret_444",
+            "peer_public_key": "public_key_open_555",
+            "preshared_key": "preshared_key_secret_666",
+            "endpoint": "1.2.3.4:51820",
+            "address": "10.0.0.2"
+        }"#;
+        let ob_wg: OutboundConfig = serde_json::from_str(wg_json).unwrap();
+        let debug_wg = format!("{:?}", ob_wg);
+        assert!(!debug_wg.contains("private_key_secret_444"));
+        assert!(!debug_wg.contains("preshared_key_secret_666"));
+        assert!(debug_wg.contains("public_key_open_555"));
+        assert!(debug_wg.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_upstream_config_debug_redacts_secrets() {
+        let ss_json = r#"{
+            "type": "shadowsocks",
+            "server": "1.2.3.4",
+            "server_port": 8388,
+            "method": "aes-256-gcm",
+            "password": "upstream_ss_password_777"
+        }"#;
+        let up_ss: UpstreamConfig = serde_json::from_str(ss_json).unwrap();
+        let debug_ss = format!("{:?}", up_ss);
+        assert!(!debug_ss.contains("upstream_ss_password_777"));
+        assert!(debug_ss.contains("[REDACTED]"));
+
+        let wg_json = r#"{
+            "type": "wireguard",
+            "private_key": "upstream_wg_priv_888",
+            "peer_public_key": "upstream_wg_pub_999",
+            "preshared_key": "upstream_wg_psk_000",
+            "endpoint": "1.2.3.4:51820",
+            "address": "10.0.0.2"
+        }"#;
+        let up_wg: UpstreamConfig = serde_json::from_str(wg_json).unwrap();
+        let debug_wg = format!("{:?}", up_wg);
+        assert!(!debug_wg.contains("upstream_wg_priv_888"));
+        assert!(!debug_wg.contains("upstream_wg_psk_000"));
+        assert!(debug_wg.contains("upstream_wg_pub_999"));
+        assert!(debug_wg.contains("[REDACTED]"));
     }
 }

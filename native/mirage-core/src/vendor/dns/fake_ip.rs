@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -19,6 +20,8 @@ pub struct FakeIpMapper {
     /// 关服 flush 又过了 dirty.swap"这种两个 flush 同写一个 .tmp 的窄竞态 → 文件交错损坏。
     /// 落盘全程持此锁, 两个 flush 各自完整写+rename, 不交错。
     flush_lock: std::sync::Mutex<()>,
+    /// fake-ip 排除域名匹配器 (suffix/keyword/regex/full)。命中者不分配 fake-IP, DNS 走真实解析 (见 dns::server)。
+    exclude: crate::dns::domain_match::DomainMatcher,
 }
 
 impl FakeIpMapper {
@@ -57,6 +60,7 @@ impl FakeIpMapper {
             persist_path: persist_path.map(PathBuf::from),
             dirty: AtomicBool::new(false),
             flush_lock: std::sync::Mutex::new(()),
+            exclude: crate::dns::domain_match::DomainMatcher::default(),
         };
 
         if let Some(p) = &mapper.persist_path {
@@ -69,10 +73,24 @@ impl FakeIpMapper {
         Ok(mapper)
     }
 
+    /// 链式设排除名单 (config `fakeip.exclude`, 结构化 domain/suffix/keyword/regex),
+    /// 见 [`crate::dns::domain_match::DomainMatcher`]。
+    pub fn with_exclude(mut self, exclude: &crate::config::DomainRuleSet) -> Self {
+        self.exclude = crate::dns::domain_match::DomainMatcher::from_ruleset(exclude);
+        self
+    }
+
+    /// 域名是否在 fake-ip 排除名单 (domain/suffix/keyword/regex 任一命中)。命中者不给 fake-IP,
+    /// DNS 返真实解析 (见 dns::server::process_query)。
+    pub fn is_excluded(&self, domain: &str) -> bool {
+        self.exclude.matches(domain)
+    }
+
     /// 从持久化文件恢复映射 + next_ip。行格式: `next_ip=<u32>` 或 `<ip> <domain>`。
     /// 只接受落在本 range 的 IP (换过 fakeip 网段的旧缓存自动丢弃)。best-effort 解析。
     fn load(&self, path: &Path) -> anyhow::Result<()> {
-        let content = std::fs::read_to_string(path)?;
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("读取 fake-ip 持久化文件失败: {}", path.display()))?;
         let mut d2i = self.domain_to_ip.write().unwrap_or_else(|e| e.into_inner());
         let mut i2d = self.ip_to_domain.write().unwrap_or_else(|e| e.into_inner());
         let mut loaded_next: Option<u32> = None;
@@ -186,6 +204,11 @@ impl FakeIpMapper {
     }
 
     pub fn lookup_or_assign(&self, domain: &str) -> Ipv4Addr {
+        self.lookup_or_assign_with_eviction(domain).0
+    }
+
+    /// 查询或分配 fake-IP, 若触发槽位轮转复用, 同时返回被淘汰的旧域名 (供上层清理 XDP 缓存等)。
+    pub fn lookup_or_assign_with_eviction(&self, domain: &str) -> (Ipv4Addr, Option<String>) {
         let domain = domain.to_lowercase();
 
         // 1. 快路径: 读锁命中 (常见).
@@ -195,7 +218,7 @@ impl FakeIpMapper {
             .unwrap_or_else(|e| e.into_inner())
             .get(&domain)
         {
-            return ip;
+            return (ip, None);
         }
 
         // 2. 慢路径: 分配新 IP. 持 domain_to_ip 写锁全程, 双检防两个并发同域名各占
@@ -206,7 +229,7 @@ impl FakeIpMapper {
         //    不可能仍活跃).
         let mut d2i = self.domain_to_ip.write().unwrap_or_else(|e| e.into_inner());
         if let Some(&ip) = d2i.get(&domain) {
-            return ip; // 双检: 慢路径拿锁期间别的线程已分配
+            return (ip, None); // 双检: 慢路径拿锁期间别的线程已分配
         }
 
         let ip_u32 = {
@@ -222,19 +245,21 @@ impl FakeIpMapper {
         };
         let ip = Ipv4Addr::from(ip_u32);
 
+        let mut evicted = None;
         let mut i2d = self.ip_to_domain.write().unwrap_or_else(|e| e.into_inner());
         // 占用该 IP; 若之前被别的域名占着 (round-robin 复用), 删掉旧域名的正向映射.
         if let Some(old_domain) = i2d.insert(ip, domain.clone()) {
             if old_domain != domain {
                 d2i.remove(&old_domain);
                 tracing::debug!("[FAKEIP] {} 槽位复用 → 淘汰旧域名 [{}]", ip, old_domain);
+                evicted = Some(old_domain);
             }
         }
         tracing::debug!("[FAKEIP] assign [{}] → {} (已用 {}/~{})", domain, ip, d2i.len() + 1, !self.mask);
         d2i.insert(domain, ip);
         self.dirty.store(true, Ordering::Relaxed); // 新分配 → 待落盘
 
-        ip
+        (ip, evicted)
     }
 
     pub fn lookup_domain(&self, ip: &Ipv4Addr) -> Option<String> {
@@ -285,6 +310,20 @@ mod bounded_tests {
             Some("d99.example.com"),
             "最近域名正反映射一致"
         );
+    }
+
+    #[test]
+    fn eviction_returns_old_domain() {
+        // /29: 可用 5 个 IP (.2, .3, .4, .5, .6)
+        let m = FakeIpMapper::new("10.0.0.0/29").unwrap();
+        for i in 0..5 {
+            let (_, evicted) = m.lookup_or_assign_with_eviction(&format!("d{i}.com"));
+            assert_eq!(evicted, None, "前 5 个不应淘汰");
+        }
+        // 第 6 个触发复用 .2 (d0.com 的槽位)
+        let (_, evicted) = m.lookup_or_assign_with_eviction("d5.com");
+        assert_eq!(evicted.as_deref(), Some("d0.com"), "应淘汰 d0.com");
+        assert_eq!(m.lookup_domain(&"10.0.0.2".parse().unwrap()).as_deref(), Some("d5.com"), "槽位已归新域名");
     }
 
     #[test]
@@ -374,5 +413,37 @@ mod persist_tests {
         let m = FakeIpMapper::with_persist("198.18.0.0/16", None).unwrap();
         m.lookup_or_assign("x.com");
         m.flush(); // 无路径 → no-op, 不 panic
+    }
+}
+
+#[cfg(test)]
+mod exclude_tests {
+    use super::FakeIpMapper;
+
+    #[test]
+    fn exclude_via_ruleset() {
+        let rs = crate::config::DomainRuleSet {
+            domain: vec![],
+            domain_suffix: vec!["Apple.com".into(), ".example.org".into(), "*.lan".into(), "  ".into()],
+            domain_keyword: vec![],
+            domain_regex: vec![],
+        };
+        let m = FakeIpMapper::new("198.18.0.0/16").unwrap().with_exclude(&rs);
+        // `*.lan` 通配前缀规整为根域 `lan` → 匹配 lan 及其子域
+        assert!(m.is_excluded("nas.lan"));
+        assert!(m.is_excluded("lan"));
+        // 后缀 + 大小写不敏感 + 子域
+        assert!(m.is_excluded("apple.com"));
+        assert!(m.is_excluded("APPLE.COM"));
+        assert!(m.is_excluded("gateway.icloud.apple.com"));
+        assert!(m.is_excluded("www.example.org"));
+        assert!(m.is_excluded("apple.com.")); // FQDN 尾点
+        // 非命中
+        assert!(!m.is_excluded("apple.com.evil.net"));
+        assert!(!m.is_excluded("notapple.com"));
+        assert!(!m.is_excluded("google.com"));
+        // 空名单不误伤
+        let empty = FakeIpMapper::new("198.18.0.0/16").unwrap();
+        assert!(!empty.is_excluded("apple.com"));
     }
 }

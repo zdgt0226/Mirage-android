@@ -4,6 +4,33 @@
 
 ---
 
+## [2026-09-29] 内核协议同步至 mirage-rs v0.15 (协议断代, 须配 v0.15 服务端)
+
+上游 mirage-rs v0.15.0 是**协议断代版**: 旧客户端连不上 v0.15 服务端。本次把 mirage-core 的协议实现同步到上游
+`346d0a5` (v0.15.0)。上次同步停在 2026-08-28 (`da640f3`)。
+
+**同步方式** (供下次参考): `native/vendor-sync.sh` 只刷新 `src/vendor/` 这份**不参与编译**的上游镜像;
+真正编译的 `src/crypto` / `src/proxy` 等是移动端裁剪版, 已与上游分叉 (连接池突发补货、0-RTT 重试、零拷贝
+relay 等)。故对协议文件做**三方合并** (`git merge-file`, base = 上次同步的上游 `da640f3`, ours = 移动端现状,
+theirs = 上游 v0.15), 冲突逐个人工解决; `pool.rs` 分叉最大, 只手工移植客户端握手相关改动。
+
+- **协议新鲜性 (#148)**: token tag 绑定 `ClientHello.random`; 会话 master 的 HKDF salt 混入 `ServerHello.random`
+  (`create_crypto_pair[_pfs]` 多 `server_random` 参数); `read_server_handshake` 返回 `ServerHandshake`
+  (random + cipher_suite), random 全 0 即 fail-closed。
+- **伪 Finished 长度 (#155)**: `build_fake_client_tail(cipher)` 随协商套件 (0x1302 → 69B 体, 其余 53B)。
+- **PFS Elligator2 (#156)**: `crypto/pfs.rs` 取上游, 新增依赖 `elligator2 0.1` / `x25519-dalek 3.0` (与上游同版)。
+- **TIME_SYNC / CIPHER_ACK fail-closed (#157)**: 超时 / 解密失败 / 帧异常直接放弃该隧道, 不再"降级继续"。
+- 其余合并: `aead` (上游借用式解密 + 保留移动端 `recv_data_to` 与 `mark_tunnel_active`, 标 `MIRAGE_MOBILE`)、
+  `cipher` / `hello_auth` / `tls_raw` / `time_sync` / `tunnel` / `mirage_stream` / `node_uri` / `brutal`
+  (`set_brutal_rate` 新增 group_id, 客户端传 0)。**保持移动端现状**: `handshake_cache` (移动端未调用, 保留其
+  protect 补丁)、`net_util` (上游新增的是服务端出站过滤)、`dns/fake_ip` (上游新增 fakeip.exclude 需 domain_match)。
+- `examples/tunnel_test.rs` 适配新 token API; 新增 `examples/interop_v015.rs` 互通冒烟测试。
+
+**验证**: `cargo fmt --check` / `cargo clippy --lib -D warnings` (core + jni) 干净; `cargo test --lib` 155 passed;
+`cargo check --target aarch64-linux-android` 通过。**真实互通**: 本机起 mirage-rs v0.15.0 `lite-server`
+(pfs 开 / 关各一), `interop_v015` 走 mirage-core 真实客户端路径 —— TCP 隧道、UDP Legacy (回包 ATYP=1)、
+UDP mux 三条路径在 pfs 开 / 关下均回显一致; 反例 (pfs 失配、口令错误) 均连接失败, 符合预期。
+
 ## [2026-09-22] 会话生命周期状态清理 + RAII 资源泄漏加固 + 死代码清理
 
 围绕 VPN 启停会话边界收口内核内的全局状态与并发计数, 杜绝跨会话残留与泄漏。

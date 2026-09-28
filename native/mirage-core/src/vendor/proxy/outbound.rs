@@ -247,7 +247,10 @@ impl OutboundNode {
                     use tokio::io::AsyncWriteExt;
                     let mux = pool.quic_mux().ok_or_else(|| anyhow::anyhow!("quic mux 未初始化"))?;
                     let (send, recv) = mux.open_stream().await?;
-                    let token = crate::crypto::hello_auth::make_session_token(pool.password());
+                    let token = crate::crypto::hello_auth::make_session_token(
+                        pool.password(),
+                        crate::crypto::hello_auth::QUIC_LEAN_BIND,
+                    );
                     let mut hdr = Vec::with_capacity(32 + 2 + tb.len());
                     hdr.extend_from_slice(&token);
                     hdr.extend_from_slice(&(tb.len() as u16).to_be_bytes());
@@ -444,7 +447,7 @@ impl OutboundManager {
         let OutboundConfig::Mirage {
             tag, server, server_port, password, camouflage_host, pool_size,
             brutal_rate_mbps, brutal_base_rtt_ms, pfs, transport, quic_window_mb, quic_erasure_cc,
-            quic_sni, quic_low_src_port, quic_pre_packet, quic_obfs, ..
+            quic_sni, quic_low_src_port, quic_pre_packet, quic_obfs, quic_pin, ..
         } = oc else { unreachable!("build_mirage 只接受 Mirage 配置") };
         let pool_cfg = Arc::new(PoolConfig {
             server_host: server.clone(),
@@ -462,6 +465,7 @@ impl OutboundManager {
             quic_low_src_port: quic_low_src_port.unwrap_or(false),
             quic_pre_packet: quic_pre_packet.unwrap_or(false),
             quic_obfs: quic_obfs.clone(),
+            quic_pin: quic_pin.clone(),
         });
         let bytes_per_sec = brutal_rate_mbps.map(|m| m * 125_000);
         let brutal_state = Arc::new(crate::proxy::pool::BrutalState {
