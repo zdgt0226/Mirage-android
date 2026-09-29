@@ -15,6 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # 安全门禁: 静态扫描禁止硬编码真实服务器地址、公网 IP、密钥口令与未加白端点
+      - name: Check no real endpoints or hardcoded secrets
+        run: bash scripts/check-no-real-endpoints.sh
+
       # 不指定版本: 由仓库根的 rust-toolchain.toml 驱动 (channel/components/targets
       # 都在那里声明)。rustup show 会据此把工具链落地。指定版本会与该文件冲突,
       # 且让「升级 rustc」变成要同时改两处。

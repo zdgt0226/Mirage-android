@@ -16,3 +16,9 @@
 * **UI 路线图**：[`docs/UI_REDESIGN_PROPOSAL.md`](docs/UI_REDESIGN_PROPOSAL.md)。流体交互、自适应布局与 Compose 演进的技术方案与实测基线。
 * **构建环境**：宿主机无 gradle / 无 wrapper。Kotlin 与 APK 构建**必须**在 systemd-nspawn 容器 `/var/lib/machines/android-builder` 内进行，具体命令见交接文档第 0 节。Kotlin 改动未经容器编译不得提交。
 * **对照实现**：`/opt/reference/meow-android` 为本地可读源码，比对时以源码为准，禁止凭记忆断言。`sing-box` 无本地副本，不得虚构其文件路径。
+
+## 4. 安全与防泄露规范 (Security & Endpoint Guardrails)
+* **严禁硬编码敏感信息**：禁止在仓库中提交任何真实服务器地址、节点链接、口令、密钥（包括测试、示例、文档、环境变量默认值等）。
+* **测试与文档占位规范**：测试与示例代码一律使用 RFC 文档专用保留地址（如 `203.0.113.x`、`198.51.100.x`、`192.0.2.x`、`2001:db8::/32`）或保留域名（如 `example.com`、`.example`、`.test`、`localhost`）。
+* **真实参数传递规范**：需要连接真实服务器的测试或示例工具，真实参数只能经环境变量传入且**严禁设置任何公网默认值**（缺失时明确提示用法并以非零状态码退出）。
+* **CI 门禁与白名单维护**：CI 中的 `bash scripts/check-no-real-endpoints.sh` 为硬门禁。若因业务/测试需要新增合法的公网地址（如公共 DNS、云元数据 IP），必须同步更新 `scripts/endpoint-allowlist.txt` 并逐行注明用途与技术理由。

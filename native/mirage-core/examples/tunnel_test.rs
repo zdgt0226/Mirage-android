@@ -5,12 +5,19 @@ async fn main() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .try_init();
-    let server = std::env::var("MIRAGE_SERVER").unwrap_or("117.55.230.75".into());
+    let env = |k: &str| {
+        std::env::var(k).unwrap_or_else(|_| {
+            eprintln!("用法: MIRAGE_SERVER=<host> MIRAGE_PWD=<pwd> [MIRAGE_PORT=8443] [MIRAGE_SNI=speedtest.net] cargo run --example tunnel_test");
+            eprintln!("缺少环境变量 {k}");
+            std::process::exit(2);
+        })
+    };
+    let server = env("MIRAGE_SERVER");
     let port: u16 = std::env::var("MIRAGE_PORT")
         .unwrap_or("8443".into())
         .parse()
         .unwrap();
-    let pwd = std::env::var("MIRAGE_PWD").unwrap_or("d029c98fd9fd3104cebf7ebb2ce632cd".into());
+    let pwd = env("MIRAGE_PWD");
     let sni = std::env::var("MIRAGE_SNI").unwrap_or("speedtest.net".into());
 
     eprintln!(

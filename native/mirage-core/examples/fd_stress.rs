@@ -12,14 +12,21 @@ fn fd_count() -> usize {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let env = |k: &str| {
+        std::env::var(k).unwrap_or_else(|_| {
+            eprintln!("用法: MIRAGE_SERVER=<host> MIRAGE_PWD=<pwd> [MIRAGE_PORT=8443] [MIRAGE_SNI=speedtest.net] cargo run --example fd_stress");
+            eprintln!("缺少环境变量 {k}");
+            std::process::exit(2);
+        })
+    };
     let node = NodeInfo {
         tag: "proxy".into(),
-        server: std::env::var("MIRAGE_SERVER").unwrap_or("117.55.230.75".into()),
+        server: env("MIRAGE_SERVER"),
         server_port: std::env::var("MIRAGE_PORT")
             .unwrap_or("8443".into())
             .parse()
             .unwrap(),
-        password: std::env::var("MIRAGE_PWD").unwrap_or("d029c98fd9fd3104cebf7ebb2ce632cd".into()),
+        password: env("MIRAGE_PWD"),
         sni: std::env::var("MIRAGE_SNI").unwrap_or("speedtest.net".into()),
         pool_size: 8,
         pfs: false,
