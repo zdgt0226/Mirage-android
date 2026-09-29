@@ -54,10 +54,118 @@ impl Drop for ActiveFdGuard {
     }
 }
 
+/// 标识上游握手/认证类失败 (区别于普通物理网络 IO 错误)。
+/// 用于 WarmPool 限制连续认证失败时的后台高频重试耗电。
+#[derive(Debug)]
+pub struct AuthFailure(pub String);
+
+impl std::fmt::Display for AuthFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for AuthFailure {}
+
+pub const AUTH_PAUSE_DURATION: Duration = Duration::from_secs(300); // 5 minutes
+pub const AUTH_FAILURES_THRESHOLD: u32 = 5;
+
+/// 认证失败暂停状态跟踪器 (可注入时间进行纯逻辑测试)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthPauseTracker {
+    pub consecutive_auth_failures: u32,
+    pub paused_at: Option<Instant>,
+}
+
+impl Default for AuthPauseTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AuthPauseTracker {
+    pub const fn new() -> Self {
+        Self {
+            consecutive_auth_failures: 0,
+            paused_at: None,
+        }
+    }
+
+    /// 记录一次认证失败。
+    /// 若连续认证失败达到阈值 (>= 5 次) 且未处于暂停中，进入暂停状态并返回 true (表示在此次调用中刚触发暂停)。
+    pub fn record_auth_failure(&mut self, now: Instant) -> bool {
+        self.consecutive_auth_failures += 1;
+        if self.consecutive_auth_failures >= AUTH_FAILURES_THRESHOLD && self.paused_at.is_none() {
+            self.paused_at = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 记录一次非认证失败：清零连续认证失败计数 (非认证错误中断连续序列)。
+    pub fn record_non_auth_failure(&mut self) {
+        self.consecutive_auth_failures = 0;
+    }
+
+    /// 记录成功建连：清零计数并解除暂停。若此前处于暂停中，返回 true。
+    pub fn record_success(&mut self) -> bool {
+        self.consecutive_auth_failures = 0;
+        self.paused_at.take().is_some()
+    }
+
+    /// purge_idle 触发：清零计数并解除暂停。若此前处于暂停中，返回 true。
+    pub fn purge(&mut self) -> bool {
+        self.consecutive_auth_failures = 0;
+        self.paused_at.take().is_some()
+    }
+
+    /// 检查并推进暂停状态。若暂停已满 5 分钟则自动解除并清零计数。
+    /// 返回 `(is_paused, just_expired)`。
+    pub fn check_paused(&mut self, now: Instant) -> (bool, bool) {
+        if let Some(t) = self.paused_at {
+            if now.saturating_duration_since(t) >= AUTH_PAUSE_DURATION {
+                self.paused_at = None;
+                self.consecutive_auth_failures = 0;
+                (false, true)
+            } else {
+                (true, false)
+            }
+        } else {
+            (false, false)
+        }
+    }
+
+    /// 查询当前是否处于暂停中
+    pub fn is_paused(&self, now: Instant) -> bool {
+        if let Some(t) = self.paused_at {
+            now.saturating_duration_since(t) < AUTH_PAUSE_DURATION
+        } else {
+            false
+        }
+    }
+}
+
+/// 计算建连失败后的指数退避时间:
+/// `base = 500ms * 2^(failures - 1)`, 上限 60s, 加 ±20% 抖动 (fastrand)。
+/// failures = 0 时返回 Duration::ZERO。
+pub fn builder_backoff(failures: u32) -> Duration {
+    if failures == 0 {
+        return Duration::ZERO;
+    }
+    let shift = (failures - 1).min(10);
+    let base_ms = (500u64.saturating_mul(1u64 << shift)).min(60_000);
+    let jitter_min = base_ms * 80 / 100;
+    let jitter_max = base_ms * 120 / 100;
+    Duration::from_millis(fastrand::u64(jitter_min..=jitter_max))
+}
+
 #[derive(Debug)]
 pub struct PoolStats {
     pub latency_samples: VecDeque<u64>,
     pub consecutive_failures: u32,
+    pub consecutive_auth_failures: u32,
+    pub auth_tracker: AuthPauseTracker,
     pub last_sample_time: Option<Instant>,
 }
 
@@ -72,21 +180,54 @@ impl PoolStats {
         Self {
             latency_samples: VecDeque::with_capacity(10),
             consecutive_failures: 0,
+            consecutive_auth_failures: 0,
+            auth_tracker: AuthPauseTracker::new(),
             last_sample_time: None,
         }
     }
 
-    pub fn record_latency(&mut self, ms: u64) {
+    pub fn record_latency(&mut self, ms: u64) -> bool {
         if self.latency_samples.len() == 10 {
             self.latency_samples.pop_front();
         }
         self.latency_samples.push_back(ms);
         self.last_sample_time = Some(Instant::now());
         self.consecutive_failures = 0;
+        let unpaused = self.auth_tracker.record_success();
+        self.consecutive_auth_failures = self.auth_tracker.consecutive_auth_failures;
+        unpaused
     }
 
     pub fn record_failure(&mut self) {
+        self.record_failure_typed(false);
+    }
+
+    pub fn record_failure_typed(&mut self, is_auth: bool) -> bool {
         self.consecutive_failures += 1;
+        let just_paused = if is_auth {
+            self.auth_tracker.record_auth_failure(Instant::now())
+        } else {
+            self.auth_tracker.record_non_auth_failure();
+            false
+        };
+        self.consecutive_auth_failures = self.auth_tracker.consecutive_auth_failures;
+        just_paused
+    }
+
+    pub fn purge_auth_pause(&mut self) -> bool {
+        let unpaused = self.auth_tracker.purge();
+        self.consecutive_auth_failures = self.auth_tracker.consecutive_auth_failures;
+        unpaused
+    }
+
+    pub fn check_auth_pause(&mut self, now: Instant) -> (bool, bool) {
+        let (paused, expired) = self.auth_tracker.check_paused(now);
+        self.consecutive_auth_failures = self.auth_tracker.consecutive_auth_failures;
+        (paused, expired)
+    }
+
+    pub fn is_auth_paused(&self, now: Instant) -> bool {
+        self.auth_tracker.is_paused(now)
     }
 
     pub fn latency_ms(&self) -> Option<u64> {
@@ -239,6 +380,94 @@ mod feedback_tests {
         assert!(pool.shutdown.load(Ordering::Relaxed));
         assert_eq!(pool.queue.lock().await.len(), 0);
     }
+
+    #[test]
+    fn test_builder_backoff() {
+        // failures = 0 为 0
+        assert_eq!(builder_backoff(0), Duration::ZERO);
+
+        // 单调性: ±20% 抖动下相邻失败等级区间严格不重叠, 故单调递增
+        for _ in 0..100 {
+            for f in 1..=7 {
+                let d1 = builder_backoff(f);
+                let d2 = builder_backoff(f + 1);
+                assert!(d1 < d2, "f={f} expected {d1:?} < {d2:?}");
+            }
+        }
+
+        // 上限: base 最大 60s, +20% 抖动后最大不超过 72s
+        for f in [8, 10, 50, 100] {
+            let d = builder_backoff(f);
+            assert!(d <= Duration::from_millis(72_000), "exceeded 72s: {d:?}");
+            assert!(d >= Duration::from_millis(48_000), "below 48s: {d:?}");
+        }
+    }
+
+    #[test]
+    fn test_auth_pause_tracker_state_machine() {
+        let mut tracker = AuthPauseTracker::new();
+        let t0 = Instant::now();
+
+        // 1..4 次认证失败: 不进入暂停
+        for i in 1..=4 {
+            assert!(!tracker.record_auth_failure(t0));
+            assert_eq!(tracker.consecutive_auth_failures, i);
+            assert!(!tracker.is_paused(t0));
+            let (paused, _) = tracker.check_paused(t0);
+            assert!(!paused);
+        }
+
+        // 第 5 次认证失败: 触发暂停
+        assert!(tracker.record_auth_failure(t0));
+        assert_eq!(tracker.consecutive_auth_failures, 5);
+        assert!(tracker.is_paused(t0));
+        let (paused, _) = tracker.check_paused(t0);
+        assert!(paused);
+
+        // 4 分钟时仍处于暂停
+        let t_4m = t0 + Duration::from_secs(240);
+        assert!(tracker.is_paused(t_4m));
+        let (paused, expired) = tracker.check_paused(t_4m);
+        assert!(paused);
+        assert!(!expired);
+
+        // 5 分钟超时: 自动恢复并清零计数
+        let t_5m = t0 + Duration::from_secs(300);
+        assert!(!tracker.is_paused(t_5m));
+        let (paused, expired) = tracker.check_paused(t_5m);
+        assert!(!paused);
+        assert!(expired);
+        assert_eq!(tracker.consecutive_auth_failures, 0);
+
+        // 再次触发暂停后, purge_idle 立即恢复
+        for _ in 0..5 {
+            tracker.record_auth_failure(t0);
+        }
+        assert!(tracker.is_paused(t0));
+        assert!(tracker.purge());
+        assert!(!tracker.is_paused(t0));
+        assert_eq!(tracker.consecutive_auth_failures, 0);
+
+        // 再次触发暂停后, 建连成功 (record_success) 立即恢复
+        for _ in 0..5 {
+            tracker.record_auth_failure(t0);
+        }
+        assert!(tracker.is_paused(t0));
+        assert!(tracker.record_success());
+        assert!(!tracker.is_paused(t0));
+        assert_eq!(tracker.consecutive_auth_failures, 0);
+
+        // 非认证错误中断连续认证失败计数
+        for _ in 0..4 {
+            tracker.record_auth_failure(t0);
+        }
+        assert_eq!(tracker.consecutive_auth_failures, 4);
+        tracker.record_non_auth_failure();
+        assert_eq!(tracker.consecutive_auth_failures, 0);
+        assert!(!tracker.record_auth_failure(t0));
+        assert_eq!(tracker.consecutive_auth_failures, 1);
+        assert!(!tracker.is_paused(t0));
+    }
 }
 
 use std::time::Duration;
@@ -272,11 +501,12 @@ pub(crate) fn process_time_sync_frame(data: &[u8]) -> anyhow::Result<bool> {
             data.len(),
             data.first()
         );
-        anyhow::bail!(
+        Err(AuthFailure(format!(
             "TIME_SYNC 非预期帧 (len={}, type={:?})",
             data.len(),
             data.first()
-        )
+        ))
+        .into())
     }
 }
 
@@ -325,7 +555,7 @@ pub async fn read_server_handshake<R: tokio::io::AsyncRead + Unpin>(
                 match timeout(t, stream.read_exact(&mut body)).await {
                     Ok(Ok(_)) => {
                         if ct == 0x15 {
-                            return Err(anyhow::anyhow!("Server sent TLS alert"));
+                            return Err(AuthFailure("Server sent TLS alert".to_string()).into());
                         } else if ct == 0x16 {
                             // 首个 ServerHello: 捕获 random (body[6..38]) 与 cipher_suite。ServerHello body 布局:
                             // [0x02 type][3B len][2B version][32B random][1B sid_len][sid][2B cipher]...
@@ -557,6 +787,21 @@ impl WarmPool {
                     break;
                 }
 
+                // 认证失败频控暂停: 连续认证失败 >= 5 次时暂停后台补池,
+                // 直到 purge_idle 触发自愈或满 5 分钟超时恢复
+                let is_paused = {
+                    let mut stats = stats_builder.write().unwrap_or_else(|e| e.into_inner());
+                    let (paused, expired) = stats.check_auth_pause(Instant::now());
+                    if expired {
+                        tracing::info!("WarmPool: 连续认证失败暂停已满 5 分钟, 自动恢复后台预热");
+                    }
+                    paused
+                };
+                if is_paused {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+
                 let current_target = target_clone_builder.load(Ordering::Relaxed);
                 let current_max = max_size_builder.load(Ordering::Relaxed);
                 let current_idle = q_clone_builder.lock().await.len();
@@ -577,14 +822,17 @@ impl WarmPool {
                     .unwrap_or_else(|e| e.into_inner())
                     .consecutive_failures;
                 if failures > 0 {
-                    let backoff = Duration::from_millis((failures as u64 * 300).min(3000));
+                    let backoff = builder_backoff(failures);
                     tokio::time::sleep(backoff).await;
                 }
 
                 // 突发并发补货 (Burst Refill):
-                // 若池子处于饥饿状态 (current_idle == 0)，立即取消平稳期阶梯等待，一次性并发补充多条连接；
+                // consecutive_failures > 0 时 burst 恒为 1 (不再并发补多条);
+                // 成功后恢复原 burst 逻辑：若池子处于饥饿状态 (current_idle == 0)，立即取消平稳期阶梯等待，一次性并发补充多条连接；
                 // 若池子处于平稳补货期 (current_idle > 0)，施加 150ms 阶梯延迟平滑 SYN 抖动。
-                let burst_count = if current_idle == 0 {
+                let burst_count = if failures > 0 {
+                    1
+                } else if current_idle == 0 {
                     let needed = current_target.saturating_sub(current_idle + current_in_flight);
                     needed.clamp(1, 8)
                 } else {
@@ -617,10 +865,15 @@ impl WarmPool {
                         match Self::connect_upstream(&cfg_task, &brutal_state_builder).await {
                             Ok(tunnel) => {
                                 let elapsed = start.elapsed().as_millis() as u64;
-                                stats_task
+                                let unpaused = stats_task
                                     .write()
                                     .unwrap_or_else(|e| e.into_inner())
                                     .record_latency(elapsed);
+                                if unpaused {
+                                    tracing::info!(
+                                        "WarmPool: 建连成功, 恢复后台预热并重置认证失败计数"
+                                    );
+                                }
 
                                 if shutdown_task.load(Ordering::Relaxed) {
                                     in_flight_task.fetch_sub(1, Ordering::Relaxed);
@@ -632,13 +885,18 @@ impl WarmPool {
                                 tracing::trace!("WarmPool: 预热连接就绪 ({}ms)", elapsed);
                             }
                             Err(e) => {
-                                stats_task
+                                let is_auth = e.downcast_ref::<AuthFailure>().is_some();
+                                let just_paused = stats_task
                                     .write()
                                     .unwrap_or_else(|e| e.into_inner())
-                                    .record_failure();
+                                    .record_failure_typed(is_auth);
+                                if just_paused {
+                                    tracing::warn!(
+                                        "WarmPool: 连续认证失败达到 5 次, 暂停后台预热 5 分钟 (等待 purge_idle 或超时恢复)"
+                                    );
+                                }
                                 in_flight_task.fetch_sub(1, Ordering::Relaxed);
                                 error!("WarmPool: 上游连接失败: {:?}", e);
-                                tokio::time::sleep(Duration::from_secs(1)).await;
                             }
                         }
                     });
@@ -666,12 +924,27 @@ impl WarmPool {
     /// 避免向已失效网卡/NAT超时的坏死 Socket 发包导致 RST 崩溃。
     /// 零 Runtime 异步上下文依赖，可在任何 JNI / Binder 系统回调线程安全调用。
     pub fn purge_idle(&self) {
+        if let Ok(mut stats) = self.stats.write() {
+            if stats.purge_auth_pause() {
+                tracing::info!("WarmPool: purge_idle 触发, 恢复后台预热并重置认证失败计数");
+            }
+        }
         if let Ok(mut q) = self.queue.try_lock() {
             let n = q.len();
             q.clear();
             self.notify.notify_waiters();
             tracing::info!("WarmPool: 已冲刷 {n} 条空闲预热连接 (网络切换/自愈)");
         }
+    }
+
+    /// 查询当前是否处于认证失败暂停状态
+    pub fn is_auth_paused(&self) -> bool {
+        let mut stats = self.stats.write().unwrap_or_else(|e| e.into_inner());
+        let (paused, expired) = stats.check_auth_pause(Instant::now());
+        if expired {
+            tracing::info!("WarmPool: 连续认证失败暂停已满 5 分钟, 自动恢复后台预热");
+        }
+        paused
     }
 
     /// 核心握手逻辑：建立 TCP 并包装 AEAD Crypto 层
@@ -711,11 +984,11 @@ impl WarmPool {
                 } else {
                     tracing::debug!("TIME_SYNC: recv failed: {:?}", e);
                 }
-                anyhow::bail!("TIME_SYNC 接收/解密失败: {:?}", e);
+                return Err(AuthFailure(format!("TIME_SYNC 接收/解密失败: {:?}", e)).into());
             }
             Err(_) => {
                 tracing::warn!("TIME_SYNC: 等待服务端时间帧超时 (3s), 放弃建连 (fail-closed)");
-                anyhow::bail!("TIME_SYNC 等待超时 (3s)");
+                return Err(AuthFailure("TIME_SYNC 等待超时 (3s)".to_string()).into());
             }
         };
 
@@ -1059,10 +1332,13 @@ impl WarmPool {
                 let res = Box::pin(Self::connect_upstream(&cfg, &brutal)).await;
                 if let Ok(ref _t) = res {
                     let elapsed = start.elapsed().as_millis() as u64;
-                    stats
+                    let unpaused = stats
                         .write()
                         .unwrap_or_else(|e| e.into_inner())
                         .record_latency(elapsed);
+                    if unpaused {
+                        tracing::info!("WarmPool: on-demand 建连成功, 解除认证暂停并重置失败计数");
+                    }
                     debug!("WarmPool: On-Demand 即时建连就绪 ({}ms)", elapsed);
                 }
                 res
