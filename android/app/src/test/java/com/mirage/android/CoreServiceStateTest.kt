@@ -165,7 +165,7 @@ class CoreServiceStateTest {
     @Test
     fun serviceConfigCarriesAppFilter() {
         val cfg = CoreService.ServiceConfig(
-            uri = "mirage://pass@1.1.1.1:443?sni=sni.test",
+            uri = "mirage://pass@203.0.113.1:443?sni=sni.test",
             appFilterConfig = AppFilterConfig(
                 enabled = true,
                 mode = AppFilterMode.DISALLOW,
@@ -174,7 +174,7 @@ class CoreServiceStateTest {
             failoverMode = "next",
             outboundMode = 1
         )
-        assertEquals("mirage://pass@1.1.1.1:443?sni=sni.test", cfg.uri)
+        assertEquals("mirage://pass@203.0.113.1:443?sni=sni.test", cfg.uri)
         assertTrue(cfg.appFilterConfig!!.enabled)
         assertEquals(AppFilterMode.DISALLOW, cfg.appFilterConfig!!.mode)
         assertEquals("next", cfg.failoverMode)

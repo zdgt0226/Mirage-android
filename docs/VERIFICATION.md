@@ -52,7 +52,7 @@ scripts/test-e2e.sh   # 需 root; 内部用 systemd-nspawn 隔离, 不动宿主�
 
 ## 2026-08-23 实机手机端验证（Android, SO-02K BH905W2A9G, v0.2.6 Build 2026.08.23 #51)
 
-**环境**: 设备1 (SO-02K, Android 9 / 16), VPN 经 117.55.230.75:8443 节点, 复合规则引擎.
+**环境**: 设备1 (SO-02K, Android 9 / 16), VPN 经 203.0.113.10:8443 节点, 复合规则引擎.
 **验证方式**: adb uiautomator 检查 UI + modify 捕获 core.log + 设备内置工具(nc/toybox)发真实流量.
 
 ### ✅ 通过（都有实测证据）
@@ -86,7 +86,7 @@ scripts/test-e2e.sh   # 需 root; 内部用 systemd-nspawn 隔离, 不动宿主�
 
 ## 2026-08-23 深度优化与分流体验回归修复实机验证 (v0.2.6 Build 2026.08.23 #54)
 
-**环境**: 物理设备 (SO-02K / Android 9 & 三星 Galaxy S24+ / Android 16 SDK 36), 节点 117.55.230.75:8443.
+**环境**: 物理设备 (SO-02K / Android 9 & 三星 Galaxy S24+ / Android 16 SDK 36), 节点 203.0.113.10:8443.
 
 ### ✅ 全量验证通过项目
 
@@ -108,7 +108,7 @@ scripts/test-e2e.sh   # 需 root; 内部用 systemd-nspawn 隔离, 不动宿主�
 
 ## 2026-08-24 Fake-IP 路由隔离与 X.com 海外代理实机全通验证 (v0.2.8 Build 2026.08.24 #53)
 
-**环境**: 三星 Galaxy S24+ (SM-S9260 / Android 16 SDK 36), 节点 117.55.230.75:8443.
+**环境**: 三星 Galaxy S24+ (SM-S9260 / Android 16 SDK 36), 节点 203.0.113.10:8443.
 
 ### 🔴 定位并根治的关键问题: Fake-IP 虚拟网段被 GeoIP:private 误判劫持
 
@@ -147,7 +147,7 @@ Play 请求 gstatic/googleapis/gvt1
   ├─ ② geosite:cn 数据误含 googleapis.com/gstatic.com (实测设备 geosite.dat cn 标签命中)
   ├─ ③ 规则顺序缺陷: geosite:cn→direct 排在 geosite:google→proxy 前
   │     → Google 服务被劫持"直连" → 连污染假 IP → 3.05s 超时 → Play 卡在检查/下载
-  └─ ④ 隧道 RTT 470ms (SM-S9260→117.55.230.75 移动链路) → 单流吞吐 ~210KB/s (次要)
+  └─ ④ 隧道 RTT 470ms (SM-S9260→203.0.113.10 移动链路) → 单流吞吐 ~210KB/s (次要)
      + WarmPool target=64 过大 (64 条常驻隧道竞争带宽, 稀释单流)
 ```
 

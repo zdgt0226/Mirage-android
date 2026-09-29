@@ -1277,7 +1277,7 @@ adb -s <serial> shell wm size reset && adb -s <serial> shell wm density reset
 #### 2. 节点文案与双行重排
 - **改什么**：移除「节点: 」文字前缀（卡片已有专属节点图标，文字前缀纯属冗余）；将节点名称与主机地址拆分为主标题与副标题双行布局；`(SNI: …)` 信息移出列表主行，收入下钻详情或长按查看。
 - **改哪些文件**：`res/layout/item_node.xml`、`res/layout/fragment_home.xml`、`NodesFragment.kt`、`NodeAdapter.kt`、`res/values/strings.xml`。
-- **预期效果**：360dp 窄屏视口下节点主名与 `host:port` 均能完整展示，实机上首页 `节点: Speedtest-HK (117.…` 与节点卡 `117.55.230.75:8443 …` / `Speedtest-HK (11…` 的截断彻底消除。
+- **预期效果**：360dp 窄屏视口下节点主名与 `host:port` 均能完整展示，实机上首页 `节点: 香港节点 (203.0.…` 与节点卡 `203.0.113.10:8443 …` / `香港节点 (203.0…` 的截断彻底消除。
 - **验收标准**：SO-02K 与 Galaxy S24+ 实机验证，首页节点行与节点卡均无中途省略号截断。**严格执行 i18n 门禁**：文案改动必须走 `strings.xml`，`ui/` 与 `data/` 目录下严禁出现任何中文字面量。
 - **风险**：超长节点名称折行策略需精确处理，避免纵向撑高破坏列表节奏或挤压右侧延迟指示器与选中勾选标。
 

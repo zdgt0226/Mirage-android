@@ -59,18 +59,23 @@ class NodeRepository(private val context: Context) {
             }
         }.getOrDefault(emptyList())
 
-        val presetUri = "mirage://d029c98fd9fd3104cebf7ebb2ce632cd@117.55.230.75:8443?sni=speedtest.net"
-        val presetNode = Node(presetUri, "Speedtest-HK (117.55.230.75)")
-        val finalNodes = if (list.isEmpty()) {
-            listOf(presetNode)
-        } else if (list.none { it.uri == presetUri }) {
-            listOf(presetNode) + list
-        } else {
-            list
+        // 迁移清理：过滤掉旧版本内置的泄露测试节点并回写持久化。
+        // 此处按特征匹配（旧预置节点特征：name 以 "Speedtest-HK" 开头且 sni 为 speedtest.net），
+        // 彻底杜绝在源码与配置中残留任何真实泄露节点的公网 IP 与口令。
+        val finalNodes = list.filterNot {
+            it.name.startsWith("Speedtest-HK") && it.sni == "speedtest.net"
         }
+        val hadLeakedNode = finalNodes.size != list.size
 
         _nodes.value = finalNodes
-        val targetIdx = finalNodes.indexOfFirst { it.uri == presetUri }.takeIf { it >= 0 } ?: 0
+        val savedIdx = prefs.getInt(KEY_SELECTED, 0)
+        val targetIdx = if (finalNodes.isEmpty()) {
+            -1
+        } else if (savedIdx in finalNodes.indices) {
+            savedIdx
+        } else {
+            0
+        }
         _selectedIndex.value = targetIdx
         prefs.edit().putInt(KEY_SELECTED, targetIdx).apply()
         _testMethod.value = prefs.getString(KEY_TEST_METHOD, "tcp") ?: "tcp"
@@ -78,7 +83,9 @@ class NodeRepository(private val context: Context) {
         val pool = prefs.getInt(KEY_POOL, 16)
         _poolSize.value = pool
         com.mirage.android.core.NodeStore.setPoolSize(context, pool)
-        saveNodes(finalNodes)
+        if (hadLeakedNode) {
+            saveNodes(finalNodes)
+        }
     }
 
     private fun saveNodes(list: List<Node>) {
@@ -135,10 +142,10 @@ class NodeRepository(private val context: Context) {
             _nodes.value = current
             saveNodes(current)
             val sel = _selectedIndex.value
-            if (sel >= current.size) {
-                setSelected((current.size - 1).coerceAtLeast(0))
-            } else if (current.isEmpty()) {
+            if (current.isEmpty()) {
                 setSelected(-1)
+            } else if (sel >= current.size) {
+                setSelected(current.size - 1)
             }
         }
     }
