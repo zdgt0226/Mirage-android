@@ -1244,7 +1244,9 @@ class CoreService : VpnService() {
                 MirageNative.FAILOVER_RESTART_REQUESTED -> "请求重启"
                 else -> "未知($kind)"
             }
-            LogStore.append("[core] 故障切换事件: $kindName node=$nodeUri (P1 仅记录, 未执行)")
+            // 节点 URI 含密码, 只记前缀 —— core.log 可被用户导出分享。
+            val redacted = if (nodeUri.length > 24) nodeUri.take(24) + "..." else nodeUri
+            LogStore.append("[core] 故障切换事件: $kindName node=$redacted (P1 仅记录, 未执行)")
         }
 
         fun protectFd(fd: Int) {

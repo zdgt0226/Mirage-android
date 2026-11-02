@@ -43,6 +43,12 @@ pub struct FailoverPolicy {
     /// 请求外壳重启前的等待（毫秒）。外壳原实现为 3000。
     #[serde(default = "default_restart_delay")]
     pub restart_delay_ms: u32,
+    /// 内核看门狗总开关。
+    ///
+    /// **默认 false**：方案 §5 风险 1 要求内核策略与外壳看门狗不得并存。
+    /// P2 落地时外壳仍是权威，故默认关闭；P3 拆除外壳看门狗时由外壳下发 true。
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 fn default_mode() -> String {
@@ -62,6 +68,7 @@ impl Default for FailoverPolicy {
             interval_sec: default_interval(),
             backoff_sec: 0,
             restart_delay_ms: default_restart_delay(),
+            enabled: false,
         }
     }
 }
@@ -155,8 +162,18 @@ pub fn network_state() -> (u64, bool) {
 mod tests {
     use super::*;
 
+    /// 本模块的状态是进程级全局（`NODES` / `POLICY` / 网络状态原子量），
+    /// cargo test 默认多线程并发会让用例互相覆盖。用一把测试锁串行化，
+    /// 而不是让断言去迁就并发——边界契约必须在确定状态下验证。
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn guard() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn node_list_roundtrip() {
+        let _g = guard();
         let n = set_node_list(
             r#"[{"uri":"mirage://a@198.51.100.1:443","name":"A"},{"uri":"mirage://b@198.51.100.2:443"}]"#,
         );
@@ -168,6 +185,7 @@ mod tests {
 
     #[test]
     fn bad_node_json_keeps_previous() {
+        let _g = guard();
         set_node_list(r#"[{"uri":"mirage://keep@198.51.100.9:443"}]"#);
         assert_eq!(set_node_list("not json"), None);
         assert_eq!(node_list().len(), 1, "解析失败不得清空既有清单");
@@ -175,6 +193,7 @@ mod tests {
 
     #[test]
     fn policy_defaults_and_partial_json() {
+        let _g = guard();
         assert!(set_policy(r#"{"mode":"order"}"#));
         let p = policy();
         assert_eq!(p.mode, "order");
@@ -184,13 +203,29 @@ mod tests {
 
     #[test]
     fn bad_policy_json_keeps_previous() {
+        let _g = guard();
         set_policy(r#"{"mode":"best","interval_sec":42}"#);
         assert!(!set_policy("{{{"));
         assert_eq!(policy().interval_sec, 42, "解析失败不得改写既有策略");
     }
 
     #[test]
+    fn watchdog_disabled_by_default() {
+        let _g = guard();
+        set_policy("{}");
+        assert!(
+            !policy().enabled,
+            "内核看门狗必须默认关闭, 否则 P2 合入即与外壳看门狗双重决策"
+        );
+        assert!(set_policy(r#"{"enabled":true}"#));
+        assert!(policy().enabled);
+        set_policy("{}");
+        assert!(!policy().enabled, "未带 enabled 的策略应回到关闭");
+    }
+
+    #[test]
     fn network_state_roundtrip() {
+        let _g = guard();
         on_network_changed(1234, true);
         assert_eq!(network_state(), (1234, true));
         on_network_changed(0, false);
