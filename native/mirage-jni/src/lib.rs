@@ -337,6 +337,29 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_start(
             },
         ));
 
+        // 故障切换事件回调 (下沉方案 P1): 内核判定后通知外壳。
+        // 热切换由内核自己完成, 只有需要重建 TUN 的重启必须请外壳执行 ——
+        // establish() 是 Android 框架 API, 内核无法自建 fd。
+        let vm_for_failover = std::sync::Arc::clone(&vm);
+        let class_for_failover = class_ref.clone();
+        mirage_core::failover::set_event_sink(Box::new(move |kind, node_uri| {
+            use jni::objects::JValue;
+            let r = vm_for_failover
+                .attach_current_thread_as_daemon()
+                .and_then(|mut env| {
+                    let uri_str = env.new_string(node_uri)?;
+                    env.call_static_method(
+                        &class_for_failover,
+                        "onFailoverEvent",
+                        "(ILjava/lang/String;)V",
+                        &[JValue::Int(kind), JValue::Object(&uri_str)],
+                    )
+                });
+            if let Err(e) = r {
+                eprintln!("[mirage-jni] onFailoverEvent({kind}) 失败: {e}");
+            }
+        }));
+
         // 专用 tokio runtime (独立线程, 不占主线程)。必须先建 runtime 再在其内部
         // 调 Engine::new —— WarmPool::new 会 tokio::spawn 预热任务, 无 runtime 上下文
         // 直接 panic (JNI 边界 panic = abort = App 闪退, 真机实测踩坑)。
@@ -770,6 +793,70 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_setRules(
         } else {
             0
         }
+    })
+}
+
+/// `boolean setNodeList(String json)` —— 节点全表下发 (下沉方案 P1)。
+///
+/// 入参沿用外壳既有的 `nodes_json` 形状: `[{"uri":"...","name":"..."}]`。
+/// 内核持有清单才能在 P2 自主选路; 解析失败不清空既有清单。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_setNodeList(
+    mut env: JNIEnv,
+    _class: JClass,
+    json: JString,
+) -> jboolean {
+    jni_boundary!(0, {
+        let json_str: String = match env.get_string(&json) {
+            Ok(s) => s.into(),
+            Err(_) => return 0,
+        };
+        match mirage_core::failover::set_node_list(&json_str) {
+            Some(n) => {
+                tracing::info!("[failover] 节点全表已下发: {n} 条");
+                1
+            }
+            None => 0,
+        }
+    })
+}
+
+/// `boolean setFailoverPolicy(String json)` —— 切换策略下发 (下沉方案 P1)。
+///
+/// 字段: `mode` / `interval_sec` / `backoff_sec` / `restart_delay_ms`,
+/// 缺省值与外壳既有实现一致 (best / 15s / 0 / 3000ms)。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_setFailoverPolicy(
+    mut env: JNIEnv,
+    _class: JClass,
+    json: JString,
+) -> jboolean {
+    jni_boundary!(0, {
+        let json_str: String = match env.get_string(&json) {
+            Ok(s) => s.into(),
+            Err(_) => return 0,
+        };
+        if mirage_core::failover::set_policy(&json_str) {
+            1
+        } else {
+            0
+        }
+    })
+}
+
+/// `void onNetworkChanged(long netHandle, boolean hasInternet)` —— 物理网络变更转发。
+///
+/// `ConnectivityManager.NetworkCallback` 的注册必须留在外壳 (框架 API),
+/// 内核只消费结果: P2 据此区分「节点不可达」与「全网不可达」, 后者不应触发切换。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_onNetworkChanged(
+    _env: JNIEnv,
+    _class: JClass,
+    net_handle: jlong,
+    has_internet: jboolean,
+) {
+    jni_boundary!((), {
+        mirage_core::failover::on_network_changed(net_handle as u64, has_internet != 0);
     })
 }
 

@@ -140,6 +140,46 @@ object MirageNative {
     /** 同步底层活动物理网络的系统句柄至原生层 (用于 NDK android_setsocknetwork 原生绑定)。 */
     external fun setActiveNetwork(networkHandle: Long)
 
+    // ── 故障切换下沉 (方案 P1: 仅接口面, 看门狗由 P2 在内核实现) ──────────────
+
+    /**
+     * 下发节点全表。内核持有清单才能自主选路。
+     * json 形状沿用 [NodeStore.parseNodesJson]: `[{"uri":"...","name":"..."}]`。
+     * 解析失败返回 false 且不清空内核既有清单。
+     */
+    external fun setNodeList(json: String): Boolean
+
+    /**
+     * 下发切换策略。字段 `mode` / `interval_sec` / `backoff_sec` / `restart_delay_ms`,
+     * 缺省与外壳既有实现一致 (best / 15 / 0 / 3000)。解析失败返回 false 且保留既有策略。
+     */
+    external fun setFailoverPolicy(json: String): Boolean
+
+    /**
+     * 转发物理网络变更。`NetworkCallback` 的注册必须留在外壳 (框架 API),
+     * 内核只消费结果, 用于区分「节点不可达」与「全网不可达」。
+     *
+     * @param netHandle `Network.getNetworkHandle()`, 未知时传 0
+     */
+    external fun onNetworkChanged(netHandle: Long, hasInternet: Boolean)
+
+    /** [onFailoverEvent] 的 kind: 内核已自行热切换到新节点。 */
+    const val FAILOVER_SWITCHED = 0
+
+    /** [onFailoverEvent] 的 kind: 内核请求外壳重启隧道 (内核无法自建 TUN fd)。 */
+    const val FAILOVER_RESTART_REQUESTED = 1
+
+    /**
+     * Rust 侧调用: 故障切换事件。
+     *
+     * P1 只建通道, 不改变行为——外壳当前仍由自己的看门狗决策, 本回调只落日志。
+     * P3 拆除外壳看门狗后, [FAILOVER_RESTART_REQUESTED] 才会真正驱动重启。
+     */
+    @JvmStatic
+    fun onFailoverEvent(kind: Int, nodeUri: String) {
+        com.mirage.android.CoreService.onFailoverEvent(kind, nodeUri)
+    }
+
     /**
      * Rust 侧同步调用 (隧道 socket connect 前): 把 fd 交给当前活跃的 VpnService protect。
      * 必须同步返回 (protect 设置 SO_MARK 影响路由, 晚了会导致隧道流量进 TUN 环路)。

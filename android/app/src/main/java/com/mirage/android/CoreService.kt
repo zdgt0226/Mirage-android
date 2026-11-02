@@ -168,6 +168,11 @@ class CoreService : VpnService() {
         LogStore.append("[core] 底层物理网络切换: $old -> $n (handle=${n?.networkHandle ?: 0L})")
         runCatching { MirageNative.setActiveNetwork(n?.networkHandle ?: 0L) }
         runCatching { MirageNative.flushPool() }
+        // 下沉方案 P1: 转发给内核。P2 据此区分「节点不可达」与「全网不可达」。
+        runCatching { MirageNative.onNetworkChanged(n?.networkHandle ?: 0L, n != null) }
+            .onFailure { e ->
+                LogStore.append("[core] 网络变更转发内核异常: ${e::class.java.simpleName}: ${e.message}")
+            }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             runCatching { setUnderlyingNetworks(n?.let { arrayOf(it) }) }
         }
@@ -320,6 +325,21 @@ class CoreService : VpnService() {
             nodes = nodes,
             outboundMode = outboundMode
         )
+
+        // 下沉方案 P1: 把切换策略下发内核。内核当前只存不用 (看门狗仍在外壳),
+        // P2 据此自主判定节奏。字段名与 failover.rs 的 FailoverPolicy 对应。
+        runCatching {
+            val policy = org.json.JSONObject()
+                .put("mode", serviceConfig.failoverMode)
+                .put("interval_sec", serviceConfig.checkIntervalSec)
+                .put("backoff_sec", 0)
+                .put("restart_delay_ms", 3000)
+                .toString()
+            val ok = MirageNative.setFailoverPolicy(policy)
+            LogStore.append("[core] 切换策略下发内核: ok=$ok policy=$policy")
+        }.onFailure { e ->
+            LogStore.append("[core] 切换策略下发内核异常: ${e::class.java.simpleName}: ${e.message}")
+        }
 
         // 直接驱动启动 (建 TUN + 内核), 不依赖 UI 后续 AIDL 调用
         val rc = startInternal(uri, poolSize)
@@ -1174,6 +1194,16 @@ class CoreService : VpnService() {
         override fun updateNodes(nodesJson: String?): Boolean {
             if (!nodesJson.isNullOrBlank()) {
                 serviceConfig.nodes = NodeStore.parseNodesJson(nodesJson)
+                // 下沉方案 P1: 同步给内核。内核当前只存不用 (看门狗仍在外壳),
+                // P2 据此自主选路。形状与 parseNodesJson 一致, 无需转换。
+                runCatching { MirageNative.setNodeList(nodesJson) }
+                    .onSuccess { ok ->
+                        LogStore.append("[core] 节点全表下发内核: ok=$ok count=${serviceConfig.nodes.size}")
+                    }
+                    .onFailure { e ->
+                        // UnsatisfiedLinkError 等链接问题必须显形, 不能被 runCatching 吞掉
+                        LogStore.append("[core] 节点全表下发内核异常: ${e::class.java.simpleName}: ${e.message}")
+                    }
             }
             return true
         }
@@ -1201,6 +1231,22 @@ class CoreService : VpnService() {
         private var active: CoreService? = null
 
         @JvmStatic
+        /**
+         * 内核的故障切换事件 (下沉方案 P1)。
+         *
+         * P1 只建通道: 外壳的看门狗仍在跑, 这里只落日志, **不执行任何切换或重启**,
+         * 否则会与 startFailoverWatchdog 形成双重决策 (方案 §5 风险 1)。
+         * P3 拆除外壳看门狗后, 这里才接管重启执行。
+         */
+        fun onFailoverEvent(kind: Int, nodeUri: String) {
+            val kindName = when (kind) {
+                MirageNative.FAILOVER_SWITCHED -> "已热切换"
+                MirageNative.FAILOVER_RESTART_REQUESTED -> "请求重启"
+                else -> "未知($kind)"
+            }
+            LogStore.append("[core] 故障切换事件: $kindName node=$nodeUri (P1 仅记录, 未执行)")
+        }
+
         fun protectFd(fd: Int) {
             val inst = active
             if (inst == null) {

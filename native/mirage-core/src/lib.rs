@@ -34,6 +34,7 @@ pub mod direct_cn_domains;
 pub mod direct_cn_ipv4;
 pub mod dns;
 pub mod engine;
+pub mod failover;
 pub mod geo;
 pub mod monitor;
 pub mod net_util;
