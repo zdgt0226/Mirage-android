@@ -2,8 +2,10 @@
 
 # ── JNI 边界 ────────────────────────────────────────────────────────────
 # mirage-jni 用 find_class("com/mirage/android/core/MirageNative") 按字符串
-# 反查该类, 再用 call_static_method 按方法名调 protectFd / resolveConnectionOwner
-# (见 native/mirage-jni/src/lib.rs:230,253,272)。类名、方法名、签名全部不可改。
+# 反查该类, 再用 call_static_method 按方法名调 protectFd / resolveConnectionOwner /
+# onFailoverEvent。类名、方法名、签名全部不可改。
+# 这三个方法在 CI 的「Assert JNI surface survived R8」门禁里逐个核验 —— 新增按名
+# 反查的方法时必须同步加进那份清单, 否则门禁对它形同虚设。
 # 同时 external fun 对应的 native 方法也必须保名, 否则 System.loadLibrary 后
 # 找不到符号直接 UnsatisfiedLinkError。
 -keep class com.mirage.android.core.MirageNative { *; }

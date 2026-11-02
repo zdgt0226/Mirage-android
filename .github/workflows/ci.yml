@@ -287,10 +287,12 @@ jobs:
           SO="$WORK/lib/arm64-v8a/libmirage_jni.so"
           fail=0
 
-          # 1. Rust 按名反查的两个 Kotlin 方法（全限定，含签名）
+          # 1. Rust 按名反查的 Kotlin 方法（全限定，含签名）。
+          #    新增按名反查的方法必须同步加进这份清单, 否则门禁对它形同虚设。
           for q in \
             "com.mirage.android.core.MirageNative.protectFd:(I)V" \
-            "com.mirage.android.core.MirageNative.resolveConnectionOwner:"
+            "com.mirage.android.core.MirageNative.resolveConnectionOwner:" \
+            "com.mirage.android.core.MirageNative.onFailoverEvent:(ILjava/lang/String;)V"
           do
             n=$(grep -cF -- "$q" "$WORK/all.txt" || true)
             printf '%-58s %s\n' "$q" "$n"
