@@ -163,6 +163,17 @@ class CoreManager private constructor(private val context: Context) {
                 )
             }
 
+            // JNI 符号集门禁 (fail-closed)。
+            // 架构对但接口面偏旧的 .so 能 System.load 成功, 之后每次调用缺失方法都抛
+            // UnsatisfiedLinkError 被守卫兜住 —— 静默降级, 不崩但功能整段失效。
+            // 解析不出符号表不等于"没有缺符号", 因此任何失败都按拒绝处理。
+            val symbolCheck = NativeSymbolPolicy.verify(tempFile, CoreManager::class.java.classLoader)
+            if (symbolCheck != null) {
+                tempFile.delete()
+                Log.e("Mirage", "[loader] 内核 JNI 接口面校验失败: $symbolCheck")
+                return Result.failure(IllegalArgumentException(symbolCheck))
+            }
+
             val coreName = displayName.ifBlank { "Mirage 内核 ($abi)" }
 
             // 查重检测: 若已存在相同 SHA-256 或同名的非内置内核，进行复用或覆盖更新，避免冗余文件与重复条目
