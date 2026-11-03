@@ -40,6 +40,8 @@ VARIANT=release bash scripts/build-android.sh   # release
 bash scripts/build-android.sh native
 ```
 
+> **注意（新 worktree 必须先构建原生库）**：`android/app/src/main/jniLibs/` 被 `.gitignore` 忽略，新 worktree 中不存在 `libmirage_jni.so`；打 APK 前必须先按仓库脚本构建原生库并放入 jniLibs，安装前用 `unzip -l <apk> | grep lib/` 核对含 `lib/arm64-v8a/libmirage_jni.so`（教训：2026-09-26 曾因此打出无内核的 release 包）。
+
 **只做 Kotlin 语法校验**（比全量构建快很多，改 Kotlin 后先跑这个）：
 
 ```bash
