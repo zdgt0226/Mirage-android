@@ -200,13 +200,19 @@ class CoreService : VpnService() {
         val old = currentPhysicalNetwork
         currentPhysicalNetwork = n
         LogStore.append("[core] 底层物理网络切换: $old -> $n (handle=${n?.networkHandle ?: 0L})")
-        runCatching { MirageNative.setActiveNetwork(n?.networkHandle ?: 0L) }
-        runCatching { MirageNative.flushPool() }
-        // 下沉方案 P1: 转发给内核。P2 据此区分「节点不可达」与「全网不可达」。
-        runCatching { MirageNative.onNetworkChanged(n?.networkHandle ?: 0L, n != null) }
-            .onFailure { e ->
-                LogStore.append("[core] 网络变更转发内核异常: ${e::class.java.simpleName}: ${e.message}")
-            }
+        // 网络回调可能在任何一次 start 之前触发, 此时原生库尚未装载:
+        // 直接调用会连抛三次 UnsatisfiedLinkError, 虽被 runCatching 兜住但会污染日志。
+        if (!NativeLoader.isLoaded()) {
+            LogStore.append("[core] 原生库未装载, 跳过本次网络变更的内核转发")
+        } else {
+            runCatching { MirageNative.setActiveNetwork(n?.networkHandle ?: 0L) }
+            runCatching { MirageNative.flushPool() }
+            // 下沉方案 P1: 转发给内核。P2 据此区分「节点不可达」与「全网不可达」。
+            runCatching { MirageNative.onNetworkChanged(n?.networkHandle ?: 0L, n != null) }
+                .onFailure { e ->
+                    LogStore.append("[core] 网络变更转发内核异常: ${e::class.java.simpleName}: ${e.message}")
+                }
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             runCatching { setUnderlyingNetworks(n?.let { arrayOf(it) }) }
         }
@@ -620,6 +626,15 @@ class CoreService : VpnService() {
             }
         }
 
+        // 原生库未装载时提前退出: 否则下面整块注入会连抛十余次 UnsatisfiedLinkError。
+        if (!NativeLoader.isLoaded()) {
+            log("[core] 内核启动失败: 原生动态库未加载")
+            runCatching { fd.close() }
+            tunFd = null
+            notifyState()
+            return -1
+        }
+
         // 注入规则、Geo 文件与 DNS 配置 (修复 M5: 自主完成全量注入，杜绝冷启动 AIDL 竞态)
         runCatching { GeoManager.loadGeoFilesToNative(this) }
         runCatching { MirageNative.setRules(RuleStore.toJson(this)) }
@@ -627,6 +642,17 @@ class CoreService : VpnService() {
         runCatching { MirageNative.setDnsServers(serviceConfig.directDns, serviceConfig.remoteDns) }
         runCatching { MirageNative.setBlockQuic(serviceConfig.blockQuic) }
         runCatching { MirageNative.setUdpMux(serviceConfig.udpMux) }
+        // 下沉方案 P1: 节点全表必须在这里补发一次。
+        // AIDL updateNodes 可能在任何 start 之前到达, 那时原生库尚未装载而被守卫短路,
+        // 若不在此补发, 内核会一直拿不到候选节点, P2 看门狗将永远「无可切换节点」。
+        runCatching {
+            val nodesJson = NodeStore.getNodesJson(this)
+            val ok = MirageNative.setNodeList(nodesJson)
+            serviceConfig.nodes = NodeStore.parseNodesJson(nodesJson)
+            LogStore.append("[core] 启动前补发节点全表: ok=$ok count=${serviceConfig.nodes.size}")
+        }.onFailure { e ->
+            LogStore.append("[core] 启动前补发节点全表异常: ${e::class.java.simpleName}: ${e.message}")
+        }
 
         val poolSize = if (poolSizeOverride > 0) {
             poolSizeOverride
@@ -636,13 +662,6 @@ class CoreService : VpnService() {
             NodeStore.getPoolSize(this)
         }
         log("[core] 开始启动内核 (uri=${uri.take(30)}..., poolSize=$poolSize, mtu=$mtu)")
-        if (!NativeLoader.isLoaded()) {
-            log("[core] 内核启动失败: 原生动态库未加载")
-            runCatching { fd.close() }
-            tunFd = null
-            notifyState()
-            return -1
-        }
         val rc = MirageNative.start(rawFd, uri, poolSize, mtu)
         if (rc != 0) {
             log("[core] 内核启动失败 rc=$rc")
@@ -950,10 +969,12 @@ class CoreService : VpnService() {
         } else true
     }
 
-    fun getPoolSizeInternal(): Int =
-        if (isRunningInternal()) native(0) { MirageNative.getPoolSize() }
-        else if (serviceConfig.poolSize > 0) serviceConfig.poolSize
-        else NodeStore.getPoolSize(this)
+    fun getPoolSizeInternal(): Int {
+        // 守卫的默认值必须是「可用的回退值」, 不能是 0:
+        // 0 会被 UI 当成真实池大小显示, 也会被下次启动当成合法 override。
+        val fallback = if (serviceConfig.poolSize > 0) serviceConfig.poolSize else NodeStore.getPoolSize(this)
+        return if (isRunningInternal()) native(fallback) { MirageNative.getPoolSize() } else fallback
+    }
 
     fun setRulesInternal(json: String): Boolean = native(false) { MirageNative.setRules(json) }
     fun setBlockQuicInternal(block: Boolean): Boolean {
@@ -1249,14 +1270,18 @@ class CoreService : VpnService() {
                 serviceConfig.nodes = NodeStore.parseNodesJson(nodesJson)
                 // 下沉方案 P1: 同步给内核。内核当前只存不用 (看门狗仍在外壳),
                 // P2 据此自主选路。形状与 parseNodesJson 一致, 无需转换。
-                runCatching { MirageNative.setNodeList(nodesJson) }
-                    .onSuccess { ok ->
-                        LogStore.append("[core] 节点全表下发内核: ok=$ok count=${serviceConfig.nodes.size}")
-                    }
-                    .onFailure { e ->
-                        // UnsatisfiedLinkError 等链接问题必须显形, 不能被 runCatching 吞掉
-                        LogStore.append("[core] 节点全表下发内核异常: ${e::class.java.simpleName}: ${e.message}")
-                    }
+                if (!NativeLoader.isLoaded()) {
+                    LogStore.append("[core] 原生库未装载, 节点全表改由启动前补发 count=${serviceConfig.nodes.size}")
+                } else {
+                    runCatching { MirageNative.setNodeList(nodesJson) }
+                        .onSuccess { ok ->
+                            LogStore.append("[core] 节点全表下发内核: ok=$ok count=${serviceConfig.nodes.size}")
+                        }
+                        .onFailure { e ->
+                            // UnsatisfiedLinkError 等链接问题必须显形, 不能被 runCatching 吞掉
+                            LogStore.append("[core] 节点全表下发内核异常: ${e::class.java.simpleName}: ${e.message}")
+                        }
+                }
             }
             return true
         }
