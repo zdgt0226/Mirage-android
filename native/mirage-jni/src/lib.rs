@@ -34,6 +34,8 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 static RUNTIME: Mutex<Option<Arc<RunState>>> = Mutex::new(None);
 static CURRENT_POOL_SIZE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(16);
 static CURRENT_NODE_URI: Mutex<Option<String>> = Mutex::new(None);
+/// 故障切换看门狗的代次。每次 start() 递增, 旧实例据此自行退出 (防多实例并发)。
+static WATCHDOG_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 struct RunState {
     engine: Arc<Engine>,
@@ -337,6 +339,29 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_start(
             },
         ));
 
+        // 故障切换事件回调 (下沉方案 P1): 内核判定后通知外壳。
+        // 热切换由内核自己完成, 只有需要重建 TUN 的重启必须请外壳执行 ——
+        // establish() 是 Android 框架 API, 内核无法自建 fd。
+        let vm_for_failover = std::sync::Arc::clone(&vm);
+        let class_for_failover = class_ref.clone();
+        mirage_core::failover::set_event_sink(Box::new(move |kind, node_uri| {
+            use jni::objects::JValue;
+            let r = vm_for_failover
+                .attach_current_thread_as_daemon()
+                .and_then(|mut env| {
+                    let uri_str = env.new_string(node_uri)?;
+                    env.call_static_method(
+                        &class_for_failover,
+                        "onFailoverEvent",
+                        "(ILjava/lang/String;)V",
+                        &[JValue::Int(kind), JValue::Object(&uri_str)],
+                    )
+                });
+            if let Err(e) = r {
+                eprintln!("[mirage-jni] onFailoverEvent({kind}) 失败: {e}");
+            }
+        }));
+
         // 专用 tokio runtime (独立线程, 不占主线程)。必须先建 runtime 再在其内部
         // 调 Engine::new —— WarmPool::new 会 tokio::spawn 预热任务, 无 runtime 上下文
         // 直接 panic (JNI 边界 panic = abort = App 闪退, 真机实测踩坑)。
@@ -389,9 +414,224 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_start(
 
         *RUNTIME.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(Arc::new(RunState { engine, stack, rt }));
+
+        // 故障切换看门狗 (下沉方案 P2)。默认不生效: policy.enabled 为 false 时
+        // 每轮直接跳过, 由外壳看门狗继续决策 —— 方案 §5 风险 1 要求两者不得并存。
+        spawn_failover_watchdog();
+
         tracing::info!("MirageCore 已启动");
         0
     })
+}
+
+/// 节点 URI 含密码, 日志里只保留前缀 —— 与既有 `[core] 开始启动内核 (uri=...)` 的
+/// 截断约定一致, 避免把凭据写进可导出的 core.log。
+fn redact_uri(uri: &str) -> String {
+    let end = uri.char_indices().nth(24).map_or(uri.len(), |(i, _)| i);
+    format!("{}...", &uri[..end])
+}
+
+/// 故障切换看门狗 (下沉方案 P2)。
+///
+/// 职责边界见 `docs/CORE_OFFLOAD_PLAN.md`:
+/// - 热切换由本函数完成 (`Engine::new` + `swap_engine`), 不需要新的 TUN fd;
+/// - 需要重建隧道时只能**请求**外壳执行, 因为 `establish()` 是 Android 框架 API。
+///
+/// 轮询节奏、选路模式与重启延迟全部取自 `failover::policy()`, 由外壳一次性下发。
+fn spawn_failover_watchdog() {
+    use mirage_core::failover;
+
+    // 每次 start() 都会 spawn 一个新看门狗 (重启路径会反复 start)。旧实例不会因为
+    // RUNTIME 被替换而退出 —— 实测出现过并发实例, 相邻两轮间隔 1.35s 而非 15s。
+    // 用代次计数让旧实例在下一轮醒来时自行退出。
+    let my_gen = WATCHDOG_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+
+    let Some(state) = RUNTIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .cloned()
+    else {
+        return;
+    };
+    let rt = state.rt.clone();
+    let rt_for_task = state.rt.clone();
+
+    rt.spawn(async move {
+        // 连续失败计数: 与外壳原实现一致, 两次才动手, 避免单次抖动触发切换。
+        let mut consecutive_failures: u32 = 0;
+
+        loop {
+            let policy = failover::policy();
+            let interval = std::time::Duration::from_secs(
+                (policy.interval_sec.max(5) + policy.backoff_sec) as u64,
+            );
+            tokio::time::sleep(interval).await;
+
+            // 已有更新的看门狗接手, 本实例退出。
+            if WATCHDOG_GEN.load(Ordering::SeqCst) != my_gen {
+                tracing::debug!("[failover] 看门狗 gen={my_gen} 已被接替, 退出");
+                return;
+            }
+
+            // 取当前运行态; 引擎已停止则退出循环 (stop 会 drop RunState)。
+            let Some(state) = RUNTIME
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .cloned()
+            else {
+                tracing::debug!("[failover] 运行态已释放, 看门狗退出");
+                return;
+            };
+
+            // 总开关: 外壳看门狗仍是权威时, 内核只观察不动手。
+            if !policy.enabled {
+                continue;
+            }
+
+            if state.engine.is_healthy() {
+                consecutive_failures = 0;
+                continue;
+            }
+
+            consecutive_failures += 1;
+            tracing::warn!("[failover] 内核判定连接异常 (第 {consecutive_failures} 次)");
+            if consecutive_failures < 2 {
+                continue;
+            }
+            consecutive_failures = 0;
+
+            let nodes = failover::node_list();
+            let current = CURRENT_NODE_URI
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+
+            // 候选: 清单里除当前节点以外的节点。只有一个节点时无从切换,
+            // 只能请外壳重启 —— 与外壳原实现「仅一个节点, 重启连接」同义。
+            let candidates: Vec<_> = nodes
+                .iter()
+                .filter(|n| Some(&n.uri) != current.as_ref())
+                .cloned()
+                .collect();
+            if candidates.is_empty() {
+                tracing::warn!("[failover] 无可切换节点, 请求外壳重启");
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    policy.restart_delay_ms as u64,
+                ))
+                .await;
+                failover::emit_event(
+                    failover::EVENT_RESTART_REQUESTED,
+                    current.as_deref().unwrap_or(""),
+                );
+                continue;
+            }
+
+            // 选路: best = 并发测速取最低 RTT; 其余 = 按清单顺序取第一个候选。
+            let chosen = if policy.mode == "best" {
+                match pick_best_node(&rt_for_task, &candidates).await {
+                    Some(u) => u,
+                    None => {
+                        tracing::warn!("[failover] 候选节点全部不可达, 请求外壳重启");
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            policy.restart_delay_ms as u64,
+                        ))
+                        .await;
+                        failover::emit_event(
+                            failover::EVENT_RESTART_REQUESTED,
+                            current.as_deref().unwrap_or(""),
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                candidates[0].uri.clone()
+            };
+
+            // 热切换: 与 setNode 同路径, 不需要新的 TUN fd。
+            match switch_engine_to(&state, &chosen) {
+                Ok(()) => {
+                    tracing::info!("[failover] 内核已热切换: {}", redact_uri(&chosen));
+                    failover::emit_event(failover::EVENT_SWITCHED, &chosen);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[failover] 热切换失败 ({e}), 请求外壳重启: {}",
+                        redact_uri(&chosen)
+                    );
+                    failover::emit_event(failover::EVENT_RESTART_REQUESTED, &chosen);
+                }
+            }
+        }
+    });
+}
+
+/// 并发测速取最低 RTT 的候选; 全部不可达时返回 `None`。
+async fn pick_best_node(
+    rt: &Arc<tokio::runtime::Runtime>,
+    candidates: &[mirage_core::failover::NodeEntry],
+) -> Option<String> {
+    let mut tasks = Vec::new();
+    for c in candidates.iter().cloned() {
+        let rt2 = rt.clone();
+        tasks.push(rt2.spawn(async move {
+            let Ok(node_uri) = mirage_core::node_uri::NodeUri::parse(&c.uri) else {
+                return (c.uri, i64::MAX);
+            };
+            let node = NodeInfo::from_node_uri(&node_uri);
+            // 与 testNode 同路径: 取默认出站的 Mirage 池, 计一次 get() 的往返。
+            let rtt = match Engine::new(&node) {
+                Ok(engine) => {
+                    let r = async {
+                        let outbound = engine.outbounds.get(engine.default_tag())?.clone();
+                        let leaf = outbound.resolve_leaf();
+                        let mirage_core::proxy::outbound::OutboundNode::Mirage { pool, .. } =
+                            &*leaf
+                        else {
+                            return None;
+                        };
+                        let t0 = std::time::Instant::now();
+                        match tokio::time::timeout(std::time::Duration::from_secs(3), pool.get())
+                            .await
+                        {
+                            Ok(Ok(_)) => Some(t0.elapsed().as_millis() as i64),
+                            _ => None,
+                        }
+                    }
+                    .await;
+                    engine.shutdown();
+                    r.unwrap_or(i64::MAX)
+                }
+                Err(_) => i64::MAX,
+            };
+            (c.uri, rtt)
+        }));
+    }
+    let mut best: Option<(String, i64)> = None;
+    for t in tasks {
+        if let Ok((uri, rtt)) = t.await {
+            if rtt != i64::MAX && best.as_ref().is_none_or(|(_, b)| rtt < *b) {
+                best = Some((uri, rtt));
+            }
+        }
+    }
+    best.map(|(u, _)| u)
+}
+
+/// 把运行中的引擎热替换到指定节点 (与 `setNode` 同路径)。
+fn switch_engine_to(state: &Arc<RunState>, uri: &str) -> Result<(), String> {
+    let node_uri = mirage_core::node_uri::NodeUri::parse(uri).map_err(|e| e.to_string())?;
+    let mut node = NodeInfo::from_node_uri(&node_uri);
+    node.pool_size = CURRENT_POOL_SIZE.load(Ordering::Relaxed);
+    // 注意: 本函数由看门狗在 runtime 线程内调用, **不能**用 rt.block_on ——
+    // 在 runtime 内再起 runtime 会 panic, 且该 panic 发生在 spawn 的任务里,
+    // jni_boundary! 捕获不到, 表现为看门狗静默死亡。Engine::new 本身是同步的,
+    // 它只要求处于 runtime 上下文中, 而这里已经满足。
+    let new_engine = Engine::new(&node).map_err(|e| e.to_string())?;
+    state.stack.swap_engine(new_engine);
+    *CURRENT_NODE_URI.lock().unwrap_or_else(|e| e.into_inner()) = Some(uri.to_string());
+    Ok(())
 }
 
 /// `void stop()`
@@ -770,6 +1010,70 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_setRules(
         } else {
             0
         }
+    })
+}
+
+/// `boolean setNodeList(String json)` —— 节点全表下发 (下沉方案 P1)。
+///
+/// 入参沿用外壳既有的 `nodes_json` 形状: `[{"uri":"...","name":"..."}]`。
+/// 内核持有清单才能在 P2 自主选路; 解析失败不清空既有清单。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_setNodeList(
+    mut env: JNIEnv,
+    _class: JClass,
+    json: JString,
+) -> jboolean {
+    jni_boundary!(0, {
+        let json_str: String = match env.get_string(&json) {
+            Ok(s) => s.into(),
+            Err(_) => return 0,
+        };
+        match mirage_core::failover::set_node_list(&json_str) {
+            Some(n) => {
+                tracing::info!("[failover] 节点全表已下发: {n} 条");
+                1
+            }
+            None => 0,
+        }
+    })
+}
+
+/// `boolean setFailoverPolicy(String json)` —— 切换策略下发 (下沉方案 P1)。
+///
+/// 字段: `mode` / `interval_sec` / `backoff_sec` / `restart_delay_ms`,
+/// 缺省值与外壳既有实现一致 (best / 15s / 0 / 3000ms)。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_setFailoverPolicy(
+    mut env: JNIEnv,
+    _class: JClass,
+    json: JString,
+) -> jboolean {
+    jni_boundary!(0, {
+        let json_str: String = match env.get_string(&json) {
+            Ok(s) => s.into(),
+            Err(_) => return 0,
+        };
+        if mirage_core::failover::set_policy(&json_str) {
+            1
+        } else {
+            0
+        }
+    })
+}
+
+/// `void onNetworkChanged(long netHandle, boolean hasInternet)` —— 物理网络变更转发。
+///
+/// `ConnectivityManager.NetworkCallback` 的注册必须留在外壳 (框架 API),
+/// 内核只消费结果: P2 据此区分「节点不可达」与「全网不可达」, 后者不应触发切换。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_onNetworkChanged(
+    _env: JNIEnv,
+    _class: JClass,
+    net_handle: jlong,
+    has_internet: jboolean,
+) {
+    jni_boundary!((), {
+        mirage_core::failover::on_network_changed(net_handle as u64, has_internet != 0);
     })
 }
 
