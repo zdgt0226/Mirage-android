@@ -108,6 +108,40 @@ class CoreService : VpnService() {
             stopSeq <= 0L || stopSeq >= activeSessionSeq
     }
 
+    /**
+     * 原生调用安全守卫 (纯逻辑 / 测试解耦)。
+     *
+     * 解决的致命缺陷 (在 SO-02K 真机复现):
+     * APK 缺 libmirage_jni.so (或自定义内核损坏) 时，UI 绑定 :core 后调用 isRunning() / getStats() 等，
+     * binder 直接调 MirageNative.*，抛 java.lang.UnsatisfiedLinkError (属于 java.lang.Error，非 Exception)，
+     * 在 Binder 线程上未捕获导致 :core 进程崩溃，App 反复弹出「屡次停止运行」。
+     *
+     * 守卫原则:
+     * 1. 严格检查 [NativeLoader.isLoaded()]，未加载成功时绝不触碰 [MirageNative] 外部方法，直接返回安全默认值。
+     * 2. 即使已加载，仍用 [runCatching] 兜底，防止底层 JNI 链接失效或抛出异常。
+     * 3. 绝不在查询/设置等非启动路径隐式触发 [NativeLoader.load] (内核选择必须只发生在受控的启动流程中)。
+     */
+    internal object NativeGuard {
+        /** 是否允许向原生层发起调用: 仅当原生动态库已成功装载时放行。 */
+        fun shouldDispatchNative(isLoaded: Boolean): Boolean = isLoaded
+
+        /**
+         * 原生调用保护包装:
+         * 当原生动态库未加载时安全短路返回 [default]，绝不执行 [block]；已加载时执行并兜底异常。
+         */
+        inline fun <T> runGuarded(isLoaded: Boolean, default: T, block: () -> T): T {
+            if (!shouldDispatchNative(isLoaded)) return default
+            return runCatching(block).getOrDefault(default)
+        }
+    }
+
+    /**
+     * 原生库调用保护包装:
+     * 检查 [NativeLoader.isLoaded]，未加载时短路返回安全默认值 [default]，绝不触发 [MirageNative] 调用。
+     */
+    private inline fun <T> native(default: T, block: () -> T): T =
+        NativeGuard.runGuarded(NativeLoader.isLoaded(), default, block)
+
     data class ServiceConfig(
         var uri: String = "",
         var poolSize: Int = -1,
@@ -404,7 +438,7 @@ class CoreService : VpnService() {
         // 停止流程进行中 (可能正持锁或刚释放锁): 放弃本次启动。
         // 这是「用户点断开后 VPN 自己回来」的根因守卫 —— failoverRestartJob 的
         // cancel() 是协作式的, 不保证已 join, 它可能已经越过 isActive 检查在此排队。
-        val nativeRunning = runCatching { MirageNative.isRunning() }.getOrDefault(false)
+        val nativeRunning = isRunningInternal()
         when (StateMachine.verdictForStart(serviceState, nativeRunning)) {
             StartVerdict.RejectStopping -> {
                 log("[core] 正在停止中, 忽略本次启动请求")
@@ -602,6 +636,13 @@ class CoreService : VpnService() {
             NodeStore.getPoolSize(this)
         }
         log("[core] 开始启动内核 (uri=${uri.take(30)}..., poolSize=$poolSize, mtu=$mtu)")
+        if (!NativeLoader.isLoaded()) {
+            log("[core] 内核启动失败: 原生动态库未加载")
+            runCatching { fd.close() }
+            tunFd = null
+            notifyState()
+            return -1
+        }
         val rc = MirageNative.start(rawFd, uri, poolSize, mtu)
         if (rc != 0) {
             log("[core] 内核启动失败 rc=$rc")
@@ -754,9 +795,9 @@ class CoreService : VpnService() {
             val interval = baseInterval + failoverBackoffSec
             delay(interval * 1000)
             if (currentPhysicalNetwork == null) continue
-            if (!MirageNative.isRunning()) continue
+            if (!isRunningInternal()) continue
             // 修复 M1: Fail-Closed (异常/JNI失败时视为不健康，防止假死与自愈失效)
-            val healthy = runCatching { MirageNative.isHealthy() }.getOrDefault(false)
+            val healthy = isHealthyInternal()
             if (healthy) {
                 consecutiveFailures = 0
                 failoverBackoffSec = 0L
@@ -792,7 +833,7 @@ class CoreService : VpnService() {
             failoverRestartJob?.cancel()
             failoverRestartJob = scope.launch {
                 delay(3000)
-                if (isActive && !MirageNative.isRunning()) startInternal()
+                if (isActive && !isRunningInternal()) startInternal()
             }
             return false // 修复 2.1: 单节点重连未能切换可用节点，返回 false 允许 failoverBackoffSec 递增退避
         }
@@ -842,7 +883,7 @@ class CoreService : VpnService() {
             failoverRestartJob?.cancel()
             failoverRestartJob = scope.launch {
                 delay(3000)
-                if (isActive && !MirageNative.isRunning()) startInternal()
+                if (isActive && !isRunningInternal()) startInternal()
             }
             return false // 修复 2.1: 未能切换到不同可用节点，返回 false 允许退避
         }
@@ -897,61 +938,65 @@ class CoreService : VpnService() {
 
     fun setNodeInternal(uri: String): Boolean {
         serviceConfig.uri = uri
-        return if (MirageNative.isRunning()) {
-            runCatching { MirageNative.setNode(uri) }.getOrDefault(false)
+        return if (isRunningInternal()) {
+            native(false) { MirageNative.setNode(uri) }
         } else true
     }
 
     fun setPoolSizeInternal(poolSize: Int): Boolean {
         serviceConfig.poolSize = poolSize
-        return if (MirageNative.isRunning()) {
-            runCatching { MirageNative.setPoolSize(poolSize) }.getOrDefault(false)
+        return if (isRunningInternal()) {
+            native(false) { MirageNative.setPoolSize(poolSize) }
         } else true
     }
 
     fun getPoolSizeInternal(): Int =
-        if (MirageNative.isRunning()) MirageNative.getPoolSize() else if (serviceConfig.poolSize > 0) serviceConfig.poolSize else NodeStore.getPoolSize(this)
+        if (isRunningInternal()) native(0) { MirageNative.getPoolSize() }
+        else if (serviceConfig.poolSize > 0) serviceConfig.poolSize
+        else NodeStore.getPoolSize(this)
 
-    fun setRulesInternal(json: String): Boolean = MirageNative.setRules(json)
+    fun setRulesInternal(json: String): Boolean = native(false) { MirageNative.setRules(json) }
     fun setBlockQuicInternal(block: Boolean): Boolean {
         serviceConfig.blockQuic = block
-        return MirageNative.setBlockQuic(block)
+        return if (isRunningInternal()) native(false) { MirageNative.setBlockQuic(block) } else true
     }
     fun isBlockQuicInternal(): Boolean =
-        if (MirageNative.isRunning()) MirageNative.isBlockQuic() else serviceConfig.blockQuic
+        if (isRunningInternal()) native(serviceConfig.blockQuic) { MirageNative.isBlockQuic() } else serviceConfig.blockQuic
     fun setUdpMuxInternal(enabled: Boolean): Boolean {
         log("[core] 切换 UDP Mux: $enabled")
         serviceConfig.udpMux = enabled
-        return MirageNative.setUdpMux(enabled)
+        return if (isRunningInternal()) native(false) { MirageNative.setUdpMux(enabled) } else true
     }
     fun isUdpMuxInternal(): Boolean =
-        if (MirageNative.isRunning()) MirageNative.isUdpMux() else serviceConfig.udpMux
-    fun clearDnsCacheInternal(): Boolean = MirageNative.clearDnsCache()
+        if (isRunningInternal()) native(serviceConfig.udpMux) { MirageNative.isUdpMux() } else serviceConfig.udpMux
+    fun clearDnsCacheInternal(): Boolean = native(false) { MirageNative.clearDnsCache() }
     fun setDnsServersInternal(directDns: String, remoteDns: String): Boolean {
         serviceConfig.directDns = directDns
         serviceConfig.remoteDns = remoteDns
-        return MirageNative.setDnsServers(directDns, remoteDns)
+        return if (isRunningInternal()) native(false) { MirageNative.setDnsServers(directDns, remoteDns) } else true
     }
     fun getDirectDnsInternal(): String = serviceConfig.directDns
     fun getRemoteDnsInternal(): String = serviceConfig.remoteDns
 
-    fun isRunningInternal(): Boolean = MirageNative.isRunning()
-    fun isHealthyInternal(): Boolean = MirageNative.isHealthy()
-    fun latencyMsInternal(): Long = MirageNative.latencyMs()
-    fun getStatsInternal(): DoubleArray = MirageNative.getStats()
-    fun getConnectionsJsonInternal(): String = MirageNative.getConnectionsJson()
-    fun recentLogsInternal(): Array<String> =
-        (LogStore.all() + MirageNative.recentLogs().toList()).takeLast(150).toTypedArray()
-    fun getBuiltinDomainsInternal(): Array<String> = MirageNative.getBuiltinDomains()
-    fun getBuiltinIpCountInternal(): Long = MirageNative.getBuiltinIpCount()
-    fun testNodeInternal(uri: String, timeoutMs: Int): Long = MirageNative.testNode(uri, timeoutMs)
+    fun isRunningInternal(): Boolean = native(false) { MirageNative.isRunning() }
+    fun isHealthyInternal(): Boolean = native(false) { MirageNative.isHealthy() }
+    fun latencyMsInternal(): Long = native(-1L) { MirageNative.latencyMs() }
+    fun getStatsInternal(): DoubleArray = native(DoubleArray(0)) { MirageNative.getStats() }
+    fun getConnectionsJsonInternal(): String = native("[]") { MirageNative.getConnectionsJson() }
+    fun recentLogsInternal(): Array<String> {
+        val nativeLogs = native(emptyArray()) { MirageNative.recentLogs() }
+        return (LogStore.all() + nativeLogs.toList()).takeLast(150).toTypedArray()
+    }
+    fun getBuiltinDomainsInternal(): Array<String> = native(emptyArray()) { MirageNative.getBuiltinDomains() }
+    fun getBuiltinIpCountInternal(): Long = native(0L) { MirageNative.getBuiltinIpCount() }
+    fun testNodeInternal(uri: String, timeoutMs: Int): Long = native(-1L) { MirageNative.testNode(uri, timeoutMs) }
 
     fun registerCallbackInternal(cb: ICoreCallback?) {
         if (cb == null) return
         // register() 按 binder 身份去重, 重连后重复注册不会累积
         synchronized(callbacks) { callbacks.register(cb) }
         // 注册后立即推一次当前运行状态
-        runCatching { cb.onStateChanged(MirageNative.isRunning()) }
+        runCatching { cb.onStateChanged(isRunningInternal()) }
     }
 
     fun unregisterCallbackInternal(cb: ICoreCallback?) {
@@ -962,7 +1007,7 @@ class CoreService : VpnService() {
     private fun notifyState() {
         // 原生库未成功加载时 isRunning() 抛 UnsatisfiedLinkError(Error), 必须兜住:
         // failAndStop 正是在这种情况下调用本函数的。
-        val running = runCatching { MirageNative.isRunning() }.getOrDefault(false)
+        val running = isRunningInternal()
         broadcast { it.onStateChanged(running) }
     }
 
@@ -1116,14 +1161,20 @@ class CoreService : VpnService() {
 
     /** AIDL binder: App 跨进程控制的入口。 */
     private val binder = object : ICoreService.Stub() {
-        override fun start(): Int = startInternal()
+        override fun start(): Int {
+            if (!NativeLoader.isLoaded()) {
+                log("[core] binder.start 拒绝: 原生内核尚未成功加载")
+                return -1
+            }
+            return startInternal()
+        }
         override fun stop() = stopInternal()
         override fun setNode(uri: String): Boolean = setNodeInternal(uri)
         override fun setPoolSize(poolSize: Int): Boolean = setPoolSizeInternal(poolSize)
         override fun getPoolSize(): Int = getPoolSizeInternal()
         override fun setRules(json: String): Boolean = setRulesInternal(json)
-        override fun getRuleHits(): String = MirageNative.getRuleHits()
-        override fun resetRuleHits(): Boolean = MirageNative.resetRuleHits()
+        override fun getRuleHits(): String = native("[]") { MirageNative.getRuleHits() }
+        override fun resetRuleHits(): Boolean = native(false) { MirageNative.resetRuleHits() }
         override fun setLogLevel(level: String?): Boolean =
             level?.let { setLogLevelInternal(it) } ?: false
         override fun setBlockQuic(block: Boolean): Boolean = setBlockQuicInternal(block)
@@ -1145,37 +1196,39 @@ class CoreService : VpnService() {
         override fun getBuiltinIpCount(): Long = getBuiltinIpCountInternal()
         override fun testNode(uri: String, timeoutMs: Int): Long = testNodeInternal(uri, timeoutMs)
         override fun loadGeoFiles(geositePath: String?, geoipPath: String?): String =
-            GeoManager.loadGeoFilesToNative(this@CoreService, geositePath, geoipPath)
+            native("{\"status\":\"error\"}") {
+                GeoManager.loadGeoFilesToNative(this@CoreService, geositePath, geoipPath)
+            }
         override fun getGeoTags(): String =
-            runCatching { MirageNative.getGeoTags() }.getOrDefault("{}")
+            native("{}") { MirageNative.getGeoTags() }
         override fun getGeoTagsDetail(): String =
-            runCatching { MirageNative.getGeoTagsDetail() }.getOrDefault("{}")
+            native("{}") { MirageNative.getGeoTagsDetail() }
         override fun getDiagnosticSnapshotJson(): String =
-            runCatching { MirageNative.getDiagnosticSnapshotJson() }.getOrDefault("{}")
+            native("{}") { MirageNative.getDiagnosticSnapshotJson() }
         override fun clearNativeLogs(): Boolean {
             LogStore.clear()
             runCatching { java.io.File(this@CoreService.filesDir, "core.log").delete() }
-            return runCatching { MirageNative.clearNativeLogs() }.getOrDefault(false)
+            return native(false) { MirageNative.clearNativeLogs() }
         }
         override fun getLogs(): String =
-            runCatching { MirageNative.getLogs() }.getOrDefault("")
+            native("") { MirageNative.getLogs() }
         override fun closeConnection(id: Long): Boolean =
-            runCatching { MirageNative.closeConnection(id) }.getOrDefault(false)
+            native(false) { MirageNative.closeConnection(id) }
         override fun closeAllConnections(): Int =
-            runCatching { MirageNative.closeAllConnections() }.getOrDefault(0)
+            native(0) { MirageNative.closeAllConnections() }
         override fun setOutboundMode(mode: Int): Boolean {
             serviceConfig.outboundMode = mode
-            return runCatching { MirageNative.setOutboundMode(mode) }.getOrDefault(false)
+            return if (isRunningInternal()) native(false) { MirageNative.setOutboundMode(mode) } else true
         }
         override fun getOutboundMode(): Int {
-            return if (MirageNative.isRunning()) {
-                MirageNative.getOutboundMode()
+            return if (isRunningInternal()) {
+                native(serviceConfig.outboundMode) { MirageNative.getOutboundMode() }
             } else {
                 serviceConfig.outboundMode
             }
         }
         override fun getRecentRequestsJson(): String =
-            runCatching { MirageNative.getRecentRequestsJson() }.getOrDefault("[]")
+            native("[]") { MirageNative.getRecentRequestsJson() }
         override fun setAutoReconnect(enabled: Boolean): Boolean {
             serviceConfig.autoReconnect = enabled
             return true
