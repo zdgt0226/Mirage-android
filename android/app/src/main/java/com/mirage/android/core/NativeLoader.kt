@@ -33,6 +33,12 @@ object NativeLoader {
             if (file != null && file.exists()) {
                 try {
                     Log.i("Mirage", "[loader] 尝试加载自定义内核: ${activeCore.name} (${file.absolutePath})")
+                    // 符号集门禁: 导入时已校验过, 这里再校验一次覆盖两种漏网情况 ——
+                    // (1) 门禁上线之前就已导入的旧内核; (2) 导入后文件被替换。
+                    // 不通过就抛, 落到下面的 catch 自动回退内置核。
+                    NativeSymbolPolicy.verify(file, NativeLoader::class.java.classLoader)?.let { reason ->
+                        throw UnsatisfiedLinkError("自定义内核接口面不匹配: $reason")
+                    }
                     System.load(file.absolutePath)
                     isLoaded = true
                     activeCoreDisplayName = activeCore.name

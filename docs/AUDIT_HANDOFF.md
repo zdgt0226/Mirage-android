@@ -40,6 +40,19 @@ VARIANT=release bash scripts/build-android.sh   # release
 bash scripts/build-android.sh native
 ```
 
+> **自定义内核（运行时换核）的符号集门禁**：`CoreManager.importCore` 与 `NativeLoader.load`
+> 都会调 `NativeSymbolPolicy.verify()`，比对 `.so` 的 `.dynsym` 导出与 `MirageNative`
+> 反射出的 native 方法清单，缺符号即拒绝（fail-closed：解析不出符号表同样拒绝）。
+> 为什么需要它：`ElfChecker` 原先只读 ELF 头的 `e_machine`，架构对但接口面偏旧的 `.so`
+> 能 `System.load` 成功，之后每次调用缺失方法抛 `UnsatisfiedLinkError` 被 `NativeGuard`
+> 兜住并返回默认值——**静默降级**，功能整段失效却不崩。
+> 实测依据（2026-11-03）：上游 Mirage-rs run `41558057174`（`62cf686`, v0.17.3）的
+> `mirage-jni-so` 产物导出 43 个 JNI 符号，本仓库 `MirageNative` 声明 46 个，缺
+> `setNodeList` / `setFailoverPolicy` / `onNetworkChanged`——该 run 启动于 `01:11:18Z`，
+> 早于 PR #22 合并（`01:36:47Z`）25 分钟。
+> 门禁依赖 `-keep class com.mirage.android.core.MirageNative { *; }`：规则收窄会让它
+> 拒绝一切自定义内核（方向安全，但会挡掉合法内核）。
+
 > **注意（新 worktree 必须先构建原生库）**：`android/app/src/main/jniLibs/` 被 `.gitignore` 忽略，新 worktree 中不存在 `libmirage_jni.so`；打 APK 前必须先按仓库脚本构建原生库并放入 jniLibs，安装前用 `unzip -l <apk> | grep lib/` 核对含 `lib/arm64-v8a/libmirage_jni.so`（教训：2026-09-26 曾因此打出无内核的 release 包）。
 
 **只做 Kotlin 语法校验**（比全量构建快很多，改 Kotlin 后先跑这个）：

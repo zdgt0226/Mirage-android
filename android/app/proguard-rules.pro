@@ -8,6 +8,11 @@
 # 反查的方法时必须同步加进那份清单, 否则门禁对它形同虚设。
 # 同时 external fun 对应的 native 方法也必须保名, 否则 System.loadLibrary 后
 # 找不到符号直接 UnsatisfiedLinkError。
+#
+# 另有一条新依赖: NativeSymbolPolicy 用 Class.forName("com.mirage.android.core.MirageNative")
+# + declaredMethods 反射出 native 方法清单, 作为自定义内核符号集门禁的期望值。
+# 本条 keep 规则一旦收窄 (类名被混淆或 native 方法被改名), 该门禁会把**所有**
+# 自定义内核判为不匹配而拒绝导入/加载 (fail-closed, 不会误放行)。
 -keep class com.mirage.android.core.MirageNative { *; }
 -keepclasseswithmembernames class * {
     native <methods>;
