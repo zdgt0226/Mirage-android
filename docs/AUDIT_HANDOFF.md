@@ -83,6 +83,32 @@ cd native/mirage-core && cargo test --lib && cargo build --release
 不要改回 `channel = "stable"`：CI 跑 `-D warnings`，浮动 channel 意味着上游发版即 CI 红
 （§1.7 实测踩过）。
 
+#### `src/vendor/` 不参与编译（2026-11-03 实证）
+
+`native/vendor-sync.sh` 把上游 22 个模块复制到 `native/mirage-core/src/vendor/`，
+但**那棵树不参与编译**：`lib.rs` 对它的唯一引用是 `include_str!("vendor/SYNC.md")`
+（一个版本字符串），全树没有 `include!` 也没有 `#[path]`。实际编译的是手工裁剪树
+`src/{crypto,proxy,dns,config.rs,monitor.rs,time_sync.rs,node_uri.rs,net_util.rs}`。
+
+证据（三条独立）：
+
+1. `vendor/proxy/mod.rs` 声明了 `shadowsocks` / `wg` / `splice` / `mixed` / `healthcheck`
+   等在 vendor 树中**并不存在**的模块文件 —— 若它参与编译，crate 根本编不过；
+   而把 vendor 同步到 `62cf686` 之后 `cargo check` 仍然通过。
+2. `cargo fmt --check` 通过 —— vendor 树里的上游代码未被纳入格式化范围，
+   说明它不在模块树里。
+3. 编译树与 vendor 副本本来就有大量差异（`config.rs` 2894 行、`monitor.rs` 1751 行、
+   `pool.rs` 1284 行），那是裁剪的结果，不是"该同步没做"。
+
+**后果一：跑完 `vendor-sync.sh` 协议行为不会有任何变化。** 它刷新的是"上游原版参考副本"，
+供人工比对；要真正升级协议，必须把差异手工移植进 `src/` 裁剪树。
+`SYNC.md` 里的 commit 号只代表参考副本的版本，**不代表本 APK 的协议行为**。
+
+**后果二：上游 Mirage-rs `build.yml` 的 `android-core` job 给的是伪保证。** 它的注释写
+"把本仓库当前 commit 的协议核 vendor-sync 进去再交叉编译 → 保证当前协议永远是 Android
+可编译的"，但它 sync 进的是惰性参考树，编的仍是旧的手工裁剪码。该 job 绿灯**不能**
+用来证明上游新协议与移动端裁剪边界兼容。（本轮一度据此下过结论，已更正。）
+
 ### 真机
 
 `adb devices` 通常有设备在线（如 `R5CX21FD9PX` 或 `BH905W2A9G`）。AGENTS.md 要求真机验证优先。
