@@ -165,7 +165,8 @@ impl OutboundNode {
                     .unwrap();
 
                 let mut curr_guard = current.write().unwrap_or_else(|e| e.into_inner());
-                if let Some(curr) = curr_guard.as_ref() {
+                // 迟滞只保护健康的当前节点: 死节点的历史延迟样本不清空, 不判健康会一直黏在死节点上
+                if let Some(curr) = curr_guard.as_ref().filter(|c| c.is_healthy()) {
                     if let Some(curr_lat) = curr.latency_ms(test_type) {
                         if curr_lat <= best.1 + *tolerance_ms {
                             return curr.resolve_leaf();
@@ -237,26 +238,14 @@ impl OutboundNode {
             OutboundNode::Mirage { pool, .. } => {
                 let hp = target.host_port();
                 let tb = hp.as_bytes();
-                if tb.len() > u16::MAX as usize {
-                    anyhow::bail!("target 过长: {} 字节", tb.len());
+                if tb.is_empty() || tb.len() > 512 {
+                    anyhow::bail!("target 长度非法 ({} 字节, 需 1..=512)", tb.len());
                 }
                 // Model X 精简 (transport=quic): 共享连接开一条流, 写 [token(32B)][2B len][host:port],
                 // 之后裸转发 (QUIC 自加密, 无内层 fake-TLS/AEAD)。
                 #[cfg(feature = "quic")]
                 if pool.is_quic() {
-                    use tokio::io::AsyncWriteExt;
-                    let mux = pool.quic_mux().ok_or_else(|| anyhow::anyhow!("quic mux 未初始化"))?;
-                    let (send, recv) = mux.open_stream().await?;
-                    let token = crate::crypto::hello_auth::make_session_token(
-                        pool.password(),
-                        crate::crypto::hello_auth::QUIC_LEAN_BIND,
-                    );
-                    let mut hdr = Vec::with_capacity(32 + 2 + tb.len());
-                    hdr.extend_from_slice(&token);
-                    hdr.extend_from_slice(&(tb.len() as u16).to_be_bytes());
-                    hdr.extend_from_slice(tb);
-                    let mut stream = crate::proxy::quic::QuicBiStream::new(send, recv);
-                    stream.write_all(&hdr).await?;
+                    let stream = pool.open_quic_lean(&hp).await?;
                     return Ok(OutStream::Quic(stream));
                 }
                 // TCP (Model Y): fake-TLS 暖池隧道。目标头 [2B len][host:port], 服务端远程解析 (抗污染)。
@@ -438,6 +427,7 @@ impl tokio::io::AsyncWrite for OutStream {
 
 pub struct OutboundManager {
     pub outbounds: HashMap<String, Arc<OutboundNode>>,
+    pub selector_persist_path: String,
 }
 
 impl OutboundManager {
@@ -458,7 +448,7 @@ impl OutboundManager {
             underlying,
             pfs: *pfs,
             transport: *transport,
-            quic_window_mb: quic_window_mb.unwrap_or(2),
+            quic_window_mb: quic_window_mb.unwrap_or(crate::config::DEFAULT_QUIC_WINDOW_MB),
             quic_erasure_cc: quic_erasure_cc.unwrap_or(true),
             // SNI 默认 = camouflage_host (良性域名, 与 TCP fake-TLS 一致)。
             quic_sni: quic_sni.clone().unwrap_or_else(|| camouflage_host.clone()),
@@ -507,6 +497,17 @@ impl OutboundManager {
     }
 
     pub fn new(cfg: &Config) -> anyhow::Result<Self> {
+        let selector_persist_path = crate::config::resolve_selector_persist_path(cfg);
+        // 只有配了 selector 才读写持久化文件: 服务端 / 无组配置 / check 等不碰它
+        // (同机服务端与客户端默认共用 state 目录, 不能互相清对方的记录)。
+        let has_selector = cfg.outbounds.iter().any(|o| matches!(o, crate::config::OutboundConfig::Selector { .. }));
+        let persisted_choices = if has_selector {
+            crate::proxy::selector_state::load_selector_choices(&selector_persist_path)
+        } else {
+            HashMap::new()
+        };
+        let mut stale_selector_records = Vec::new();
+
         let mut outbounds = HashMap::new();
         let mut deferred = Vec::new();
 
@@ -524,7 +525,7 @@ impl OutboundManager {
                 }
                 OutboundConfig::Wireguard {
                     tag, private_key, peer_public_key, preshared_key, endpoint, address,
-                    mtu, persistent_keepalive, dns,
+                    mtu, persistent_keepalive, dns, ..
                 } => {
                     // 配置有问题时**降级为 Block, 而不是 Direct**。
                     //
@@ -605,6 +606,7 @@ impl OutboundManager {
 
         // Pass 2: Group nodes (Urltest, Fallback) - simplified fixpoint resolution
         let mut pending = deferred;
+        let mut hc_started = std::collections::HashSet::new();
         while !pending.is_empty() {
             let mut progress = false;
             let mut next_round = Vec::new();
@@ -675,8 +677,14 @@ impl OutboundManager {
                 if resolved {
                     if hc_interval > 0 && !hc_url.is_empty() {
                         for child in &children {
-                            if let OutboundNode::Mirage { .. } = &**child {
-                                crate::proxy::healthcheck::start_health_checker(child.clone(), hc_url.clone(), hc_interval);
+                            if let OutboundNode::Mirage { tag: ctag, .. } = &**child {
+                                if hc_started.insert(ctag.clone()) {
+                                    crate::proxy::healthcheck::start_health_checker(
+                                        Arc::downgrade(child),
+                                        hc_url.clone(),
+                                        hc_interval,
+                                    );
+                                }
                             }
                         }
                     }
@@ -690,10 +698,23 @@ impl OutboundManager {
                             current: Arc::new(RwLock::new(None)),
                         })
                     } else if otype == "selector" {
+                        // 启动时从持久化文件恢复手动选择 (热重载整体保留旧出站, 内存选择不受影响);
+                        // 记录的成员已不在组里则回到第一个成员并清理该记录。
+                        let selected_node = match persisted_choices.get(tag) {
+                            Some(ftag) => match children.iter().find(|c| c.tag() == ftag) {
+                                Some(c) => Some(c.clone()),
+                                None => {
+                                    stale_selector_records.push(tag.clone());
+                                    children.first().cloned()
+                                }
+                            },
+                            None => children.first().cloned(),
+                        };
+
                         Arc::new(OutboundNode::Selector {
                             tag: tag.clone(),
                             children,
-                            current: Arc::new(RwLock::new(None)),
+                            current: Arc::new(RwLock::new(selected_node)),
                         })
                     } else if otype == "load_balance" {
                         Arc::new(OutboundNode::LoadBalance {
@@ -724,7 +745,12 @@ impl OutboundManager {
             pending = next_round;
         }
 
-        Ok(Self { outbounds })
+        // 只清"组还在但成员已失效"的记录; 本配置里没有的组不动 (可能属于同机另一进程)
+        if !stale_selector_records.is_empty() {
+            crate::proxy::selector_state::remove_selector_choices(&selector_persist_path, &stale_selector_records);
+        }
+
+        Ok(Self { outbounds, selector_persist_path })
     }
 
     pub fn get(&self, tag: &str) -> Option<Arc<OutboundNode>> {
@@ -1029,5 +1055,246 @@ mod lb_tests {
         let cfg: crate::config::Config = serde_json::from_str(s).unwrap();
         assert!(cfg.semantic_issues().iter().any(|i| i.contains("strategy") && i.contains("consistent-hash")),
             "未支持的 strategy 应被拦: {:?}", cfg.semantic_issues());
+    }
+}
+
+#[cfg(test)]
+mod selector_tests {
+    use super::*;
+
+    fn cfg_with_selector(persist_path: &str, members: &[&str]) -> crate::config::Config {
+        let members_json = serde_json::to_string(members).unwrap();
+        let s = format!(r#"{{
+            "inbounds": [],
+            "outbounds": [
+                {{ "type": "direct", "tag": "c1" }},
+                {{ "type": "direct", "tag": "c2" }},
+                {{ "type": "selector", "tag": "sel", "outbounds": {members_json} }}
+            ],
+            "routing": {{ "default_outbound": "sel", "rules": [] }},
+            "tuning": {{
+                "selector_persist_path": "{persist_path}"
+            }}
+        }}"#);
+        serde_json::from_str(&s).unwrap()
+    }
+
+    #[test]
+    fn test_selector_switch_persists_and_restores() {
+        let tmp_dir = std::env::temp_dir().join(format!("sel_test_{}", fastrand::u64(..)));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let path = tmp_dir.join("selector_state.json");
+        let path_str = path.to_str().unwrap();
+
+        let cfg = cfg_with_selector(path_str, &["c1", "c2"]);
+        let m1 = OutboundManager::new(&cfg).unwrap();
+        let sel_node1 = m1.outbounds.get("sel").unwrap();
+        assert_eq!(sel_node1.resolve_leaf().tag(), "c1");
+
+        // 模拟 API 切换并持久化选择
+        crate::proxy::selector_state::save_selector_choice(path_str, "sel", "c2");
+
+        // 重建出站管理器 (模拟服务重启)
+        let m2 = OutboundManager::new(&cfg).unwrap();
+        let sel_node2 = m2.outbounds.get("sel").unwrap();
+        assert_eq!(sel_node2.resolve_leaf().tag(), "c2", "重启后应成功恢复至 c2");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_selector_member_deleted_falls_back_and_cleans() {
+        let tmp_dir = std::env::temp_dir().join(format!("sel_del_test_{}", fastrand::u64(..)));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let path = tmp_dir.join("selector_state.json");
+        let path_str = path.to_str().unwrap();
+
+        // 初始持久化状态为 c2
+        crate::proxy::selector_state::save_selector_choice(path_str, "sel", "c2");
+
+        // 此时配置中成员删除了 c2, 仅剩 c1
+        let cfg = cfg_with_selector(path_str, &["c1"]);
+        let m = OutboundManager::new(&cfg).unwrap();
+        let sel_node = m.outbounds.get("sel").unwrap();
+        assert_eq!(sel_node.resolve_leaf().tag(), "c1", "成员被删后应回退到第一个成员 c1");
+
+        // 验证文件中的失效记录已被清理
+        let loaded = crate::proxy::selector_state::load_selector_choices(path_str);
+        assert!(!loaded.contains_key("sel"), "失效成员的选择记录应被清理");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_selector_records_of_other_groups_untouched() {
+        // 同机另一进程 (另一份配置) 的组记录不能被清掉; 无 selector 的配置不碰文件
+        let tmp_dir = std::env::temp_dir().join(format!("sel_other_test_{}", fastrand::u64(..)));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let path = tmp_dir.join("selector_state.json");
+        let path_str = path.to_str().unwrap();
+        crate::proxy::selector_state::save_selector_choice(path_str, "other-group", "x");
+
+        let cfg = cfg_with_selector(path_str, &["c1", "c2"]);
+        let _m = OutboundManager::new(&cfg).unwrap();
+        let loaded = crate::proxy::selector_state::load_selector_choices(path_str);
+        assert_eq!(loaded.get("other-group").map(String::as_str), Some("x"), "别的组的记录应保留");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_selector_default_path_per_stats_file() {
+        let mk = |stats: &str| -> crate::config::Config {
+            serde_json::from_str(&format!(r#"{{ "gui": {{ "stats_persist_path": "{stats}" }} }}"#)).unwrap()
+        };
+        assert_eq!(crate::config::resolve_selector_persist_path(&mk("/var/lib/mirage-rs/stats_client.json")),
+            "/var/lib/mirage-rs/selector_state_client.json");
+        assert_eq!(crate::config::resolve_selector_persist_path(&mk("/var/lib/mirage-rs/stats_server.json")),
+            "/var/lib/mirage-rs/selector_state_server.json");
+        assert_eq!(crate::config::resolve_selector_persist_path(&mk("/var/lib/mirage-rs/stats.json")),
+            "/var/lib/mirage-rs/selector_state.json");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_selector_save_through_dangling_symlink_keeps_link() {
+        let tmp_dir = std::env::temp_dir().join(format!("sel_link_test_{}", fastrand::u64(..)));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let target = tmp_dir.join("real_state.json");
+        let link = tmp_dir.join("selector_state.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        crate::proxy::selector_state::save_selector_choice(link.to_str().unwrap(), "sel", "c2");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "链接本身不能被替换");
+        assert!(target.exists(), "应写到链接目标");
+        let loaded = crate::proxy::selector_state::load_selector_choices(link.to_str().unwrap());
+        assert_eq!(loaded.get("sel").map(String::as_str), Some("c2"));
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_selector_save_current_writes_latest_in_memory_value() {
+        // 连切 A→B 时落盘任务先后不保证: 每次都在锁内读内存最新值, 迟到的旧任务也写最新值
+        let tmp_dir = std::env::temp_dir().join(format!("sel_cur_test_{}", fastrand::u64(..)));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let path = tmp_dir.join("selector_state.json");
+        let p = path.to_str().unwrap();
+        let latest = std::sync::Mutex::new("c2".to_string());
+        crate::proxy::selector_state::save_selector_current(p, "sel", || Some(latest.lock().unwrap().clone()));
+        // "迟到"的 A 任务: 闭包读到的仍是最新 c2
+        crate::proxy::selector_state::save_selector_current(p, "sel", || Some(latest.lock().unwrap().clone()));
+        assert_eq!(crate::proxy::selector_state::load_selector_choices(p).get("sel").map(String::as_str), Some("c2"));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_selector_corrupted_file_ignored_with_warn() {
+        let tmp_dir = std::env::temp_dir().join(format!("sel_bad_test_{}", fastrand::u64(..)));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let path = tmp_dir.join("selector_state.json");
+        let path_str = path.to_str().unwrap();
+
+        // 写入损坏的内容
+        std::fs::write(&path, b"{{{invalid-json-content").unwrap();
+
+        let cfg = cfg_with_selector(path_str, &["c1", "c2"]);
+        let m = OutboundManager::new(&cfg).expect("损坏文件不应阻断初始化");
+        let sel_node = m.outbounds.get("sel").unwrap();
+        assert_eq!(sel_node.resolve_leaf().tag(), "c1", "损坏文件应忽略并取首个节点");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+}
+
+#[cfg(test)]
+mod urltest_tests {
+    use super::*;
+    use crate::proxy::pool::{BrutalState, PoolConfig, WarmPool};
+
+    /// 建连永远失败的 Mirage 节点: 健康/延迟完全由测试手动写 pool.stats 控制。
+    fn mirage(tag: &str) -> Arc<OutboundNode> {
+        let cfg = Arc::new(PoolConfig {
+            server_host: "192.0.2.1".into(),
+            server_port: 443,
+            password: "test-only".into(),
+            camouflage_host: "example.com".into(),
+            pool_size: 1,
+            underlying: None,
+            pfs: false,
+            transport: crate::config::Transport::Tcp,
+            quic_window_mb: 4,
+            quic_erasure_cc: true,
+            quic_sni: "example.com".into(),
+            quic_low_src_port: false,
+            quic_pre_packet: false,
+            quic_obfs: None,
+            quic_pin: None,
+        });
+        let brutal = Arc::new(BrutalState {
+            configured_rate: None,
+            current_rate: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            base_rtt: None,
+            active_fds: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        });
+        let pool = Arc::new(WarmPool::new_with_connect_fn(
+            cfg,
+            brutal,
+            Arc::new(|_, _| Box::pin(async { anyhow::bail!("test: never connects") })),
+        ));
+        Arc::new(OutboundNode::Mirage {
+            tag: tag.into(),
+            pool,
+            server_host: "192.0.2.1".into(),
+            server_port: 443,
+            server_ip: Arc::new(RwLock::new(None)),
+            rtt_ms: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+            snd_cwnd: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            total_retrans: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+            total_segs_out: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+        })
+    }
+
+    fn stats(node: &Arc<OutboundNode>) -> std::sync::RwLockWriteGuard<'_, crate::proxy::pool::PoolStats> {
+        let OutboundNode::Mirage { pool, .. } = node.as_ref() else { unreachable!() };
+        pool.stats.write().unwrap()
+    }
+
+    fn urltest(children: Vec<Arc<OutboundNode>>, current: Option<Arc<OutboundNode>>) -> Arc<OutboundNode> {
+        Arc::new(OutboundNode::Urltest {
+            tag: "auto".into(),
+            children,
+            tolerance_ms: 50,
+            test_type: "http".into(),
+            current: Arc::new(RwLock::new(current)),
+        })
+    }
+
+    /// 当前节点判死但历史延迟仍在容差内时必须切走, 不能黏在死节点上。
+    #[tokio::test]
+    async fn dead_incumbent_within_tolerance_is_replaced() {
+        let a = mirage("a");
+        let b = mirage("b");
+        stats(&a).record_latency(80);
+        stats(&b).record_latency(100);
+        for _ in 0..3 {
+            stats(&a).record_failure();
+        }
+        assert!(!a.is_healthy());
+        let g = urltest(vec![a.clone(), b.clone()], Some(a.clone()));
+        assert_eq!(g.resolve_leaf().tag(), "b");
+        let OutboundNode::Urltest { current, .. } = g.as_ref() else { unreachable!() };
+        assert_eq!(current.read().unwrap().as_ref().unwrap().tag(), "b");
+    }
+
+    /// 健康的当前节点在容差内仍保留 (迟滞不变)。
+    #[tokio::test]
+    async fn healthy_incumbent_within_tolerance_is_kept() {
+        let a = mirage("a");
+        let b = mirage("b");
+        stats(&a).record_latency(120);
+        stats(&b).record_latency(100);
+        let g = urltest(vec![a.clone(), b], Some(a));
+        assert_eq!(g.resolve_leaf().tag(), "a");
     }
 }

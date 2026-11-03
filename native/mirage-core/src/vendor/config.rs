@@ -27,7 +27,7 @@ where
     })
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Deserialize, Clone)]
 pub struct GuiConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -56,6 +56,7 @@ fn default_gui_listen() -> String {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(from = "RawConfig")]
 pub struct Config {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
@@ -72,8 +73,11 @@ pub struct Config {
     /// 保留的 gzip 历史归档数。不设 = 默认 10。0 = 不保留归档 (滚动即删旧)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_keep_archives: Option<usize>,
+    #[serde(default)]
     pub inbounds: Vec<InboundConfig>,
+    #[serde(default = "default_outbounds")]
     pub outbounds: Vec<OutboundConfig>,
+    #[serde(default)]
     pub routing: RoutingConfig,
     pub advanced_dns: Option<AdvancedDnsConfig>,
     pub tuning: Option<TuningConfig>,
@@ -84,6 +88,61 @@ pub struct Config {
     /// 不设 = 内置 Chrome/FF/OkHttp 加权轮换。装载失败 (文件缺失/非法) 只 WARN 并落回轮换, 不阻断启动。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_hello_template: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawConfig {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+    #[serde(default)]
+    pub log_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_rotate_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_keep_archives: Option<usize>,
+    #[serde(default)]
+    pub inbounds: Vec<InboundConfig>,
+    #[serde(default = "default_outbounds")]
+    pub outbounds: Vec<OutboundConfig>,
+    #[serde(default)]
+    pub routing: RawRoutingConfig,
+    pub advanced_dns: Option<AdvancedDnsConfig>,
+    pub tuning: Option<TuningConfig>,
+    #[serde(default)]
+    pub gui: Option<GuiConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_hello_template: Option<String>,
+}
+
+impl From<RawConfig> for Config {
+    fn from(raw: RawConfig) -> Self {
+        let default_outbound = resolve_default_outbound(
+            raw.routing.default_outbound.as_deref(),
+            &raw.outbounds,
+        );
+        Config {
+            schema_version: raw.schema_version,
+            log_level: raw.log_level,
+            log_file: raw.log_file,
+            log_rotate_mb: raw.log_rotate_mb,
+            log_keep_archives: raw.log_keep_archives,
+            inbounds: raw.inbounds,
+            outbounds: raw.outbounds,
+            routing: RoutingConfig {
+                default_outbound,
+                geo_alias: raw.routing.geo_alias,
+                rules: raw.routing.rules,
+                profiles: raw.routing.profiles,
+                device_profiles: raw.routing.device_profiles,
+            },
+            advanced_dns: raw.advanced_dns,
+            tuning: raw.tuning,
+            gui: raw.gui,
+            client_hello_template: raw.client_hello_template,
+        }
+    }
 }
 
 /// 服务端的**上游出口**配置 —— 配了它, Mirage 服务端就不再直连目标, 而是把流量
@@ -254,7 +313,7 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 pub const DNS_HIJACK_INBOUND_TAG: &str = "dns-hijack";
 
 /// Mirage 隧道的底层传输。默认 `tcp` (fake-TLS-over-TCP, 主链路)。`quic` 为实验传输
-/// (P0, 需 `--features quic` 编译; 见 docs/quic-transport-design.md)。两端须同设。
+/// (实验; release 二进制已含, 自行编译需 `--features quic`; 见 docs/quic-transport-design.md)。两端须同设。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Transport {
@@ -275,6 +334,18 @@ pub struct MirageUser {
     pub quota_gb: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_reset_day: Option<u8>,
+}
+
+impl std::fmt::Debug for GuiConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GuiConfig")
+            .field("enabled", &self.enabled)
+            .field("listen", &self.listen)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("stats_persist_path", &self.stats_persist_path)
+            .field("cors_origins", &self.cors_origins)
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for MirageUser {
@@ -331,6 +402,8 @@ pub enum InboundConfig {
         // 服务端 → 客户端 (下载) 方向的 brutal 速率上限, 单位 Mbps.
         // 不设 (或 = 0) 则不启用 brutal, 走系统默认 CC (BBR/Cubic).
         // Note: 服务端这一侧决定下载速度, 比客户端的 brutal 设置重要得多.
+        // transport=quic 时同一字段启用 QUIC 定速 CC (按此速率发送、遇丢包不退让, 见 quic_cc::FixedRateConfig);
+        // 不设则 QUIC 走 erasure CC (quic_erasure_cc)。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         brutal_rate_mbps: Option<u64>,
         // 握手 token 的时间戳容忍窗口 (秒). 客户端时钟与本机相差超过它 → auth 失败.
@@ -346,12 +419,12 @@ pub enum InboundConfig {
         /// **两端必须同开** (改了会话密钥派生, 一端开一端没开会解密失败)。默认关 (向后兼容)。
         #[serde(default)]
         pfs: bool,
-        /// 底层传输 (默认 tcp)。`quic` 为实验传输, 需 `--features quic` 编译, 两端须同设。
+        /// 底层传输 (默认 tcp)。`quic` 为实验传输 (release 二进制已含, 自行编译需 `--features quic`), 两端须同设。
         #[serde(default)]
         transport: Transport,
-        /// QUIC 流控窗口 (MB, 默认 2)。⚠️ **重排序线路 (部分 CN2 优化线路) 要小窗口** —— 大窗口在途包
-        /// 多、并发乱序 gap 超 quinn MAX_CHUNKS(1024) 会被关连接 (真机: 16MB×重排序→~1MB 就断; 2MB 下完)。
-        /// 干净长肥路径可调大 (16-64) 榨单流吞吐。仅 transport=quic 生效。`MIRAGE_QUIC_WND` 环境变量可覆盖。
+        /// QUIC 流控窗口 (MB, 默认 8, 见 DEFAULT_QUIC_WINDOW_MB)。丢包时窗口小于 ≈2.5×BDP 会被队头阻塞卡住
+        /// (2MB 在 180ms/10% 丢包下仅 ≈30 Mbps)。上游 quinn MAX_CHUNKS=1024 时大窗口丢包即断连, 本仓库已补丁到
+        /// 8192。干净长肥路径可再调大 (16-64)。仅 transport=quic 生效。`MIRAGE_QUIC_WND` 环境变量可覆盖。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quic_window_mb: Option<u64>,
         /// QUIC erasure-aware 拥塞控制 (默认开)。丢包路径上无视信道 erasure、补偿窗口 (实测 27% 丢包
@@ -401,6 +474,37 @@ pub enum InboundConfig {
         #[serde(default)]
         dns_hijack: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InboundProto {
+    Tcp,
+    Udp,
+}
+
+impl std::fmt::Display for InboundProto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tcp => write!(f, "tcp"),
+            Self::Udp => write!(f, "udp"),
+        }
+    }
+}
+
+impl InboundConfig {
+    pub fn bound_protocols(&self) -> &'static [InboundProto] {
+        match self {
+            Self::Socks { .. } => &[InboundProto::Tcp],
+            Self::Mixed { .. } => &[InboundProto::Tcp],
+            Self::Shadowsocks { .. } => &[InboundProto::Tcp],
+            Self::Dns { .. } => &[InboundProto::Udp],
+            Self::Transparent { .. } => &[InboundProto::Tcp, InboundProto::Udp],
+            Self::MirageServer { transport, .. } => match transport {
+                Transport::Tcp => &[InboundProto::Tcp],
+                Transport::Quic => &[InboundProto::Udp],
+            },
+        }
+    }
 }
 
 impl std::fmt::Debug for InboundConfig {
@@ -502,6 +606,7 @@ pub enum OutboundConfig {
         camouflage_host: String,
         #[serde(default = "default_pool_size")]
         pool_size: usize,
+        /// 客户端 → 服务端 (上传) 方向的 brutal 速率 (Mbps)。transport=quic 时改作 QUIC 定速 CC 的上行速率。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         brutal_rate_mbps: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -515,11 +620,11 @@ pub enum OutboundConfig {
         /// 会话密钥派生, 失配会解密失败)。默认关 (向后兼容)。
         #[serde(default)]
         pfs: bool,
-        /// 底层传输 (默认 tcp)。`quic` 为实验传输, 需 `--features quic` 编译, 两端须同设。
+        /// 底层传输 (默认 tcp)。`quic` 为实验传输 (release 二进制已含, 自行编译需 `--features quic`), 两端须同设。
         #[serde(default)]
         transport: Transport,
-        /// QUIC 流控窗口 (MB, 默认 2)。⚠️ 重排序线路要小 (2); 大窗口在途多、乱序 gap 超 quinn
-        /// MAX_CHUNKS 会断连。干净长肥可调大 (16-64)。仅 transport=quic。`MIRAGE_QUIC_WND` 可覆盖。
+        /// QUIC 流控窗口 (MB, 默认 8, 见 DEFAULT_QUIC_WINDOW_MB)。下载方向起作用的是客户端这一侧的接收窗口。
+        /// 干净长肥可调大 (16-64)。仅 transport=quic。`MIRAGE_QUIC_WND` 可覆盖。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quic_window_mb: Option<u64>,
         /// QUIC erasure-aware CC (默认开)。仅 transport=quic。`MIRAGE_QUIC_CC=off` 可覆盖。
@@ -556,6 +661,9 @@ pub enum OutboundConfig {
         /// SS-over-X: SS 到 server 的连接经该出站拨号 (而非物理网卡)。不设 = 直连。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         underlying: Option<String>,
+        /// 配了上游时 UDP 怎么办。默认 `block`。仅服务端语义 (含义同 UpstreamConfig 的 udp 策略)。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        udp: Option<UdpPolicy>,
     },
     /// WireGuard 出站: 选中的流量经 WG 隧道发往 peer, 不走 Mirage 隧道。
     ///
@@ -584,6 +692,10 @@ pub enum OutboundConfig {
         /// 配了则走本隧道的域名**经隧道解析**; 不配 = 本机解析 (原行为)。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dns: Option<String>,
+        /// 仅服务端语义: 选到本出站的 UDP 怎么走。默认 `tunnel` (与 TCP 同出口); `block` 丢弃;
+        /// `direct` 从本机直发。客户端忽略。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        udp: Option<UdpPolicy>,
     },
     Direct {
         tag: String,
@@ -634,6 +746,30 @@ pub enum OutboundConfig {
     },
 }
 
+impl OutboundConfig {
+    pub fn tag(&self) -> &str {
+        match self {
+            Self::Mirage { tag, .. }
+            | Self::Wireguard { tag, .. }
+            | Self::Direct { tag }
+            | Self::Block { tag }
+            | Self::Shadowsocks { tag, .. }
+            | Self::Urltest { tag, .. }
+            | Self::Fallback { tag, .. }
+            | Self::Selector { tag, .. }
+            | Self::LoadBalance { tag, .. } => tag.as_str(),
+        }
+    }
+}
+
+/// 判断出站类型是否为出站组 (urltest / fallback / selector / load_balance)
+pub fn is_group_type(t: &str) -> bool {
+    matches!(
+        t,
+        "urltest" | "fallback" | "selector" | "load_balance"
+    )
+}
+
 impl std::fmt::Debug for OutboundConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -679,7 +815,7 @@ impl std::fmt::Debug for OutboundConfig {
                     .field("quic_pin", quic_pin)
                     .finish()
             }
-            Self::Shadowsocks { tag, server, server_port, method, password: _, underlying } => {
+            Self::Shadowsocks { tag, server, server_port, method, password: _, underlying, udp } => {
                 f.debug_struct("Shadowsocks")
                     .field("tag", tag)
                     .field("server", server)
@@ -687,6 +823,7 @@ impl std::fmt::Debug for OutboundConfig {
                     .field("method", method)
                     .field("password", &"[REDACTED]")
                     .field("underlying", underlying)
+                    .field("udp", udp)
                     .finish()
             }
             Self::Wireguard {
@@ -699,6 +836,7 @@ impl std::fmt::Debug for OutboundConfig {
                 mtu,
                 persistent_keepalive,
                 dns,
+                udp,
             } => {
                 let psk_redacted = preshared_key.as_ref().map(|_| "[REDACTED]");
                 f.debug_struct("Wireguard")
@@ -711,6 +849,7 @@ impl std::fmt::Debug for OutboundConfig {
                     .field("mtu", mtu)
                     .field("persistent_keepalive", persistent_keepalive)
                     .field("dns", dns)
+                    .field("udp", udp)
                     .finish()
             }
             Self::Direct { tag } => f.debug_struct("Direct").field("tag", tag).finish(),
@@ -760,11 +899,27 @@ fn default_lb_strategy() -> String {
     "round-robin".to_string()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone, Default)]
+struct RawRoutingConfig {
+    #[serde(default)]
+    pub default_outbound: Option<String>,
+    #[serde(default)]
+    pub geo_alias: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub rules: Vec<RuleConfig>,
+    #[serde(default)]
+    pub profiles: std::collections::HashMap<String, Vec<RuleConfig>>,
+    #[serde(default)]
+    pub device_profiles: Vec<DeviceProfile>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct RoutingConfig {
+    #[serde(default = "default_direct_str")]
     pub default_outbound: String,
     #[serde(default)]
     pub geo_alias: std::collections::HashMap<String, String>,
+    #[serde(default)]
     pub rules: Vec<RuleConfig>,
     /// 命名策略 (「不同用户匹配不同规则」): profile 名 → 一组规则 (各规则不写 source_ip_cidr,
     /// 由分配到该 profile 的设备网段注入)。见 device_profiles。build 时展开成扁平 source_ip_cidr
@@ -774,6 +929,68 @@ pub struct RoutingConfig {
     /// 设备 (源网段) → profile 分配。命中的连接先走该 profile 的规则, 未命中再落全局 rules → default。
     #[serde(default)]
     pub device_profiles: Vec<DeviceProfile>,
+}
+
+/// 解析默认出站 tag (支持类型化的 OutboundConfig 列表):
+/// 1. 若 routing.default_outbound 显式写了，原样取其值 (写成空串也保留, 交给 check 报"不存在",
+///    不静默换成第一条出站 —— 防写错被掩盖)；
+/// 2. 否则取 outbounds 数组第一条的 tag；
+/// 3. 若 outbounds 缺省或为空，取 "direct"。
+pub fn resolve_default_outbound(explicit: Option<&str>, outbounds: &[OutboundConfig]) -> String {
+    if let Some(explicit) = explicit {
+        return explicit.to_string();
+    }
+    if let Some(first) = outbounds.first() {
+        return first.tag().to_string();
+    }
+    "direct".to_string()
+}
+
+/// 解析默认出站 tag (支持 serde_json::Value), 规则同 `resolve_default_outbound`:
+/// 1. 若 routing.default_outbound 显式写了，原样取其值；
+/// 2. 否则取 outbounds 数组第一条的 tag；
+/// 3. 若 outbounds 缺省或为空，取 "direct"。
+pub fn resolve_default_outbound_from_value(root: &serde_json::Value) -> &str {
+    if let Some(d) = root
+        .get("routing")
+        .and_then(|r| r.get("default_outbound"))
+        .and_then(|d| d.as_str())
+    {
+        return d;
+    }
+    if let Some(first_tag) = root
+        .get("outbounds")
+        .and_then(|o| o.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|ob| ob.get("tag"))
+        .and_then(|t| t.as_str())
+    {
+        // 与类型化版 resolve_default_outbound 同口径: 原样取第一条的 tag
+        return first_tag;
+    }
+    "direct"
+}
+
+fn default_direct_str() -> String {
+    "direct".to_string()
+}
+
+fn default_outbounds() -> Vec<OutboundConfig> {
+    vec![OutboundConfig::Direct {
+        tag: "direct".to_string(),
+    }]
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            default_outbound: default_direct_str(),
+            geo_alias: std::collections::HashMap::new(),
+            rules: Vec::new(),
+            profiles: std::collections::HashMap::new(),
+            device_profiles: Vec::new(),
+        }
+    }
 }
 
 /// 把一组设备/源网段绑定到某命名 profile。
@@ -846,6 +1063,10 @@ pub struct RuleConfig {
     /// 无从取, 带此条件的规则对它们不命中。不写 = 不限进程。
     #[serde(default, deserialize_with = "one_or_many")]
     pub process_name: Vec<String>,
+    /// 按**用户名**精确匹配 —— 服务端多用户模式下认出认证的用户名 (单用户为 "default")。
+    /// 客户端侧没有用户信息时带 `user` 条件的规则一律不匹配 (同 `inbound` 语义)。
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub user: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1194,6 +1415,16 @@ pub struct TuningConfig {
     /// Geo 文件更新检查间隔 (天). 默认 7.
     pub geo_update_days: Option<u32>,
 
+    /// **服务端**最大并发连接数 (含未认证与已认证)。默认 8192。`0` = 用默认。
+    ///
+    /// 为什么必须有上限: 认证前的连接窗口由 `client_hello_guard.hard_deadline_ms` 限住 (默认 5s),
+    /// 但**没有全局并发上限时** flood 仍可持有 `速率 × 5s` 个任务与 socket ⇒ 内存/任务表被打满
+    /// (见 `docs/codebase-audit-2026-10.md` A5)。超限的连接**直接关闭** (与真站过载行为一致)
+    /// 并计数告警。作用域 = **全进程** (多个 mirage_server 入站共享同一上限)。
+    /// 注意: 重载配置不会改变已建的信号量 ⇒ **重启生效**。
+    #[serde(default)]
+    pub max_connections: Option<usize>,
+
     /// DNS-over-TCP 解析上游 (如 `1.1.1.1` 或 `1.1.1.1:53`)。设了则**本进程所有域名解析
     /// 走它、经 TCP:53 查**, 不再用系统 getaddrinfo (glibc 默认 UDP)。
     /// 用途: **出向 UDP 被封的 VPS 做服务端** —— 否则 getaddrinfo 用 UDP 查 DNS 会失败,
@@ -1234,6 +1465,125 @@ pub struct TuningConfig {
     /// UDP mux 共享隧道条数 K (默认 4)。越大 HoL 连累面越小但占越多池位。仅 udp_mux 开时生效。
     #[serde(default = "default_udp_mux_tunnels")]
     pub udp_mux_tunnels: usize,
+    /// **服务端** ClientHello 计时与判定参数（对齐 / 容错分离）。详见
+    /// `docs/client-hello-timing-design.md`: `preconnect_*` 决定"何时推测性预连伪装站"（对齐真站
+    /// 空闲计时起点）, `judge_silence_ms` 决定"静默多久判为探测"（丢包容忍）, `hard_deadline_ms`
+    /// 是 slowloris 总兜底。不设 = `2×RTT` (clamp 100~500ms) / 1000ms / 5000ms。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_hello_guard: Option<ClientHelloGuardConfig>,
+    /// selector 手动选择持久化文件路径。
+    /// 未配时默认: 若配了 gui.stats_persist_path (如 stats_client.json) 则为其同目录下按同名区分的
+    /// selector_state_client.json (同机服务端 / 客户端不共用一个文件);
+    /// 否则默认为 "/var/lib/mirage-rs/selector_state.json"。
+    #[serde(default)]
+    pub selector_persist_path: Option<String>,
+}
+
+/// 解析 selector 选择状态的持久化文件路径
+pub fn resolve_selector_persist_path(config: &Config) -> String {
+    if let Some(tuning) = &config.tuning {
+        if let Some(ref p) = tuning.selector_persist_path {
+            let trimmed = p.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    if let Some(gui) = &config.gui {
+        if let Some(ref sp) = gui.stats_persist_path {
+            let trimmed = sp.trim();
+            if !trimmed.is_empty() {
+                let p = std::path::Path::new(trimmed);
+                if let Some(parent) = p.parent() {
+                    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                    let suffix = if stem == "stats" { "" } else { stem.strip_prefix("stats_").unwrap_or(stem) };
+                    let name = if suffix.is_empty() {
+                        "selector_state.json".to_string()
+                    } else {
+                        format!("selector_state_{suffix}.json")
+                    };
+                    return parent.join(name).to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
+    "/var/lib/mirage-rs/selector_state.json".to_string()
+}
+
+/// 见 `TuningConfig::client_hello_guard` 与 `docs/client-hello-timing-design.md`。
+///
+/// 环境变量覆盖 (优先于 config, 供真机 A/B 调参): `MIRAGE_CH_PRECONNECT_MULT` /
+/// `MIRAGE_CH_PRECONNECT_MIN_MS` / `MIRAGE_CH_PRECONNECT_MAX_MS` / `MIRAGE_CH_JUDGE_MS` /
+/// `MIRAGE_CH_HARD_MS` / `MIRAGE_CH_AUTH_MULT_X10` / `MIRAGE_CH_AUTH_OFFSET_MS`。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClientHelloGuardConfig {
+    /// 预连触发 = `preconnect_mult × 客户端 RTT`。默认 1 (Tier B)。
+    /// (ClientHello ~1786B 分 2 段背靠背发出、正常间隔 ≈ 0; 乘法只为高 RTT 链路留余量。)
+    #[serde(default = "default_preconnect_mult")]
+    pub preconnect_mult: u32,
+    /// 预连触发下限 (ms)。默认 50 (Tier B)。决定探测者看到的关闭偏差量级。
+    #[serde(default = "default_preconnect_min_ms")]
+    pub preconnect_min_ms: u64,
+    /// 预连触发上限 (ms)。默认 200 (Tier B)。
+    #[serde(default = "default_preconnect_max_ms")]
+    pub preconnect_max_ms: u64,
+    /// 静默判定期限 (ms)。默认 1000。**必须大于 TCP 重传 TLP/RTO** (≥200ms, 退避可达 800ms+),
+    /// 否则丢包的合法客户端会被判成探测。
+    #[serde(default = "default_judge_silence_ms")]
+    pub judge_silence_ms: u64,
+    /// 未认证连接总时限 (ms)。默认 5000。防滴发 slowloris。
+    #[serde(default = "default_hard_deadline_ms")]
+    pub hard_deadline_ms: u64,
+    /// auth-succ 时序注入倍率 (**×10**, 默认 20 = `2.0 × cam_RTT`)。与 `auth_succ_offset_ms`
+    /// 合起来决定 [auth-succ 相对 auth-fail 的时延对齐](#)。
+    #[serde(default = "default_auth_succ_mult_x10")]
+    pub auth_succ_mult_x10: u32,
+    /// auth-succ 时序注入的**固定偏置** (ms, 默认 0)。
+    ///
+    /// **实测依据** (见 Phase-6 验证与 `docs/plan-phase6-dns-optimization.md`):
+    /// 早期曾测得 auth-fail 比纯倍率多约 100ms，后经 Phase-5/6 诊断证实该 100ms 实质为
+    /// **DNS 关键路径解析阻塞** (S1 解析耗时 153ms) 污染所致。
+    /// 在伪装站 DNS 常青保活 (`keep_warm_dns`) 且排除解析耗时后，真实边缘处理时延
+    /// `P_edge = F - cam_rtt ≈ 1~4ms` (S1 4.2ms, S3 1.4ms)。若叠加 +100ms offset 会导致
+    /// auth-succ 比真实失败路径虚高 ~99ms (造成可区分正偏)。
+    /// 因此默认翻转为 0，保留 2.0× 纯倍率 (`2×cam_rtt ≈ 5~6ms` vs 真实 `F ≈ 7.5ms`，
+    /// 残差仅 ~1.5ms，完全落入网络抖动安全区间)。
+    ///
+    /// **仅当 `auto_calibrate = false` 时生效**。auto 开时: 有 F 样本用实测 F;
+    /// 冷启动时直接用纯倍率 (不加 offset)。
+    #[serde(default = "default_auth_succ_offset_ms")]
+    pub auth_succ_offset_ms: u64,
+    /// 自校准: 用实测的 auth-fail 全程耗时 F 的 EWMA 作为 auth-succ 注入基准（取代静态
+    /// `mult×cam_RTT + offset`）。默认 true。
+    #[serde(default = "default_auto_calibrate")]
+    pub auto_calibrate: bool,
+}
+
+pub(crate) fn default_auto_calibrate() -> bool {
+    true
+}
+
+pub(crate) fn default_auth_succ_mult_x10() -> u32 {
+    20
+}
+pub(crate) fn default_auth_succ_offset_ms() -> u64 {
+    0
+}
+
+pub(crate) fn default_preconnect_mult() -> u32 {
+    1
+}
+pub(crate) fn default_preconnect_min_ms() -> u64 {
+    50
+}
+pub(crate) fn default_preconnect_max_ms() -> u64 {
+    200
+}
+fn default_judge_silence_ms() -> u64 {
+    1000
+}
+fn default_hard_deadline_ms() -> u64 {
+    5000
 }
 
 fn default_udp_mux_tunnels() -> usize {
@@ -1246,6 +1596,11 @@ pub enum EbpfMode {
     Auto,
     Force,
     Off,
+}
+
+/// `geo_sources.name` 会拼进文件路径, 只允许不含路径分隔符与 ".." 的非空名字。
+pub fn geo_source_name_ok(name: &str) -> bool {
+    !name.is_empty() && !name.contains('/') && !name.contains('\\') && !name.contains("..")
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1286,7 +1641,7 @@ fn default_schema_version() -> u32 {
 }
 
 fn default_urltest_interval() -> u64 {
-    300
+    60
 }
 
 fn default_urltest_tolerance() -> u64 {
@@ -1380,6 +1735,97 @@ impl Config {
         issues
     }
 
+    /// 短口令提示 (只打日志, 不进 [`Self::semantic_issues`] —— 后者会让 `mirage-rs config` 拒绝写回)。
+    ///
+    /// ClientHello 里的 token 可被被动观察者拿去离线逐个试口令 (单次快速哈希), 非 PFS 下猜中口令还能
+    /// 解开录下的会话; 改 KDF 要动线上协议, 所以只能靠口令本身足够长。内置生成器 (install.sh /
+    /// `mirage-rs config`) 都是 128 位随机口令, 这里只拦手填的短口令。按字符数计 (多字节字符口令按
+    /// 字节数会放过很短的口令)。
+    pub fn weak_password_warnings(&self) -> Vec<String> {
+        const MIN_PASSWORD_CHARS: usize = 16;
+        let mut out = Vec::new();
+        for ib in &self.inbounds {
+            if let InboundConfig::MirageServer { tag, password, users, .. } = ib {
+                let named = std::iter::once(("default", password.as_str()))
+                    .chain(users.iter().map(|u| (u.name.as_str(), u.password.as_str())));
+                for (name, pw) in named {
+                    if !pw.is_empty() && pw.chars().count() < MIN_PASSWORD_CHARS {
+                        out.push(format!(
+                            "mirage_server 入站 `{tag}` 的口令 ({name}) 少于 {MIN_PASSWORD_CHARS} 个字符, \
+                             可被抓包后离线猜解; 建议换成随机长口令 (如 `openssl rand -hex 16`)"
+                        ));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// 服务端配置的提示类问题 (QUIC 入站路由至上游、服务端不生效的字段): 只打告警, 不进
+    /// [`Self::semantic_issues`] —— 后者会让 `check` 失败、`mirage-rs config` 拒绝写回。
+    pub fn server_routing_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let quic_inbounds: Vec<&str> = self
+            .inbounds
+            .iter()
+            .filter_map(|ib| {
+                if let InboundConfig::MirageServer { tag, transport, .. } = ib {
+                    if *transport == Transport::Quic {
+                        return Some(tag.as_str());
+                    }
+                }
+                None
+            })
+            .collect();
+
+        // 纯服务端配置里 SS 出站的 underlying 不生效 (服务端直接拨 SS 服务器)。只提示: 无害, 而进
+        // semantic_issues 会让 check 失败、install.sh 菜单的任何改动都被拒。
+        let server_only = !self.inbounds.is_empty()
+            && self.inbounds.iter().all(|ib| matches!(ib, InboundConfig::MirageServer { .. }));
+        if server_only {
+            for ob in &self.outbounds {
+                if let OutboundConfig::Shadowsocks { tag, underlying: Some(_), .. } = ob {
+                    warnings.push(format!(
+                        "shadowsocks 出站 `{tag}` 的 underlying 在服务端不生效 (服务端直接拨 SS 服务器), 可删除该字段"
+                    ));
+                }
+            }
+        }
+
+        if quic_inbounds.is_empty() {
+            return warnings;
+        }
+
+        // 只有真正的上游出口 (shadowsocks / wireguard) 才是"QUIC 不支持"; block 在 QUIC 上照常拒绝,
+        // mirage / urltest 等服务端本就不可用, 另有 issue 报。
+        let is_non_direct = |tag: &str| -> bool {
+            self.outbounds.iter().any(|ob| match ob {
+                OutboundConfig::Shadowsocks { tag: t, .. } | OutboundConfig::Wireguard { tag: t, .. } => t == tag,
+                _ => false,
+            })
+        };
+
+        for q_tag in &quic_inbounds {
+            if is_non_direct(&self.routing.default_outbound) {
+                warnings.push(format!(
+                    "入站 `{q_tag}` 采用 QUIC 传输, 但 default_outbound `{}` 为非 direct 出站: QUIC 传输暂不支持上游出口 (运行时将拒绝该流)",
+                    self.routing.default_outbound
+                ));
+            }
+            for (i, rule) in self.routing.rules.iter().enumerate() {
+                if is_non_direct(&rule.outbound)
+                    && (rule.inbound.is_empty() || rule.inbound.iter().any(|ib| ib == *q_tag))
+                {
+                    warnings.push(format!(
+                        "入站 `{q_tag}` 采用 QUIC 传输, 规则[{i}]将其导向非 direct 出站 `{}`: QUIC 传输暂不支持上游出口 (运行时将拒绝该流)",
+                        rule.outbound
+                    ));
+                }
+            }
+        }
+        warnings
+    }
+
     /// 语义校验: 语法没问题但逻辑不成立的配置。
     pub fn semantic_issues(&self) -> Vec<String> {
         let mut issues = Vec::new();
@@ -1469,6 +1915,43 @@ impl Config {
                 "routing.default_outbound = `{}` 不存在于 outbounds (未命中任何规则的流量将无法路由)",
                 self.routing.default_outbound
             ));
+        }
+
+        // 纯服务端配置 (只有 mirage_server 入站): 服务端只能走 direct / block / shadowsocks /
+        // wireguard 出站, 路由引用 mirage / urltest 等客户端出站时运行期只能拒绝, 这里提前报出。
+        let server_only = !self.inbounds.is_empty()
+            && self.inbounds.iter().all(|ib| matches!(ib, InboundConfig::MirageServer { .. }));
+        if server_only {
+            let server_usable = |t: &str| {
+                self.outbounds.iter().any(|ob| match ob {
+                    OutboundConfig::Direct { tag }
+                    | OutboundConfig::Block { tag }
+                    | OutboundConfig::Shadowsocks { tag, .. }
+                    | OutboundConfig::Wireguard { tag, .. } => tag == t,
+                    _ => false,
+                })
+            };
+            let mut refs: Vec<(String, &str)> = vec![("routing.default_outbound".into(), self.routing.default_outbound.as_str())];
+            for (i, rule) in self.routing.rules.iter().enumerate() {
+                refs.push((format!("routing.rules[{i}].outbound"), rule.outbound.as_str()));
+            }
+            for (field, t) in refs {
+                if known(t) && !server_usable(t) {
+                    issues.push(format!(
+                        "{field} = `{t}`: 服务端只支持 direct / block / shadowsocks / wireguard 出站"
+                    ));
+                }
+            }
+        }
+
+        // 规则里的 ip_cidr / source_ip_cidr 必须是合法 CIDR 或 IP —— 否则该项被丢弃, 只剩这一个条件
+        // 的规则会退化成匹配所有流量。
+        for (i, rule) in self.routing.rules.iter().enumerate() {
+            for (field, list) in [("ip_cidr", &rule.ip_cidr), ("source_ip_cidr", &rule.source_ip_cidr)] {
+                if let Err(bad) = crate::router::parse_ip_nets(list) {
+                    issues.push(format!("routing.rules[{i}].{field} 含非法项 `{bad}` (应为 CIDR 或 IP)"));
+                }
+            }
         }
 
         // 每条规则引用的出站必须存在 —— 否则该规则形同虚设, 且是静默的
@@ -1600,16 +2083,42 @@ impl Config {
                     }
                 }
             }
-            // Shadowsocks 出站: method 合法性 + underlying 存在/非自引用。
-            if let OutboundConfig::Shadowsocks { tag, server, password, method, underlying, .. } = ob {
+            // Shadowsocks 出站: method 合法性 + underlying 存在/非自引用 + udp 策略。
+            if let OutboundConfig::Shadowsocks {
+                tag,
+                server,
+                server_port,
+                password,
+                method,
+                underlying,
+                udp,
+            } = ob
+            {
                 if server.trim().is_empty() {
                     issues.push(format!("shadowsocks 出站 `{tag}` 的 server 为空"));
+                }
+                if *server_port == 0 {
+                    issues.push(format!("shadowsocks 出站 `{tag}` 的 server_port 为 0"));
                 }
                 if password.is_empty() {
                     issues.push(format!("shadowsocks 出站 `{tag}` 的 password 为空"));
                 }
-                if let Err(e) = crate::proxy::shadowsocks::Method::parse(method) {
-                    issues.push(format!("shadowsocks 出站 `{tag}` 的 method 非法: {e}"));
+                match crate::proxy::shadowsocks::Method::parse(method) {
+                    Ok(m) => {
+                        if m.is_2022() {
+                            if let Err(e) = crate::proxy::shadowsocks::decode_ss2022_psk(password, m.key_len()) {
+                                issues.push(format!("shadowsocks 出站 `{tag}` 的 password 非法: {e}"));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        issues.push(format!("shadowsocks 出站 `{tag}` 的 method 非法: {e}"));
+                    }
+                }
+                if let Some(policy) = udp {
+                    if matches!(policy, UdpPolicy::Tunnel) {
+                        issues.push(format!("shadowsocks 出站 `{tag}` 的 udp 策略仅支持 block 或 direct (不支持 tunnel)"));
+                    }
                 }
                 if let Some(u) = underlying {
                     if u == tag {
@@ -1623,7 +2132,7 @@ impl Config {
 
         // 入站 tag 查重 + 端口 0 + 监听冲突 + 服务端空密码
         let mut in_tags: Vec<&str> = Vec::new();
-        let mut in_binds: Vec<(&str, u16)> = Vec::new();
+        let mut in_binds: Vec<(InboundProto, &str, u16)> = Vec::new();
         for ib in &self.inbounds {
             let (tag, listen, port) = match ib {
                 InboundConfig::Socks { tag, listen, port, .. }
@@ -1642,17 +2151,20 @@ impl Config {
             if port == 0 {
                 issues.push(format!("inbound `{tag}` 的 port 为 0"));
             }
-            // 监听地址:端口冲突 —— 两入站绑同一 listen:port, 启动时第二个 bind 会
-            // "address already in use", 而配置层此前零提示。精确匹配 (0.0.0.0 与
-            // 127.0.0.1 的通配重叠不在此拦, 那要按接口判, 非本 check 目标)。
+            // 监听地址:端口冲突 —— 两入站绑同一 (协议, listen:port), 启动时第二个 bind 会
+            // "address already in use", 而配置层此前零提示。TCP 与 UDP 监听同端口不冲突
+            // (内核允许分别 bind)。精确匹配 (0.0.0.0 与 127.0.0.1 的通配重叠不在此拦,
+            // 那要按接口判, 非本 check 目标)。
             if port != 0 {
-                if in_binds.contains(&(listen, port)) {
-                    issues.push(format!(
-                        "inbound `{tag}` 的监听 `{listen}:{port}` 与前一个入站冲突 \
-                         (启动时会 bind 失败: address already in use)"
-                    ));
+                for &proto in ib.bound_protocols() {
+                    if in_binds.contains(&(proto, listen, port)) {
+                        issues.push(format!(
+                            "inbound `{tag}` 的监听 `{proto} {listen}:{port}` 与前一个入站冲突 \
+                             (启动时会 bind 失败: address already in use)"
+                        ));
+                    }
+                    in_binds.push((proto, listen, port));
                 }
-                in_binds.push((listen, port));
             }
             if let InboundConfig::Shadowsocks { tag, method, password, .. } = ib {
                 if password.is_empty() {
@@ -1824,9 +2336,85 @@ impl Config {
             }
         }
 
+        // tuning.client_hello_guard (ClientHello 计时/判定): 参数反转或过小会让它失效。
+        if let Some(t) = self.tuning.as_ref() {
+            if let Some(n) = t.max_connections {
+                if n > 0 && n < 16 {
+                    issues.push(format!(
+                        "tuning.max_connections={n} 过小 (<16): 正常浏览器就有 6~8 条并发, 会被大量误拒"
+                    ));
+                }
+                if n > 1_000_000 {
+                    issues.push(format!("tuning.max_connections={n} 过大 (>1e6): 上限失去意义"));
+                }
+            }
+            for s in &t.geo_sources {
+                if !geo_source_name_ok(&s.name) {
+                    issues.push(format!(
+                        "tuning.geo_sources.name `{}` 非法: 不得为空、含路径分隔符或 \"..\" (会写出 geodata_dir 之外)",
+                        s.name
+                    ));
+                }
+            }
+        }
+        if let Some(q) = self.tuning.as_ref().and_then(|t| t.client_hello_guard.as_ref()) {
+            if q.preconnect_mult == 0 {
+                issues.push("tuning.client_hello_guard.preconnect_mult 不能为 0 (触发 = mult × RTT)".to_string());
+            }
+            if q.preconnect_min_ms == 0 || q.preconnect_min_ms > q.preconnect_max_ms {
+                issues.push(format!(
+                    "tuning.client_hello_guard 的 preconnect_min_ms={} / preconnect_max_ms={} 非法 (需 0 < min <= max)",
+                    q.preconnect_min_ms, q.preconnect_max_ms
+                ));
+            }
+            if q.preconnect_max_ms > 5_000 {
+                issues.push(format!(
+                    "tuning.client_hello_guard.preconnect_max_ms={} 过大 (>5000): 探测偏差会随之放大",
+                    q.preconnect_max_ms
+                ));
+            }
+            if q.judge_silence_ms < 200 {
+                issues.push(format!(
+                    "tuning.client_hello_guard.judge_silence_ms={} 过小 (<200ms): 小于 TCP 最小 RTO, \
+                     丢包重传的合法客户端会被判成探测 (静默窗口不必再为对齐让步, 建议 >=1000)",
+                    q.judge_silence_ms
+                ));
+            }
+            if q.hard_deadline_ms < q.judge_silence_ms {
+                issues.push(format!(
+                    "tuning.client_hello_guard 的 hard_deadline_ms={} < judge_silence_ms={} (总时限不能短于静默期限)",
+                    q.hard_deadline_ms, q.judge_silence_ms
+                ));
+            }
+            if q.hard_deadline_ms > 60_000 {
+                issues.push(format!(
+                    "tuning.client_hello_guard.hard_deadline_ms={} 过大 (>60000): 未认证连接可被拖很久",
+                    q.hard_deadline_ms
+                ));
+            }
+            // auth-succ 时序注入: 倍率 0 或过大都无意义; 偏置过大则每条合法握手都被拖慢。
+            if q.auth_succ_mult_x10 == 0 || q.auth_succ_mult_x10 > 100 {
+                issues.push(format!(
+                    "tuning.client_hello_guard.auth_succ_mult_x10={} 非法 (需 1..=100, 即 0.1×~10× cam_RTT)",
+                    q.auth_succ_mult_x10
+                ));
+            }
+            if q.auth_succ_offset_ms > 2_000 {
+                issues.push(format!(
+                    "tuning.client_hello_guard.auth_succ_offset_ms={} 过大 (>2000): 每条合法握手都会被拖慢",
+                    q.auth_succ_offset_ms
+                ));
+            }
+        }
+
         issues
     }
 }
+
+/// QUIC 流控窗口默认值 (MB, 未配 `quic_window_mb` 时)。丢包时需 ≈2.5×BDP 才不被队头阻塞卡住
+/// (100Mbps/180ms ≈ 6-8MB); 下载方向起作用的是客户端的接收窗口, 故两端统一 8MB。依赖 third_party/quinn-proto
+/// 的 MAX_CHUNKS 补丁 (上游 1024 时大窗口丢包即断连)。见 docs/quic-transport-design.md §5.9。
+pub const DEFAULT_QUIC_WINDOW_MB: u64 = 8;
 
 /// 校验 quic_pin 是否为合法的 43 位 base64url (无填充) SHA-256 SPKI 指纹
 pub fn is_valid_quic_pin(pin: &str) -> bool {
@@ -2089,6 +2677,108 @@ mod validation_tests {
     }
 
     #[test]
+    fn principle1_default_outbound_inferred_from_first_outbound() {
+        // 未显式写 routing.default_outbound 时，自动取 outbounds 数组第一项的 tag
+        let mut v = base();
+        v["outbounds"] = serde_json::json!([
+            { "type": "direct", "tag": "my-first-outbound" },
+            { "type": "block", "tag": "block" }
+        ]);
+        v["routing"].as_object_mut().unwrap().remove("default_outbound");
+
+        let (cfg, issues) = Config::parse_with_diagnostics(&v.to_string()).unwrap();
+        assert_eq!(cfg.routing.default_outbound, "my-first-outbound");
+        assert!(issues.is_empty(), "推导出的默认出站存在，不应有语义告警: {issues:?}");
+
+        // routing 整段缺失时，同样取第一项
+        v.as_object_mut().unwrap().remove("routing");
+        let (cfg2, issues2) = Config::parse_with_diagnostics(&v.to_string()).unwrap();
+        assert_eq!(cfg2.routing.default_outbound, "my-first-outbound");
+        assert!(issues2.is_empty(), "routing 缺失时推导出首项，不应有告警: {issues2:?}");
+    }
+
+    #[test]
+    fn principle1_default_outbound_explicit_precedence() {
+        // 显式指定 default_outbound 时以显式为准
+        let mut v = base();
+        v["outbounds"] = serde_json::json!([
+            { "type": "direct", "tag": "first" },
+            { "type": "block", "tag": "second" }
+        ]);
+        v["routing"]["default_outbound"] = serde_json::json!("second");
+
+        let (cfg, issues) = Config::parse_with_diagnostics(&v.to_string()).unwrap();
+        assert_eq!(cfg.routing.default_outbound, "second");
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn principle1_default_outbound_fallback_to_direct_when_outbounds_empty() {
+        // outbounds 缺省时默认 [direct]，推导结果为 direct
+        let v = serde_json::json!({
+            "inbounds": [{ "type": "mixed", "tag": "in", "listen": "127.0.0.1", "port": 1080 }]
+        });
+        let (cfg, issues) = Config::parse_with_diagnostics(&v.to_string()).unwrap();
+        assert_eq!(cfg.routing.default_outbound, "direct");
+        assert!(issues.is_empty());
+
+        // outbounds 为显式空数组 [] 时，默认出站仍为 direct，且校验报错
+        let v_empty = serde_json::json!({
+            "inbounds": [{ "type": "mixed", "tag": "in", "listen": "127.0.0.1", "port": 1080 }],
+            "outbounds": []
+        });
+        let (cfg_empty, issues_empty) = Config::parse_with_diagnostics(&v_empty.to_string()).unwrap();
+        assert_eq!(cfg_empty.routing.default_outbound, "direct");
+        assert!(has(&issues_empty, "routing.default_outbound = `direct` 不存在于 outbounds"));
+    }
+
+    #[test]
+    fn principle1_resolve_default_outbound_from_value() {
+        use super::resolve_default_outbound_from_value;
+
+        // 1. 显式 routing.default_outbound
+        let v1 = serde_json::json!({
+            "outbounds": [{ "tag": "first" }],
+            "routing": { "default_outbound": "custom" }
+        });
+        assert_eq!(resolve_default_outbound_from_value(&v1), "custom");
+
+        // 2. 未写 default_outbound，取 outbounds[0]
+        let v2 = serde_json::json!({
+            "outbounds": [{ "tag": "first" }, { "tag": "second" }],
+            "routing": { "rules": [] }
+        });
+        assert_eq!(resolve_default_outbound_from_value(&v2), "first");
+
+        // 3. routing 整段缺失，取 outbounds[0]
+        let v3 = serde_json::json!({
+            "outbounds": [{ "tag": "first" }]
+        });
+        assert_eq!(resolve_default_outbound_from_value(&v3), "first");
+
+        // 4. 全部缺失，回落 direct
+        let v4 = serde_json::json!({});
+        assert_eq!(resolve_default_outbound_from_value(&v4), "direct");
+
+        // 5. 显式空串原样保留 (不静默换成第一条)
+        let v5 = serde_json::json!({
+            "outbounds": [{ "tag": "first" }],
+            "routing": { "default_outbound": "" }
+        });
+        assert_eq!(resolve_default_outbound_from_value(&v5), "");
+    }
+
+    #[test]
+    fn principle1_explicit_empty_default_outbound_still_reported() {
+        // 显式写成空串是写错, 照旧由 check 报"不存在", 不被第一条出站掩盖
+        let mut v = base();
+        v["routing"]["default_outbound"] = serde_json::json!("");
+        let (cfg, issues) = Config::parse_with_diagnostics(&v.to_string()).unwrap();
+        assert_eq!(cfg.routing.default_outbound, "");
+        assert!(has(&issues, "default_outbound"), "空串应报: {issues:?}");
+    }
+
+    #[test]
     fn invalid_rule_mode_rejected_at_parse() {
         // mode 现为 RuleMode 枚举: 拼错 (如 "adn") 在解析期直接失败 (unknown variant),
         // 而非旧的软报告后静默当 or —— 防 and 规则被悄悄放宽成 or 致误路由。
@@ -2298,6 +2988,86 @@ mod validation_tests {
     }
 
     #[test]
+    fn gui_config_debug_redacts_token() {
+        let g: crate::config::GuiConfig =
+            serde_json::from_str(r#"{"enabled":true,"listen":"127.0.0.1:9090","token":"s3cret-token-value"}"#).unwrap();
+        let dbg = format!("{g:?}");
+        assert!(!dbg.contains("s3cret-token-value"), "Debug 不得输出 token 明文: {dbg}");
+        assert!(dbg.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn geo_source_name_rejects_path_traversal() {
+        assert!(crate::config::geo_source_name_ok("geoip"));
+        assert!(crate::config::geo_source_name_ok("geosite-cn"));
+        for bad in ["", "../evil", "a/b", "a\\b", "..", "x..y"] {
+            assert!(!crate::config::geo_source_name_ok(bad), "应拒绝 `{bad}`");
+        }
+    }
+
+    #[test]
+    fn client_hello_guard_params_validated() {
+        // 不写该字段: 无 issue。
+        let mut v = base();
+        v["tuning"] = serde_json::json!({});
+        assert!(!has(&issues_of(&v), "client_hello_guard"), "不写不该报: {:?}", issues_of(&v));
+
+        // 合法值: 无 issue + 字段真解析到 (防漂移)。
+        v["tuning"] = serde_json::json!({
+            "client_hello_guard": {
+                "preconnect_mult": 3, "preconnect_min_ms": 50, "preconnect_max_ms": 2000,
+                "judge_silence_ms": 1500, "hard_deadline_ms": 6000,
+                "auth_succ_mult_x10": 25, "auth_succ_offset_ms": 100
+            }
+        });
+        let (cfg, issues) = Config::parse_with_diagnostics(&v.to_string()).unwrap();
+        let q = cfg.tuning.unwrap().client_hello_guard.expect("字段应真解析到 (防漂移)");
+        assert_eq!(
+            (q.preconnect_mult, q.preconnect_min_ms, q.preconnect_max_ms, q.judge_silence_ms, q.hard_deadline_ms),
+            (3, 50, 2000, 1500, 6000)
+        );
+        assert_eq!((q.auth_succ_mult_x10, q.auth_succ_offset_ms), (25, 100));
+        assert!(q.auto_calibrate);
+        assert!(!has(&issues, "client_hello_guard"), "合法值不该报: {issues:?}");
+
+        // 不写新字段时用实测默认 (2.0× + 100ms, Tier B: 1× 50~200ms, auto_calibrate=true)。
+        v["tuning"] = serde_json::json!({ "client_hello_guard": {} });
+        let (cfg, _) = Config::parse_with_diagnostics(&v.to_string()).unwrap();
+        let q = cfg.tuning.unwrap().client_hello_guard.unwrap();
+        assert_eq!(
+            (q.preconnect_mult, q.preconnect_min_ms, q.preconnect_max_ms),
+            (1, 50, 200),
+            "默认应为 Tier B: 1×, 50~200ms"
+        );
+        assert_eq!((q.auth_succ_mult_x10, q.auth_succ_offset_ms), (20, 0), "默认应为 2.0× + 0ms");
+        assert!(q.auto_calibrate, "默认应为 true");
+
+        // 显式关闭 auto_calibrate: false
+        v["tuning"] = serde_json::json!({ "client_hello_guard": { "auto_calibrate": false } });
+        let (cfg, issues) = Config::parse_with_diagnostics(&v.to_string()).unwrap();
+        let q = cfg.tuning.unwrap().client_hello_guard.unwrap();
+        assert!(!q.auto_calibrate);
+        assert!(!has(&issues, "client_hello_guard"), "auto_calibrate=false 不应报错误: {issues:?}");
+
+        // 非法值 → 均报。
+        for bad in [
+            serde_json::json!({ "preconnect_mult": 0 }),
+            serde_json::json!({ "preconnect_min_ms": 0 }),
+            serde_json::json!({ "preconnect_min_ms": 800, "preconnect_max_ms": 100 }),
+            serde_json::json!({ "preconnect_max_ms": 9000 }),
+            serde_json::json!({ "judge_silence_ms": 100 }),
+            serde_json::json!({ "judge_silence_ms": 3000, "hard_deadline_ms": 1000 }),
+            serde_json::json!({ "hard_deadline_ms": 90_000 }),
+            serde_json::json!({ "auth_succ_mult_x10": 0 }),
+            serde_json::json!({ "auth_succ_mult_x10": 101 }),
+            serde_json::json!({ "auth_succ_offset_ms": 5000 }),
+        ] {
+            v["tuning"] = serde_json::json!({ "client_hello_guard": bad });
+            assert!(has(&issues_of(&v), "client_hello_guard"), "非法 {bad} 应报: {:?}", issues_of(&v));
+        }
+    }
+
+    #[test]
     fn server_inbound_empty_password() {
         let mut v = base();
         v["inbounds"] = serde_json::json!([
@@ -2305,6 +3075,101 @@ mod validation_tests {
               "port": 443, "password": "" }
         ]);
         assert!(has(&issues_of(&v), "任何人都能连"));
+    }
+
+    #[test]
+    fn weak_password_warnings_count_chars_and_skip_semantic_issues() {
+        let mut v = base();
+        v["inbounds"] = serde_json::json!([
+            { "type": "mirage_server", "tag": "srv", "listen": "0.0.0.0", "port": 443,
+              "password": "0123456789abcdef",
+              "users": [ { "name": "alice", "password": "short" },
+                         { "name": "bob", "password": "口令口令口令口令口令口令" } ] }
+        ]);
+        let cfg: Config = serde_json::from_value(v.clone()).unwrap();
+        let w = cfg.weak_password_warnings();
+        assert_eq!(w.len(), 2, "16 字符主口令不报, alice 与 12 个汉字 (36 字节) 的 bob 都报: {w:?}");
+        assert!(w.iter().any(|m| m.contains("alice")) && w.iter().any(|m| m.contains("bob")));
+        assert!(!has(&issues_of(&v), "离线猜解"), "不得进 semantic_issues (会让 config 编辑器拒绝写回)");
+    }
+
+    #[test]
+    fn server_routing_unknown_outbound_and_default_caught() {
+        let mut v = base();
+        v["routing"]["default_outbound"] = serde_json::json!("nonexistent-outbound");
+        v["routing"]["rules"] = serde_json::json!([
+            { "domain_suffix": ["example.com"], "outbound": "unknown-tag" }
+        ]);
+        let is = issues_of(&v);
+        assert!(has(&is, "routing.default_outbound = `nonexistent-outbound` 不存在于 outbounds"));
+        assert!(has(&is, "routing.rules[0].outbound = `unknown-tag` 不存在于 outbounds"));
+    }
+
+    #[test]
+    fn server_routing_rejects_client_only_outbound_types() {
+        let mut v = base();
+        v["inbounds"] = serde_json::json!([
+            { "type": "mirage_server", "tag": "srv", "listen": "0.0.0.0", "port": 443,
+              "password": "test_password_placeholder" }
+        ]);
+        v["outbounds"] = serde_json::json!([
+            { "type": "direct", "tag": "direct" },
+            { "type": "block", "tag": "reject" },
+            { "type": "mirage", "tag": "m", "server": "192.0.2.1", "server_port": 443, "password": "p", "camouflage_host": "example.com" }
+        ]);
+        v["routing"]["default_outbound"] = serde_json::json!("direct");
+        v["routing"]["rules"] = serde_json::json!([
+            { "domain_suffix": ["a.example"], "outbound": "m" },
+            { "domain_suffix": ["b.example"], "outbound": "reject" }
+        ]);
+        let is = issues_of(&v);
+        assert!(has(&is, "routing.rules[0].outbound = `m`: 服务端只支持"), "实际: {is:?}");
+        assert!(!has(&is, "routing.rules[1].outbound = `reject`: 服务端只支持"), "block 是服务端可用出站: {is:?}");
+    }
+
+    #[test]
+    fn ss_outbound_udp_policy_validation() {
+        let mut v = base();
+        v["outbounds"] = serde_json::json!([
+            { "type": "direct", "tag": "direct" },
+            { "type": "shadowsocks", "tag": "ss-tunnel", "server": "192.0.2.1", "server_port": 8388,
+              "password": "sspassword12345", "method": "aes-128-gcm", "udp": "tunnel" }
+        ]);
+        let is = issues_of(&v);
+        assert!(has(&is, "udp 策略仅支持 block 或 direct"), "实际: {is:?}");
+
+        // block 或 direct 合法
+        v["outbounds"][1]["udp"] = serde_json::json!("block");
+        assert!(issues_of(&v).is_empty(), "block 应合法: {:?}", issues_of(&v));
+
+        v["outbounds"][1]["udp"] = serde_json::json!("direct");
+        assert!(issues_of(&v).is_empty(), "direct 应合法: {:?}", issues_of(&v));
+    }
+
+    #[test]
+    fn server_routing_warnings_skip_semantic_issues() {
+        let mut v = base();
+        v["inbounds"] = serde_json::json!([
+            { "type": "mirage_server", "tag": "srv_quic", "listen": "0.0.0.0", "port": 443,
+              "password": "test_password_placeholder", "transport": "quic" }
+        ]);
+        v["outbounds"] = serde_json::json!([
+            { "type": "direct", "tag": "direct" },
+            { "type": "shadowsocks", "tag": "ss-up", "server": "192.0.2.1", "server_port": 8388,
+              "password": "sspassword12345", "method": "aes-128-gcm" }
+        ]);
+        v["routing"]["default_outbound"] = serde_json::json!("ss-up");
+        let cfg: Config = serde_json::from_value(v.clone()).unwrap();
+        let w = cfg.server_routing_warnings();
+        assert!(!w.is_empty(), "QUIC 入站配非 direct default 应出告警");
+        assert!(w[0].contains("QUIC 传输暂不支持上游出口"));
+        assert!(!has(&issues_of(&v), "QUIC 传输暂不支持上游出口"), "不得进 semantic_issues (告警类不阻断 config 写回)");
+        // block 出站不是"上游", 不应报 QUIC 不支持 (对照: 指向 ss-up 时会报)
+        v["outbounds"].as_array_mut().unwrap().push(serde_json::json!({ "type": "block", "tag": "block" }));
+        v["routing"]["default_outbound"] = serde_json::json!("direct");
+        v["routing"]["rules"] = serde_json::json!([{ "domain_suffix": ["x.example"], "outbound": "block" }]);
+        let cfg: Config = serde_json::from_value(v).unwrap();
+        assert!(cfg.server_routing_warnings().is_empty(), "block 不应被报成 QUIC 不支持上游");
     }
 
     #[test]
@@ -2317,6 +3182,99 @@ mod validation_tests {
         let is = issues_of(&v);
         assert!(has(&is, "inbound tag `in` 重复定义"), "实际: {is:?}");
         assert!(has(&is, "port 为 0"), "实际: {is:?}");
+    }
+
+    #[test]
+    fn inbound_listener_conflict_distinguishes_tcp_and_udp() {
+        // ① TCP mirage_server 443 + QUIC mirage_server 443 同 listen → 无冲突
+        let mut v1 = base();
+        v1["inbounds"] = serde_json::json!([
+            {
+                "type": "mirage_server",
+                "tag": "srv_tcp",
+                "listen": "0.0.0.0",
+                "port": 443,
+                "password": "test_password_placeholder",
+                "transport": "tcp"
+            },
+            {
+                "type": "mirage_server",
+                "tag": "srv_quic",
+                "listen": "0.0.0.0",
+                "port": 443,
+                "password": "test_password_placeholder",
+                "transport": "quic"
+            }
+        ]);
+        let is1 = issues_of(&v1);
+        assert!(!has(&is1, "与前一个入站冲突"), "TCP 443 与 QUIC 443 协议不同不应报冲突, 实际: {is1:?}");
+
+        // ② 两个 TCP mirage_server 同 listen:port → 仍报冲突
+        let mut v2 = base();
+        v2["inbounds"] = serde_json::json!([
+            {
+                "type": "mirage_server",
+                "tag": "srv_tcp_1",
+                "listen": "0.0.0.0",
+                "port": 443,
+                "password": "test_password_placeholder",
+                "transport": "tcp"
+            },
+            {
+                "type": "mirage_server",
+                "tag": "srv_tcp_2",
+                "listen": "0.0.0.0",
+                "port": 443,
+                "password": "test_password_placeholder",
+                "transport": "tcp"
+            }
+        ]);
+        let is2 = issues_of(&v2);
+        assert!(has(&is2, "inbound `srv_tcp_2` 的监听 `tcp 0.0.0.0:443` 与前一个入站冲突"), "同端口两 TCP 入站必须报冲突, 实际: {is2:?}");
+
+        // ③ 两个 QUIC mirage_server 同 listen:port → 报冲突
+        let mut v3 = base();
+        v3["inbounds"] = serde_json::json!([
+            {
+                "type": "mirage_server",
+                "tag": "srv_quic_1",
+                "listen": "0.0.0.0",
+                "port": 443,
+                "password": "test_password_placeholder",
+                "transport": "quic"
+            },
+            {
+                "type": "mirage_server",
+                "tag": "srv_quic_2",
+                "listen": "0.0.0.0",
+                "port": 443,
+                "password": "test_password_placeholder",
+                "transport": "quic"
+            }
+        ]);
+        let is3 = issues_of(&v3);
+        assert!(has(&is3, "inbound `srv_quic_2` 的监听 `udp 0.0.0.0:443` 与前一个入站冲突"), "同端口两 QUIC 入站必须报冲突, 实际: {is3:?}");
+
+        // ④ 若某类入站同时绑 TCP+UDP (Transparent), 与同端口的 QUIC 入站 → 报冲突
+        let mut v4 = base();
+        v4["inbounds"] = serde_json::json!([
+            {
+                "type": "transparent",
+                "tag": "trans",
+                "listen": "0.0.0.0",
+                "port": 443
+            },
+            {
+                "type": "mirage_server",
+                "tag": "srv_quic_t",
+                "listen": "0.0.0.0",
+                "port": 443,
+                "password": "test_password_placeholder",
+                "transport": "quic"
+            }
+        ]);
+        let is4 = issues_of(&v4);
+        assert!(has(&is4, "inbound `srv_quic_t` 的监听 `udp 0.0.0.0:443` 与前一个入站冲突"), "Transparent (TCP+UDP) 与 QUIC (UDP) 必须报冲突, 实际: {is4:?}");
     }
 
     /// 外部审计 #7 —— config 模板防漂移: install.sh 生成的**全字段**配置必须逐个字段**真正

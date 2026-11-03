@@ -9,7 +9,18 @@ use ring::agreement::{self, EphemeralPrivateKey};
 use ring::rand::SystemRandom;
 
 static HANDSHAKE_CACHE: OnceLock<Mutex<Vec<Vec<u8>>>> = OnceLock::new();
+/// 模板超过此时长未成功刷新就告警 (刷新周期 30min; 6h = 连续失败 12 次)。
+const STALE_WARN_SECS: u64 = 6 * 3600;
 static WARMING_UP: AtomicBool = AtomicBool::new(false);
+/// 最近一次向伪装站建连的 TCP connect 耗时 (微秒, 0=尚无)。供 auth-succ 时序对齐的 RTT 初值:
+/// 这条路径本来就在启动预热 + 30 分钟刷新时各跑一次 → 拿它播种 EWMA **零新增流量**。
+static LAST_CONNECT_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 见 `LAST_CONNECT_US`。返回微秒, 0 = 尚未测到。
+pub fn last_connect_us() -> u64 {
+    LAST_CONNECT_US.load(Ordering::Relaxed)
+}
+
 /// 30 分钟刷新后台任务只 spawn 一次 (主动预热或懒预热谁先谁 spawn).
 static REFRESH_SPAWNED: AtomicBool = AtomicBool::new(false);
 
@@ -22,6 +33,66 @@ impl Drop for WarmGuard {
 
 fn cache() -> &'static Mutex<Vec<Vec<u8>>> {
     HANDSHAKE_CACHE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// 最近一次**成功**装上模板的 Unix 秒。用于陈旧告警 (见 `install_templates`)。
+static LAST_OK_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 单批并发拉取的模板数。
+pub(crate) const BATCH: usize = 5;
+/// 缓存保留的模板上限 (淘汰最旧)。
+pub(crate) const MAX_TEMPLATES: usize = 10;
+
+/// 合并新旧模板集。整批成功(>= BATCH)整体替换; 部分成功新在前旧在后, 上限 MAX_TEMPLATES 淘汰最旧。
+pub(crate) fn merge_templates(old: Vec<Vec<u8>>, mut new: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    if new.len() >= BATCH {
+        new
+    } else {
+        new.extend(old);
+        new.truncate(MAX_TEMPLATES);
+        new
+    }
+}
+
+/// 装上一批新模板。
+///
+/// 两个不变量 (都关系到反指纹):
+/// 1. **不漏多样性**: 部分成功 (如 5 个并发 fetch 只回了 1 个) 不应把旧模板集整体替换成 1 条 ——
+///    那样所有客户端会收到**同一个** ServerHello (可被被动侧识别), 故改为与旧集合并。
+/// 2. **陈旧可观测**: 刷新失败时旧模板会一直被回放。若伪装站已轮换证书/密钥, 回放的
+///    ServerHello 会与真站当前状态不一致（可区分）。无法自动判定轮换, 故一旦超过
+///    `STALE_WARN_SECS` 就周期性告警, 由运维介入。
+async fn install_templates(new: Vec<Vec<u8>>) {
+    if new.is_empty() {
+        let last = LAST_OK_SECS.load(Ordering::Relaxed);
+        if last != 0 {
+            let age = now_secs().saturating_sub(last);
+            if age > STALE_WARN_SECS {
+                warn!(
+                    "HandshakeCache 已 {age}s 未更新 (伪装站不可达?): 继续回放旧模板 — \
+                     若伪装站已轮换证书/密钥, 回放的 ServerHello 与真站不一致 ⇒ 可区分"
+                );
+            }
+        }
+        return;
+    }
+    let mut guard = cache().lock().await;
+    let kept_old = new.len() < BATCH;
+    let old = std::mem::take(&mut *guard);
+    *guard = merge_templates(old, new);
+    let n = guard.len();
+    drop(guard);
+    LAST_OK_SECS.store(now_secs(), Ordering::Relaxed);
+    if kept_old {
+        warn!("模板刷新只取到部分集, 已与旧集合并 (现 {n} 条) — 避免回放多样性塔缩");
+    }
 }
 
 /// 模板是否**含齐客户端握手所需的三种 content-type**: 0x16 (ServerHello) + 0x14
@@ -58,7 +129,7 @@ pub(crate) fn template_is_complete(t: &[u8]) -> bool {
 /// 并发拉 5 个真实 ServerHello 模板, 收集成功的.
 async fn fetch_batch(host: &str) -> Vec<Vec<u8>> {
     let mut set = tokio::task::JoinSet::new();
-    for _ in 0..5 {
+    for _ in 0..BATCH {
         let h = host.to_string();
         set.spawn(async move { fetch_real_server_hello(&h).await });
     }
@@ -81,9 +152,7 @@ fn spawn_refresh_task(camouflage_host: &str) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1800)).await;
             let templates = fetch_batch(&host).await;
-            if !templates.is_empty() {
-                *cache().lock().await = templates;
-            }
+            install_templates(templates).await;
         }
     });
 }
@@ -108,6 +177,7 @@ pub async fn prewarm(camouflage_host: &str) {
         let mut guard = cache().lock().await;
         guard.extend(templates);
         info!("HandshakeCache prewarmed with {} real templates", guard.len());
+        LAST_OK_SECS.store(now_secs(), Ordering::Relaxed);
     } else {
         warn!(
             "HandshakeCache prewarm got no templates from {} — will retry lazily on first connection",
@@ -146,6 +216,7 @@ pub async fn get_server_hello_pfs(
             let mut guard = cache().lock().await;
             if !templates.is_empty() {
                 guard.extend(templates);
+                LAST_OK_SECS.store(now_secs(), Ordering::Relaxed);
             } else {
                 // WARN 而非 ERROR: 这是**优雅降级**, 非故障 —— 拉不到真模板 (无外网/camouflage
                 // 不可达的 VPS/容器很常见) 就用恒完整的合成 fallback, 握手照常。降级为 WARN 免得
@@ -178,16 +249,29 @@ pub async fn get_server_hello_pfs(
 }
 
 async fn fetch_real_server_hello(host: &str) -> anyhow::Result<Vec<u8>> {
-    let target = crate::net_util::host_with_default_port(host, 443);
-
+    // 解析与连接: 走 resolver 缓存 (尊重 `tuning.dns_tcp_resolver`) 后连 IP。
+    // 旧实现直接 `TcpStream::connect(host:443)` 每次走 getaddrinfo —— 出向 UDP 被封的 VPS 上
+    // 根本取不到真模板 (只能回落合成模板)。这里顺带把 **connect 耗时**记进全局, 作为 auth-succ
+    // 时序对齐的 RTT 初值 (解析排在计时之外 → 样本只含 TCP connect)。
+    let hostname = crate::net_util::extract_hostname(host);
+    let (h, port) = crate::proxy::resolver::split_host_port(host).unwrap_or((hostname, 443));
+    let ip = match h.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip,
+        Err(_) => *crate::proxy::resolver::resolve_cached(h, port)
+            .await?
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("no address for {h}"))?,
+    };
+    let t0 = std::time::Instant::now();
     let mut stream = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        TcpStream::connect(&target)
-    ).await??;
+        TcpStream::connect(std::net::SocketAddr::new(ip, port)),
+    )
+    .await??;
+    LAST_CONNECT_US.store(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
 
     let mut session_id = [0u8; 32];
     rand::fill(&mut session_id);
-    let hostname = crate::net_util::extract_hostname(host);
     // 模板 fetch **固定用 OkHttp CH** (无 MLKEM, 只提供 X25519/P256/P384) —— 这三个曲线是
     // 所有 profile (Chrome/FF/OkHttp) 的**交集**, camouflage 站据此协商出的曲线 (通常 X25519)
     // 任何 profile 的客户端都提供过 → 回放的 ServerHello 恒自洽、不会"选了没提供的曲线"= 非法 TLS。
@@ -1028,5 +1112,54 @@ mod tests {
         });
         let res = fetch_real_server_hello(&addr.to_string()).await;
         assert!(res.is_err(), "未知 key_share group 模板必须被拒: {:?}", res);
+    }
+
+    use super::{merge_templates, BATCH, MAX_TEMPLATES};
+
+    #[test]
+    fn test_merge_templates_batch_replace() {
+        let old = vec![vec![1], vec![2], vec![3]];
+        let new = vec![vec![10], vec![11], vec![12], vec![13], vec![14]];
+        assert!(new.len() >= BATCH);
+        let merged = merge_templates(old, new.clone());
+        assert_eq!(merged, new, "整批成功应整体替换旧池");
+    }
+
+    #[test]
+    fn test_merge_templates_partial_cap_max() {
+        let old = vec![vec![1], vec![2], vec![3], vec![4], vec![5], vec![6], vec![7], vec![8]];
+        let new = vec![vec![100], vec![101], vec![102]];
+        let merged = merge_templates(old, new);
+        assert!(merged.len() <= MAX_TEMPLATES, "合并后长度必须 <= MAX_TEMPLATES");
+        assert_eq!(merged.len(), MAX_TEMPLATES);
+        assert_eq!(merged[0], vec![100]);
+        assert_eq!(merged[1], vec![101]);
+        assert_eq!(merged[2], vec![102]);
+        assert_eq!(merged[3], vec![1]);
+    }
+
+    #[test]
+    fn test_merge_templates_consecutive_partial_refreshes() {
+        let mut pool = vec![vec![0; 4]];
+        for i in 1..=20 {
+            let new = vec![vec![i as u8, 1], vec![i as u8, 2]];
+            pool = merge_templates(pool, new.clone());
+            assert!(pool.len() <= MAX_TEMPLATES, "池长度必须始终 <= MAX_TEMPLATES");
+            assert_eq!(pool[0], new[0], "最新批的第 0 项必须在最前");
+            assert_eq!(pool[1], new[1], "最新批的第 1 项必须在最前");
+        }
+    }
+
+    #[test]
+    fn test_merge_templates_partial_then_full_shrinks() {
+        let mut pool = vec![vec![1], vec![2], vec![3], vec![4], vec![5]];
+        // 部分刷新扩充到超过 BATCH
+        pool = merge_templates(pool, vec![vec![6], vec![7], vec![8]]);
+        assert_eq!(pool.len(), 8);
+        // 整批成功刷新
+        let full = (10..10 + BATCH).map(|i| vec![i as u8]).collect::<Vec<_>>();
+        pool = merge_templates(pool, full.clone());
+        assert_eq!(pool.len(), BATCH, "整批成功后池收缩回整批大小");
+        assert_eq!(pool, full);
     }
 }
