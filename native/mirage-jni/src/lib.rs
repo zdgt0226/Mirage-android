@@ -418,8 +418,7 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_start(
             Some(rt.handle()),
         );
 
-        *RUNTIME.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(Arc::new(RunState { stack, rt }));
+        *RUNTIME.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(RunState { stack, rt }));
 
         // 故障切换看门狗 (下沉方案 P2)。默认不生效: policy.enabled 为 false 时
         // 每轮直接跳过, 由外壳看门狗继续决策 —— 方案 §5 风险 1 要求两者不得并存。
@@ -709,7 +708,12 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_latencyMs(
     jni_boundary!(-1, {
         let guard = RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
-            Some(s) => s.stack.engine().latency_ms().map(|v| v as jlong).unwrap_or(-1),
+            Some(s) => s
+                .stack
+                .engine()
+                .latency_ms()
+                .map(|v| v as jlong)
+                .unwrap_or(-1),
             None => -1,
         }
     })
