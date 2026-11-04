@@ -116,6 +116,12 @@ external fun start(tunFd: Int, uri: String, poolSize: Int, mtu: Int): Int
 
 ### P3 — 外壳拆除
 
+> **前置修复（2026-11-05 已完成）**：内核看门狗读的引擎句柄必须是 `stack.engine()`。
+> 原先 `RunState` 存了 `Arc<Engine>` 快照，节点热切换后它指向已 `shutdown()` 的死引擎，
+> `isHealthy()` 恒为 false。该字段已删除，4 处读取全部改走 `stack.engine()`。
+> 不先修这条，P3 等于把外壳的误报原样搬进内核。详见 `AUDIT_HANDOFF.md`
+> 「引擎句柄只能取 `stack.engine()`」。
+
 删除 `startFailoverWatchdog` / `doFailover` / `failoverRestartJob`（~118 行）。
 `CoreService` 只保留：生命周期、`NetworkCallback` 注册与转发、响应「请求重启」事件。
 `VpnRepository` 的 `pushNodes` 改调 `setNodeList`。
@@ -133,9 +139,17 @@ external fun start(tunFd: Int, uri: String, poolSize: Int, mtu: Int): Int
    与 `RuleStore.toJson()` 的自主注入同一模式。缺这一步内核会永远「无可切换节点」。
 3. **与协议断代叠加**。v0.15 刚断代（`befd125`），故障切换正是认证失败高发路径，改动会与之交叠。
    必须配 v0.15 服务端实测，不能只看健康位返回值。
-4. **验证手段尚未解决**。故障切换需要构造「节点不可达」，比既往任何一轮都难复现。
-   **动工前必须先确定造故障的方法**（候选：错误端口的假节点、防火墙规则），否则会重演
-   「代码改了但没验证到」。此项为 P2 的前置条件，不是事后补充。
+   断代的现场特征（2026-11-05 实测，供排查时对号）：客户端 ≥ v0.15 对上 ≤ v0.14 服务端时，
+   服务端认证不过会把连接转给伪装站，客户端用自己的会话密钥解不开其真实 TLS 响应，
+   日志为 `TIME_SYNC 接收/解密失败: early eof`（`proxy/pool.rs` 的 recv 失败分支）。
+   若伪装 TLS 握手本身就没走完（`Timeout before CCS`），那是链路层问题而**不是**版本断代，
+   两者不可混为一谈。
+4. **验证手段**。*（2026-11-05 已解决）* 故障切换需要构造「节点不可达」。
+   办法是在宿主机上跑**两个本地 Mirage 服务端**（上游 `mirage server -c <cfg>`，监听不同端口），
+   设备经 LAN 连它们，`kill` 掉当前实例即得到一个真实、可重复、可随时恢复的故障。
+   这比改防火墙或假端口更接近真实路径：伪装 TLS 握手、认证、TIME_SYNC 帧全都真的走一遍。
+   注意服务端两端协议必须同代（见风险 3）；本地自编上游 HEAD 可直接满足。
+   配置含口令，只能放在仓库外的临时目录，**不得入库**（AGENTS §4）。
 
 ---
 

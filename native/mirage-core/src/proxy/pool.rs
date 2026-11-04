@@ -308,6 +308,53 @@ pub(crate) fn decide_new_target(
 }
 
 #[cfg(test)]
+mod stale_handle_tests {
+    use super::*;
+
+    /// 为什么「在 RunState 里留 Arc<Engine> 快照」是致命的 (2026-11-05 真机实测):
+    /// `WarmPool::shutdown` 只置 shutdown 标志并清空空闲队列, **不动 stats**。
+    /// 而健康判据是 `consecutive_failures < 3`, 唯一的归零路径是 `record_latency`
+    /// (一次成功建连)。已关停的池不会再有任何成功 → 计数永久冻结在 >= 3 →
+    /// 任何持有旧引擎快照的调用方 (`isHealthy()` / 看门狗) 从此恒读 false,
+    /// 节点热切换成功后 2 个巡检周期必然误判, 多做一次无谓的整核重启。
+    #[test]
+    fn a_dead_pool_can_never_regain_health() {
+        let mut st = PoolStats::new();
+        assert!(st.is_healthy(), "新池应判健康");
+
+        // 上游挂掉: 连续建连失败累计到阈值
+        for _ in 0..3 {
+            st.record_failure();
+        }
+        assert!(!st.is_healthy(), "连续 3 次失败后应判不健康");
+
+        // shutdown 不碰 stats, 所以这里模拟的「关停后」状态与上面完全一致;
+        // 再多失败也只是让计数继续增长, 永远回不到健康。
+        st.record_failure();
+        assert!(!st.is_healthy());
+        assert!(
+            st.consecutive_failures >= 3,
+            "已关停池的失败计数不会自愈, 实际 {}",
+            st.consecutive_failures
+        );
+    }
+
+    /// 归零的唯一出路: 一次成功建连。活引擎能走到这里, 死引擎永远走不到。
+    #[test]
+    fn only_a_successful_dial_clears_the_failure_counter() {
+        let mut st = PoolStats::new();
+        for _ in 0..5 {
+            st.record_failure();
+        }
+        assert!(!st.is_healthy());
+
+        st.record_latency(42);
+        assert_eq!(st.consecutive_failures, 0);
+        assert!(st.is_healthy(), "一次成功建连后应恢复健康");
+    }
+}
+
+#[cfg(test)]
 mod feedback_tests {
     use super::*;
 
