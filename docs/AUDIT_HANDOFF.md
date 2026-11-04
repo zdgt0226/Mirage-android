@@ -96,6 +96,40 @@ cd native/mirage-core && cargo test --lib && cargo build --release
 不要改回 `channel = "stable"`：CI 跑 `-D warnings`，浮动 channel 意味着上游发版即 CI 红
 （§1.7 实测踩过）。
 
+#### 引擎句柄只能取 `stack.engine()`（2026-11-05 真机实测）
+
+`mirage-jni` 的 `RunState` **刻意不存** `Arc<Engine>` 快照，唯一来源是
+`state.stack.engine()`（读 `TunStack` 内部的 `ArcSwap`，永远是当前引擎）。
+
+原因：`setNode` 热切换节点走 `stack.swap_engine(new)`，而 `swap_engine`
+（`native/mirage-core/src/tun/mod.rs:124-128`）会对旧引擎调 `shutdown()`。
+任何留在 `RunState` 里的快照句柄在那一刻就指向死引擎，而且**永远不会恢复**：
+健康判据是 `PoolStats::is_healthy() == (consecutive_failures < 3)`
+（`proxy/pool.rs:242-244`），唯一归零路径是 `record_latency`（一次成功建连）；
+`WarmPool::shutdown`（`pool.rs:911-921`）只置标志并清空空闲队列，**不动 stats**。
+已关停的池不会再有任何成功 → 计数永久冻结 → `isHealthy()` 恒为 false。
+
+实测后果（SO-02K，两个本地服务端 8443/9443，`kill` 掉当前节点）：
+
+| 时刻 | 事件 |
+| --- | --- |
+| 01:19:44 | 杀掉 A，`Connection refused` 开始 |
+| 01:20:04 | 外壳看门狗连续 2 次判异常 → 触发切换 |
+| 01:20:07 | `[failover] 切换到: local-B (9443) (75ms)` — 切换**成功**，B 开始中继真实流量 |
+| 01:20:22 / 01:20:37 | 又连续 2 次判异常 — **误报**，B 是健康的 |
+| 01:20:40 | `当前节点仍最优, 重启连接` → 无谓的整核重启 |
+
+即每次节点热切换成功后，必然在 2 个巡检周期（`checkIntervalSec` 默认 15s）后
+多做一次整核重启。修复：4 处 `state.engine` / `s.engine` 全部改走
+`state.stack.engine()`，并把 `RunState.engine` 字段**删除**，使这类回归写不出来。
+
+**对 P3 的影响**：内核自己的故障切换看门狗（`mirage-jni/src/lib.rs` 的
+`spawn_failover_watchdog`）读的是同一个句柄。P3 若直接删掉外壳看门狗改由内核决策，
+会把同一个误报从外壳搬进内核 —— 所以这条是 P3 的前置修复。
+
+回归护栏：`proxy::pool::stale_handle_tests` 两条单测钉住「死池永不自愈」与
+「只有一次成功建连能归零」这两个前提。
+
 #### `src/vendor/` 不参与编译（2026-11-03 实证）
 
 `native/vendor-sync.sh` 把上游 22 个模块复制到 `native/mirage-core/src/vendor/`，

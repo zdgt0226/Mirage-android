@@ -38,7 +38,13 @@ static CURRENT_NODE_URI: Mutex<Option<String>> = Mutex::new(None);
 static WATCHDOG_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 struct RunState {
-    engine: Arc<Engine>,
+    /// 唯一的引擎句柄来源是 `stack.engine()` —— 它读 `TunStack` 内部的 `ArcSwap`,
+    /// 永远是当前引擎。这里**刻意不存** `Arc<Engine>` 快照: `setNode` 热切换节点时
+    /// 走 `stack.swap_engine()`, 旧引擎会被 `shutdown()`。任何在 RunState 里留存的
+    /// 快照句柄在那一刻就变成已关停的死引擎, `is_healthy()` 从此恒为 false,
+    /// 导致看门狗在切换成功 2 个巡检周期后必然误判并多做一次整核重启
+    /// (2026-11-05 真机实测: 01:20:07 切换成功 → 01:20:22/01:20:37 连续误报 →
+    /// 01:20:40 无谓重启)。字段不存在, 这类回归就无法被写出来。
     stack: Arc<TunStack>,
     /// tokio runtime 的保活句柄 (stop 时 drop)。
     rt: Arc<tokio::runtime::Runtime>,
@@ -393,11 +399,11 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_start(
             if (1280..=1500).contains(&mtu) {
                 cfg.mtu = mtu as usize;
             }
-            let stack = TunStack::start(engine.clone(), cfg, tun_fd).await?;
-            Ok((engine, stack))
+            let stack = TunStack::start(engine, cfg, tun_fd).await?;
+            Ok(stack)
         });
 
-        let (engine, stack) = match result {
+        let stack = match result {
             Ok(v) => v,
             Err(e) => {
                 tracing::error!("引擎/TUN 启动失败: {e}");
@@ -413,7 +419,7 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_start(
         );
 
         *RUNTIME.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(Arc::new(RunState { engine, stack, rt }));
+            Some(Arc::new(RunState { stack, rt }));
 
         // 故障切换看门狗 (下沉方案 P2)。默认不生效: policy.enabled 为 false 时
         // 每轮直接跳过, 由外壳看门狗继续决策 —— 方案 §5 风险 1 要求两者不得并存。
@@ -490,7 +496,7 @@ fn spawn_failover_watchdog() {
                 continue;
             }
 
-            if state.engine.is_healthy() {
+            if state.stack.engine().is_healthy() {
                 consecutive_failures = 0;
                 continue;
             }
@@ -643,7 +649,7 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_stop(
     jni_boundary!((), {
         let state = RUNTIME.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(state) = state {
-            state.engine.reset_dns_and_fake_ip();
+            state.stack.engine().reset_dns_and_fake_ip();
             state.stack.stop();
             drop(state);
         }
@@ -672,7 +678,7 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_isHealthy(
     jni_boundary!(0, {
         let guard = RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
-            Some(s) => s.engine.is_healthy() as jboolean,
+            Some(s) => s.stack.engine().is_healthy() as jboolean,
             None => 0,
         }
     })
@@ -703,7 +709,7 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_latencyMs(
     jni_boundary!(-1, {
         let guard = RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
-            Some(s) => s.engine.latency_ms().map(|v| v as jlong).unwrap_or(-1),
+            Some(s) => s.stack.engine().latency_ms().map(|v| v as jlong).unwrap_or(-1),
             None => -1,
         }
     })
