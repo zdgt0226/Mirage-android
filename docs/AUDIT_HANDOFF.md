@@ -157,8 +157,8 @@ cd native/mirage-core && cargo test --lib && cargo build --release
 
    | 外壳原有 | 内核补法 |
    | --- | --- |
-   | `if (currentPhysicalNetwork == null) continue` | 读 `failover::network_state().1`，`false` 时跳过整轮并把连续失败计数归零。缺它，飞行模式/隧道里会把每个候选节点各测 3s，全败后要一次整核重启，重启同样连不上，于是按 `interval` 无限循环 |
-   | `failoverBackoffSec` 每轮 `+5s`、上限 `30s` | `failover::escalate_backoff()`（纯函数 + 单测）。看门狗累加 `dynamic_backoff_sec`，与外壳下发的静态 `policy.backoff_sec` **相加**；外壳固定下发 0，否则两处叠加 |
+   | `if (currentPhysicalNetwork == null) continue` | 读 `failover::network_state().1`，`false` 时跳过整轮并把连续失败计数归零。**但它的输入目前是坏的**，见下方「网络闸门的输入是陈旧的」 |
+   | `failoverBackoffSec` 每轮 `+5s`、上限 `30s` | `failover::escalate_backoff()`（纯函数 + 单测）。看门狗累加 `dynamic_backoff_sec`，与外壳下发的静态 `policy.backoff_sec` **相加**；外壳固定下发 0，否则两处叠加。**作用域比字面窄**：该变量是看门狗任务的局部量，而 `start()` 每次都重起看门狗（`WATCHDOG_GEN` 让旧实例退出），所以一旦走到「请求重启」退避就归零 —— 真机实测三轮重启间隔恒为 37s 而非递增。外壳同理（`failoverBackoffSec` 活在被 `cancelPeriodicJobs()` 取消的 `watchdogJob` 闭包里），两边等价，不是回归 |
 
 4. **三个 AIDL setter 必须重推策略。** `setAutoReconnect` / `setCheckInterval` /
    `setFailoverMode` 原先只改 `serviceConfig`，由外壳看门狗每轮实时读。下沉后内核拿的是
@@ -168,6 +168,29 @@ cd native/mirage-core && cargo test --lib && cargo build --release
 5. **`serviceConfig.uri` 会过时。** 内核热切换只改自己的 `CURRENT_NODE_URI`，而
    `startLocked` 在没有 `uriOverride` 时正是取 `serviceConfig.uri` 建连。不在
    `EVENT_SWITCHED` 里同步，下一次重启就会回到刚被判死的节点。
+
+#### 网络闸门的输入是陈旧的（2026-11-05 实测，P3 之前就存在）
+
+`failover::network_state().1` 的唯一写入方是 `CoreService.switchTo()` → `onNetworkChanged`。
+实测 `switchTo(null)` **不会**在底层物理网络消失时被调用：
+
+| 时刻（本地） | 事件 |
+| --- | --- |
+| 09:01:03 | `svc wifi disable` + `svc data disable`；`dumpsys connectivity` 报 `Active default network: none` |
+| 09:01:10 / 09:01:47 / 09:02:24 | 内核照旧判不健康并向外壳要了三次重启 —— 闸门没拦住 |
+| — | `core.log` 与 logcat 全程没有 `底层物理网络切换: 400 -> null` |
+| 09:04:16 | `svc wifi enable` 后才出现 `底层物理网络切换: 400 -> 409` —— 回调活着，但 `currentPhysicalNetwork` 整段时间冻结在 400 |
+
+机制：注册的是 `cm.registerDefaultNetworkCallback(cb)`（`CoreService` 的
+「注册底层物理网络监听」一段），它只跟踪**默认网络**的生命周期。隧道建立后底层物理网络
+不再是被跟踪的那一个，它的 `onLost` 不送达，`onCapabilitiesChanged` 也不对它触发，
+于是 `currentPhysicalNetwork` 保持陈旧。
+
+**不是 P3 引入的。** 外壳原看门狗的 `if (currentPhysicalNetwork == null) continue` 读的是
+同一个陈旧字段，在它被写出来针对的那个场景里同样是死代码。下沉后行为等价，闸门的代码
+路径与单测都已就位。要让它真的生效，须先把回调改成按 `NetworkRequest`
+（`NET_CAPABILITY_INTERNET` + `NET_CAPABILITY_NOT_VPN`）注册的 `registerNetworkCallback`；
+那会同时改动 `setUnderlyingNetworks` 的时序与暖池冲刷的触发点，需要自己一轮真机矩阵。
 
 **无声失败的防线。** Rust 侧 `FailoverPolicy` 每个字段都带 `#[serde(default)]`，键名拼错
 会被静默丢弃并回落到 `enabled = false`。外壳看门狗已经删了，结果是**无人**做故障切换，
@@ -586,6 +609,17 @@ JNI 门禁               protectFd 1 · resolveConnectionOwner 1 · dex 43 = .so
    `startForeground(type)` 分支），建议在高版本机型上至少复跑前两项。
 4. **`jniLibs/` 是 gitignore 的本地产物**。改了 `native/` 后必须
    `bash scripts/build-android.sh native`，否则 APK 里仍是旧 `.so`。
+5. **`registerDefaultNetworkCallback` 看不见底层物理网络的消失**（2026-11-05 实测，
+   详见 §Rust 侧「网络闸门的输入是陈旧的」）。隧道起来之后关掉 Wi-Fi + 移动数据，
+   `onLost` 不送达，`currentPhysicalNetwork` 与内核的 `failover::network_state()`
+   一起冻结在旧网络上。影响面不止故障切换的闸门：`setUnderlyingNetworks` 在断网期间
+   也不会被撤下。修法是改成按 `NetworkRequest`（`NET_CAPABILITY_INTERNET` +
+   `NET_CAPABILITY_NOT_VPN`）注册的 `registerNetworkCallback`，但它会动到
+   `setUnderlyingNetworks` 的时序与暖池冲刷的触发点，须单独一轮并在两台真机上都验。
+6. **节点 URI 在日志里的脱敏不够**。`[core] 开始启动内核 (uri=${uri.take(30)}...)` 与
+   `onFailoverEvent` 的 `nodeUri.take(24)` 都会漏出 `mirage://` 之后的十几到二十几个字符，
+   而那一段正是口令。core.log 是用户可导出分享的文件。应改成只保留 scheme + host:port
+   （内核侧的 `redact_uri` 已经是这个形状，外壳侧两处尚未对齐）。
 
 ---
 
