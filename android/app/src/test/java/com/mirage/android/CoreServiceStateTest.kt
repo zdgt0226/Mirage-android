@@ -1,10 +1,12 @@
 package com.mirage.android
 
+import com.mirage.android.CoreService.FailoverControl
 import com.mirage.android.CoreService.ServiceState
 import com.mirage.android.CoreService.StartVerdict
 import com.mirage.android.CoreService.StateMachine
 import com.mirage.android.data.model.AppFilterConfig
 import com.mirage.android.data.model.AppFilterMode
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
@@ -25,9 +27,9 @@ class CoreServiceStateTest {
     /**
      * 「用户点断开后 VPN 自己回来」的核心回归。
      *
-     * stopInternal 在锁内、拆除之前就把状态置为 Stopping。failoverRestartJob 的
-     * cancel() 是协作式的，可能已经越过 isActive 检查并在 stateLock 上排队；
-     * 它拿到锁时必须看到 Stopping 并放弃，否则会重建刚被用户停掉的 VPN。
+     * stopInternal 在锁内、拆除之前就把状态置为 Stopping。内核「请求重启」事件
+     * 是异步落地的，它可能已在 stateLock 上排队；拿到锁时必须看到 Stopping
+     * 并放弃，否则会重建刚被用户停掉的 VPN。
      */
     @Test
     fun startIsRejectedWhileStopping() {
@@ -179,5 +181,73 @@ class CoreServiceStateTest {
         assertEquals(AppFilterMode.DISALLOW, cfg.appFilterConfig!!.mode)
         assertEquals("next", cfg.failoverMode)
         assertEquals(1, cfg.outboundMode)
+    }
+
+    // ── 下沉方案 P3: 故障切换控制面 ────────────────────────────────────
+
+    /**
+     * P3 的无声失败防线。
+     *
+     * 外壳看门狗已删除，内核看门狗是否干活完全取决于这份 JSON 的 `enabled`。
+     * Rust 侧 `FailoverPolicy` 每个字段都带 `#[serde(default)]`，键名拼错会被
+     * 静默丢弃并回落到默认值 `enabled = false` —— 故障切换整条链路失效，
+     * 而日志里只有一行 `切换策略下发内核: ok=true`。所以这里逐字断言键名。
+     */
+    @Test
+    fun policyJsonUsesExactRustFieldNames() {
+        val json = JSONObject(
+            FailoverControl.policyJson(mode = "best", intervalSec = 15, autoReconnect = true)
+        )
+        assertTrue("mode", json.has("mode"))
+        assertTrue("interval_sec", json.has("interval_sec"))
+        assertTrue("backoff_sec", json.has("backoff_sec"))
+        assertTrue("restart_delay_ms", json.has("restart_delay_ms"))
+        assertTrue("enabled", json.has("enabled"))
+        assertEquals("best", json.getString("mode"))
+        assertEquals(15, json.getInt("interval_sec"))
+        assertEquals(3000, json.getInt("restart_delay_ms"))
+    }
+
+    /**
+     * `enabled` 必须跟随「断线自动重连」开关。
+     *
+     * 外壳原看门狗在 autoReconnect 为 false 时只记日志不动手；内核整轮跳过与之
+     * 等价。若这里恒为 true，用户关掉自动重连后内核仍会自己换节点。
+     */
+    @Test
+    fun enabledTracksAutoReconnect() {
+        val on = JSONObject(FailoverControl.policyJson("best", 15, autoReconnect = true))
+        assertTrue(on.getBoolean("enabled"))
+        val off = JSONObject(FailoverControl.policyJson("best", 15, autoReconnect = false))
+        assertFalse(off.getBoolean("enabled"))
+    }
+
+    /**
+     * 静态基线必须是 0。
+     *
+     * 真正的退避递增由内核自己累加（`failover::escalate_backoff`，+5s 上限 30s，
+     * 照抄被删除的 failoverBackoffSec）。这里填非 0 会与内核的动态退避相加，
+     * 两处都变慢且无人察觉。
+     */
+    @Test
+    fun staticBackoffBaselineIsZero() {
+        val json = JSONObject(FailoverControl.policyJson("next", 30, autoReconnect = true))
+        assertEquals(0, json.getInt("backoff_sec"))
+    }
+
+    /**
+     * 内核事件只在 Running 下执行。
+     *
+     * 事件在内核 runtime 线程上产生、异步落到外壳，与用户点断开同时发生是常态。
+     * 「请求重启」在 Stopping 下放行会复活刚停掉的 VPN，在 Stopped 下放行等于凭一条
+     * 迟到的事件把服务重新拉起来；「已热切换」在非 Running 下放行会把下标回流落盘到
+     * UI 的 selected_index，表现为用户停掉 VPN 后选中的节点被悄悄换了。
+     */
+    @Test
+    fun kernelEventsOnlyHonoredWhileRunning() {
+        assertTrue(FailoverControl.shouldHonorEvent(ServiceState.Running))
+        assertFalse(FailoverControl.shouldHonorEvent(ServiceState.Stopping))
+        assertFalse(FailoverControl.shouldHonorEvent(ServiceState.Stopped))
+        assertFalse(FailoverControl.shouldHonorEvent(ServiceState.Starting))
     }
 }
