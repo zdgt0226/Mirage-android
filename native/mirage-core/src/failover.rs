@@ -1,11 +1,12 @@
-//! 故障切换的状态与事件通道（下沉方案 P1：只建接口面，不含看门狗）。
+//! 故障切换的状态与事件通道（下沉方案 P1 接口面 / P2 看门狗 / P3 外壳已拆除）。
 //!
 //! 职责边界见 `docs/CORE_OFFLOAD_PLAN.md`：
-//! - 内核持有节点清单、切换策略与物理网络状态，P2 据此自主判定与热切换；
+//! - 内核持有节点清单、切换策略与物理网络状态，自主判定与热切换；
 //! - 内核**不能**创建 TUN fd（`VpnService.Builder.establish` 是 Android 框架 API），
 //!   因此需要重建隧道的重启只能发事件请求外壳执行。
 //!
-//! 本模块在 P1 阶段只提供存储与事件通道，`watchdog` 由 P2 填充。
+//! 本模块只放状态与纯函数；看门狗循环在平台包装层（`mirage-jni` 的
+//! `spawn_failover_watchdog`），因为事件回调与 runtime 都在那一层。
 
 use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -45,8 +46,9 @@ pub struct FailoverPolicy {
     pub restart_delay_ms: u32,
     /// 内核看门狗总开关。
     ///
-    /// **默认 false**：方案 §5 风险 1 要求内核策略与外壳看门狗不得并存。
-    /// P2 落地时外壳仍是权威，故默认关闭；P3 拆除外壳看门狗时由外壳下发 true。
+    /// **默认 false**：方案 §5 风险 1 要求内核策略与外壳看门狗不得并存，
+    /// 而未下发策略时无从判断外壳是哪一代，关闭是唯一安全的缺省。
+    /// P3 已拆除外壳看门狗，该位由外壳按「断线自动重连」开关下发。
     #[serde(default)]
     pub enabled: bool,
 }
@@ -158,6 +160,16 @@ pub fn network_state() -> (u64, bool) {
     )
 }
 
+/// 故障切换未能换到可用节点时的退避递增（秒）。
+///
+/// 节奏照抄外壳 `startFailoverWatchdog` 被 P3 删除的那段：每轮失败 `+5`，上限 `30`。
+/// 这不是可调参数而是等价性约束——缺了它，全网不可达时内核会按 `interval_sec`
+/// 原速空转（默认 15s 一轮全节点测速），耗电与握手压力都比外壳原实现高一个量级。
+pub fn escalate_backoff(current_sec: u32) -> u32 {
+    // saturating: 调用方传入值来自看门狗自己的累加, 但封死溢出比相信调用方便宜。
+    current_sec.saturating_add(5).min(30)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +233,16 @@ mod tests {
         assert!(policy().enabled);
         set_policy("{}");
         assert!(!policy().enabled, "未带 enabled 的策略应回到关闭");
+    }
+
+    #[test]
+    fn backoff_escalates_by_five_and_caps_at_thirty() {
+        // 外壳原实现: failoverBackoffSec = (failoverBackoffSec + 5).coerceAtMost(30)
+        assert_eq!(escalate_backoff(0), 5);
+        assert_eq!(escalate_backoff(5), 10);
+        assert_eq!(escalate_backoff(25), 30);
+        assert_eq!(escalate_backoff(30), 30, "上限必须封死, 否则间隔会无界增长");
+        assert_eq!(escalate_backoff(u32::MAX - 1), 30, "不得溢出 panic");
     }
 
     #[test]

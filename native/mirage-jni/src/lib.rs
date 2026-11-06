@@ -420,8 +420,9 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_start(
 
         *RUNTIME.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(RunState { stack, rt }));
 
-        // 故障切换看门狗 (下沉方案 P2)。默认不生效: policy.enabled 为 false 时
-        // 每轮直接跳过, 由外壳看门狗继续决策 —— 方案 §5 风险 1 要求两者不得并存。
+        // 故障切换看门狗 (下沉方案 P2 实现 / P3 接管)。本身不自带开关语义:
+        // policy.enabled 为 false 时每轮直接跳过。P3 已删除外壳看门狗, 该位由外壳
+        // 按「断线自动重连」开关下发 —— 方案 §5 风险 1 要求两者不得并存。
         spawn_failover_watchdog();
 
         tracing::info!("MirageCore 已启动");
@@ -465,11 +466,15 @@ fn spawn_failover_watchdog() {
     rt.spawn(async move {
         // 连续失败计数: 与外壳原实现一致, 两次才动手, 避免单次抖动触发切换。
         let mut consecutive_failures: u32 = 0;
+        // 动态退避: 一轮没能换到可用节点就递增, 换成了或本就健康则归零。
+        // 外壳 `startFailoverWatchdog` 的 failoverBackoffSec 就是这个量;
+        // policy.backoff_sec 是外壳下发的静态基线, 两者相加, 不互相替代。
+        let mut dynamic_backoff_sec: u32 = 0;
 
         loop {
             let policy = failover::policy();
             let interval = std::time::Duration::from_secs(
-                (policy.interval_sec.max(5) + policy.backoff_sec) as u64,
+                (policy.interval_sec.max(5) + policy.backoff_sec + dynamic_backoff_sec) as u64,
             );
             tokio::time::sleep(interval).await;
 
@@ -490,13 +495,28 @@ fn spawn_failover_watchdog() {
                 return;
             };
 
-            // 总开关: 外壳看门狗仍是权威时, 内核只观察不动手。
+            // 总开关。P3 之前外壳看门狗是权威, 内核只观察不动手; P3 拆除外壳后
+            // 由外壳按「断线自动重连」开关下发 true/false。
             if !policy.enabled {
+                continue;
+            }
+
+            // 全网不可达时一律不动手: 换节点解决不了没有网。这是外壳原看门狗
+            // `if (currentPhysicalNetwork == null) continue` 的等价物 —— 缺了它,
+            // 飞行模式/地铁隧道里会把每个候选节点都测一遍 (各 3s 超时), 全部失败后
+            // 再向外壳要一次整核重启, 而重启同样连不上, 于是按 interval 无限循环。
+            // 输入由外壳的 onNetworkChanged 维护 (failover::on_network_changed)。
+            let (_, has_internet) = failover::network_state();
+            if !has_internet {
+                // 计数必须归零: 断网期间攒下的失败不该在恢复瞬间立刻凑够 2 次触发切换。
+                consecutive_failures = 0;
+                tracing::debug!("[failover] 物理网络不可用, 本轮跳过");
                 continue;
             }
 
             if state.stack.engine().is_healthy() {
                 consecutive_failures = 0;
+                dynamic_backoff_sec = 0;
                 continue;
             }
 
@@ -521,7 +541,10 @@ fn spawn_failover_watchdog() {
                 .cloned()
                 .collect();
             if candidates.is_empty() {
-                tracing::warn!("[failover] 无可切换节点, 请求外壳重启");
+                dynamic_backoff_sec = failover::escalate_backoff(dynamic_backoff_sec);
+                tracing::warn!(
+                    "[failover] 无可切换节点, 请求外壳重启 (退避 {dynamic_backoff_sec}s)"
+                );
                 tokio::time::sleep(std::time::Duration::from_millis(
                     policy.restart_delay_ms as u64,
                 ))
@@ -538,7 +561,10 @@ fn spawn_failover_watchdog() {
                 match pick_best_node(&rt_for_task, &candidates).await {
                     Some(u) => u,
                     None => {
-                        tracing::warn!("[failover] 候选节点全部不可达, 请求外壳重启");
+                        dynamic_backoff_sec = failover::escalate_backoff(dynamic_backoff_sec);
+                        tracing::warn!(
+                            "[failover] 候选节点全部不可达, 请求外壳重启 (退避 {dynamic_backoff_sec}s)"
+                        );
                         tokio::time::sleep(std::time::Duration::from_millis(
                             policy.restart_delay_ms as u64,
                         ))
@@ -557,10 +583,12 @@ fn spawn_failover_watchdog() {
             // 热切换: 与 setNode 同路径, 不需要新的 TUN fd。
             match switch_engine_to(&state, &chosen) {
                 Ok(()) => {
+                    dynamic_backoff_sec = 0;
                     tracing::info!("[failover] 内核已热切换: {}", redact_uri(&chosen));
                     failover::emit_event(failover::EVENT_SWITCHED, &chosen);
                 }
                 Err(e) => {
+                    dynamic_backoff_sec = failover::escalate_backoff(dynamic_backoff_sec);
                     tracing::warn!(
                         "[failover] 热切换失败 ({e}), 请求外壳重启: {}",
                         redact_uri(&chosen)

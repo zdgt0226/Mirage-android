@@ -29,8 +29,6 @@ import com.mirage.android.core.SettingsStore
 import com.mirage.android.core.TrafficStatsStore
 import com.mirage.android.core.TunConfigStore
 import kotlinx.coroutines.*
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import java.net.InetAddress
 
 /**
@@ -109,6 +107,61 @@ class CoreService : VpnService() {
     }
 
     /**
+     * 故障切换策略的编解码与裁决 (纯逻辑 / 测试解耦)。
+     *
+     * 下沉方案 P3 把看门狗整体搬进内核后，这个对象就是外壳对故障切换的**全部**
+     * 控制面。它必须可单测，原因是失败形态完全无声：Rust 侧 `FailoverPolicy`
+     * 每个字段都带 `#[serde(default)]`，拼错的键被静默丢弃而不是报错。
+     * 若 `enabled` 写错，内核看门狗永久关闭，而外壳的看门狗已经删了 ——
+     * 结果是**无人**做故障切换，日志上却只看到一行 `ok=true`。
+     */
+    internal object FailoverControl {
+
+        /** Rust 侧 `failover::FailoverPolicy` 的字段名，逐字一致。 */
+        const val KEY_MODE = "mode"
+        const val KEY_INTERVAL_SEC = "interval_sec"
+        const val KEY_BACKOFF_SEC = "backoff_sec"
+        const val KEY_RESTART_DELAY_MS = "restart_delay_ms"
+        const val KEY_ENABLED = "enabled"
+
+        /** 内核请求外壳重启前的等待，沿用外壳原实现的 3000ms。 */
+        const val RESTART_DELAY_MS = 3000
+
+        /**
+         * 下发给内核的策略 JSON。
+         *
+         * `enabled` 直接取「断线自动重连」开关：外壳原看门狗在 `autoReconnect`
+         * 为 false 时只记日志不动手，内核跳过整轮与之等价。
+         *
+         * `backoff_sec` 固定为 0 —— 它是静态基线，真正的退避递增由内核自己按
+         * `failover::escalate_backoff` 累加（外壳原来的 failoverBackoffSec）。
+         * 在这里填非 0 会与内核的动态退避叠加，两处都变慢。
+         */
+        fun policyJson(mode: String, intervalSec: Int, autoReconnect: Boolean): String =
+            org.json.JSONObject()
+                .put(KEY_MODE, mode)
+                .put(KEY_INTERVAL_SEC, intervalSec)
+                .put(KEY_BACKOFF_SEC, 0)
+                .put(KEY_RESTART_DELAY_MS, RESTART_DELAY_MS)
+                .put(KEY_ENABLED, autoReconnect)
+                .toString()
+
+        /**
+         * 是否执行内核送来的故障切换事件。只有 [ServiceState.Running] 放行。
+         *
+         * 事件在内核 runtime 线程上产生、异步落到外壳，与用户点断开同时发生是常态
+         * 而非边角，两类事件各有一种在非 Running 下的具体危害：
+         *
+         * - 「请求重启」：Stopping 时放行会复活用户刚停掉的 VPN；Stopped 时放行
+         *   等于凭一条迟到的事件把服务重新拉起来。
+         * - 「已热切换」：下标回流会经 `ICoreCallback` 落盘到 UI 的 `selected_index`。
+         *   用户停掉 VPN 之后收到一条在途事件就照样回流，表现为选中的节点被悄悄换了。
+         */
+        fun shouldHonorEvent(state: ServiceState): Boolean =
+            state == ServiceState.Running
+    }
+
+    /**
      * 原生调用安全守卫 (纯逻辑 / 测试解耦)。
      *
      * 解决的致命缺陷 (在 SO-02K 真机复现):
@@ -179,8 +232,6 @@ class CoreService : VpnService() {
     private var logJob: Job? = null
     private var notifJob: Job? = null
     private var trafficJob: Job? = null
-    private var watchdogJob: Job? = null
-    private var failoverRestartJob: Job? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var screenReceiver: BroadcastReceiver? = null
     private var screenJob: Job? = null
@@ -259,20 +310,18 @@ class CoreService : VpnService() {
     /**
      * 取消全部周期性后台任务。
      *
-     * 必须在 startInternal 开头也调用一次: failover 重启路径直接调 startInternal
-     * 而不经过 stopInternal, 若不先取消, 每次重启都会再起一套 log/notif/traffic/watchdog,
-     * 而旧的那套仍在跑 —— 多个 watchdog 各自触发 failover, 增长快于线性。
+     * 必须在 startInternal 开头也调用一次: 内核请求的重启路径直接调 startInternal
+     * 而不经过 stopInternal, 若不先取消, 每次重启都会再起一套 log/notif/traffic,
+     * 而旧的那套仍在跑。
      */
     private fun cancelPeriodicJobs() {
         logJob?.cancel(); logJob = null
         notifJob?.cancel(); notifJob = null
         trafficJob?.cancel(); trafficJob = null
-        watchdogJob?.cancel(); watchdogJob = null
     }
 
     private fun cancelAllJobs() {
         cancelPeriodicJobs()
-        failoverRestartJob?.cancel(); failoverRestartJob = null
         screenJob?.cancel(); screenJob = null
         networkCallback?.let { cb ->
             runCatching { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) }
@@ -366,20 +415,9 @@ class CoreService : VpnService() {
             outboundMode = outboundMode
         )
 
-        // 下沉方案 P1: 把切换策略下发内核。内核当前只存不用 (看门狗仍在外壳),
-        // P2 据此自主判定节奏。字段名与 failover.rs 的 FailoverPolicy 对应。
-        runCatching {
-            val policy = org.json.JSONObject()
-                .put("mode", serviceConfig.failoverMode)
-                .put("interval_sec", serviceConfig.checkIntervalSec)
-                .put("backoff_sec", 0)
-                .put("restart_delay_ms", 3000)
-                .toString()
-            val ok = MirageNative.setFailoverPolicy(policy)
-            LogStore.append("[core] 切换策略下发内核: ok=$ok policy=$policy")
-        }.onFailure { e ->
-            LogStore.append("[core] 切换策略下发内核异常: ${e::class.java.simpleName}: ${e.message}")
-        }
+        // 下沉方案 P3: 把切换策略下发内核。外壳已无看门狗, 这一次下发就是
+        // 故障切换的全部开关 —— 失败即整条链路失效, 故日志必须留痕。
+        pushFailoverPolicy()
 
         // 直接驱动启动 (建 TUN + 内核), 不依赖 UI 后续 AIDL 调用
         val rc = startInternal(uri, poolSize)
@@ -442,8 +480,8 @@ class CoreService : VpnService() {
      */
     fun startInternal(uriOverride: String? = null, poolSizeOverride: Int = -1): Int = synchronized(stateLock) {
         // 停止流程进行中 (可能正持锁或刚释放锁): 放弃本次启动。
-        // 这是「用户点断开后 VPN 自己回来」的根因守卫 —— failoverRestartJob 的
-        // cancel() 是协作式的, 不保证已 join, 它可能已经越过 isActive 检查在此排队。
+        // 这是「用户点断开后 VPN 自己回来」的根因守卫 —— 内核的「请求重启」事件
+        // 在独立线程上异步落地, 它可能恰好与用户点断开同时发生并在此排队。
         val nativeRunning = isRunningInternal()
         when (StateMachine.verdictForStart(serviceState, nativeRunning)) {
             StartVerdict.RejectStopping -> {
@@ -644,7 +682,7 @@ class CoreService : VpnService() {
         runCatching { MirageNative.setUdpMux(serviceConfig.udpMux) }
         // 下沉方案 P1: 节点全表必须在这里补发一次。
         // AIDL updateNodes 可能在任何 start 之前到达, 那时原生库尚未装载而被守卫短路,
-        // 若不在此补发, 内核会一直拿不到候选节点, P2 看门狗将永远「无可切换节点」。
+        // 若不在此补发, 内核会一直拿不到候选节点, 看门狗将永远「无可切换节点」。
         runCatching {
             val nodesJson = NodeStore.getNodesJson(this)
             val ok = MirageNative.setNodeList(nodesJson)
@@ -800,111 +838,96 @@ class CoreService : VpnService() {
                 flushLogsAndStats()
             }
         }
-        // 断线自动重连 / 节点 failover watchdog
-        watchdogJob = startFailoverWatchdog()
+        // 断线检测与节点故障切换已下沉内核 (方案 P3)。外壳在此不再起看门狗:
+        // 内核的 spawn_failover_watchdog 在 MirageNative.start 内已随引擎启动,
+        // 外壳只经 onFailoverEvent 响应「请求重启」。
         return 0
     }
 
-    /** 断线检测 + 自动重连 + failover watchdog。 */
-    private fun startFailoverWatchdog(): Job = scope.launch {
-        var consecutiveFailures = 0
-        var failoverBackoffSec = 0L
-        while (isActive) {
-            val baseInterval = serviceConfig.checkIntervalSec.toLong().coerceAtLeast(5)
-            val interval = baseInterval + failoverBackoffSec
-            delay(interval * 1000)
-            if (currentPhysicalNetwork == null) continue
-            if (!isRunningInternal()) continue
-            // 修复 M1: Fail-Closed (异常/JNI失败时视为不健康，防止假死与自愈失效)
-            val healthy = isHealthyInternal()
-            if (healthy) {
-                consecutiveFailures = 0
-                failoverBackoffSec = 0L
-                continue
+    /**
+     * 把故障切换策略下发内核 (下沉方案 P3)。
+     *
+     * 启动时下发一次, 之后三个 AIDL setter 每次改动都重推。原生库未装载时直接
+     * 跳过: 启动路径随后会再调一次, 而此刻调用只会抛 UnsatisfiedLinkError。
+     */
+    private fun pushFailoverPolicy() {
+        if (!NativeLoader.isLoaded()) {
+            LogStore.append("[core] 原生库未装载, 切换策略改由启动时下发")
+            return
+        }
+        val policy = FailoverControl.policyJson(
+            mode = serviceConfig.failoverMode,
+            intervalSec = serviceConfig.checkIntervalSec,
+            autoReconnect = serviceConfig.autoReconnect
+        )
+        runCatching { MirageNative.setFailoverPolicy(policy) }
+            .onSuccess { ok -> LogStore.append("[core] 切换策略下发内核: ok=$ok policy=$policy") }
+            .onFailure { e ->
+                LogStore.append("[core] 切换策略下发内核异常: ${e::class.java.simpleName}: ${e.message}")
             }
+    }
 
-            consecutiveFailures++
-            LogStore.append("[failover] 检测到连接异常 (第 $consecutiveFailures 次)")
-            if (!serviceConfig.autoReconnect) continue
-
-            // 连续 2 次异常才触发 failover (避免瞬时抖动)
-            if (consecutiveFailures >= 2) {
-                val switched = doFailover()
-                consecutiveFailures = 0
-                if (!switched) {
-                    // 全网不可达/所有节点离线，梯度退避 (最多 30s)，避免高频空转与耗电
-                    failoverBackoffSec = (failoverBackoffSec + 5).coerceAtMost(30)
-                } else {
-                    failoverBackoffSec = 0L
-                }
+    /**
+     * 把内核的故障切换事件转到自己的 scope 上执行 (下沉方案 P3)。
+     *
+     * **异步是正确性要求, 不是风格选择。** 调用链是: 内核看门狗任务 →
+     * `failover::emit_event` → JNI 上行 → 这里, 全程跑在 tokio worker 线程上。
+     * 若在该线程上同步走到 `MirageNative.stop()`, Rust 侧会 take 走 RUNTIME 并
+     * drop `Arc<Runtime>`; 一旦那是最后一个引用, 就等于在 runtime 自己的 worker
+     * 线程里 drop runtime —— tokio 对此直接 panic, 且 panic 发生在 spawn 的任务里,
+     * `jni_boundary!` 捕不到, 表现为内核静默失去看门狗。切线程后这条路径不存在。
+     */
+    private fun dispatchFailoverEvent(kind: Int, nodeUri: String) {
+        scope.launch {
+            // 状态在转线程之后才读: 排队期间用户完全可能已经点了断开。
+            val state = synchronized(stateLock) { serviceState }
+            if (!FailoverControl.shouldHonorEvent(state)) {
+                LogStore.append("[core] 故障切换事件被忽略 (serviceState=$state)")
+                return@launch
+            }
+            when (kind) {
+                MirageNative.FAILOVER_SWITCHED -> onKernelSwitched(nodeUri)
+                MirageNative.FAILOVER_RESTART_REQUESTED -> onKernelRestartRequested()
+                else -> LogStore.append("[core] 未知故障切换事件 kind=$kind, 忽略")
             }
         }
     }
 
-    /** failover: 测活选最优节点 (best) 或换下一个 (next), 然后热切换。返回是否成功选中可用节点。 */
-    private suspend fun doFailover(): Boolean {
-        val nodes = if (serviceConfig.nodes.isNotEmpty()) serviceConfig.nodes else NodeStore.getNodes(this)
-        if (nodes.size <= 1) {
-            // 单节点: 完整重启连接 (清 stale 隧道, 保持 TUN 避免明文泄露)
-            LogStore.append("[failover] 仅一个节点, 重启连接 (保持 TUN)")
-            runCatching { MirageNative.stop() }
-            // 修复 2.1: 不关闭 tunFd, 避免重启等待期间物理网络明文泄露
-            failoverRestartJob?.cancel()
-            failoverRestartJob = scope.launch {
-                delay(3000)
-                if (isActive && !isRunningInternal()) startInternal()
-            }
-            return false // 修复 2.1: 单节点重连未能切换可用节点，返回 false 允许 failoverBackoffSec 递增退避
+    /** 内核已自行热切换到新节点: 外壳只需对齐自己的权威副本并把下标回流 UI。 */
+    private fun onKernelSwitched(nodeUri: String) {
+        if (nodeUri.isBlank()) {
+            LogStore.append("[core] 热切换事件缺节点 URI, 跳过")
+            return
         }
-        val mode = serviceConfig.failoverMode
-        LogStore.append("[failover] 触发节点切换 (mode=$mode, ${nodes.size} 个节点)")
-        val selectedUri = if (serviceConfig.uri.isNotBlank()) serviceConfig.uri else NodeStore.getSelectedUri(this)
-        val sorted = if (mode == "best") {
-            // 修复 M3: 并发并行测活 (各节点独立 3000ms 超时, 避免 N*5s 阻塞 watchdog 导致监控停摆)。
-            // 每个 testNode 是完整协议握手 (引擎+拨号), 用信号量限流防 N 个并发握手同时打服务器
-            // (thundering herd) —— 与内核 pool 的 on-demand 信号量同理。
-            val sem = Semaphore(4)
-            withContext(Dispatchers.IO) {
-                nodes.map { n ->
-                    async {
-                        sem.withPermit {
-                            val rtt = runCatching { MirageNative.testNode(n.uri, 3000) }.getOrDefault(-1L)
-                            n to rtt
-                        }
-                    }
-                }.awaitAll()
-            }.filter { it.second >= 0 }.sortedBy { it.second }
+        // 必须同步: startLocked 在没有 uriOverride 时正是取 serviceConfig.uri 建连。
+        // 不更新的话, 下一次重启 (无论来自内核请求还是用户) 都会回到刚被判死的节点。
+        serviceConfig.uri = nodeUri
+        val nodes = if (serviceConfig.nodes.isNotEmpty()) {
+            serviceConfig.nodes
         } else {
-            // 顺序: 选当前之后的下一个
-            val idx = nodes.indexOfFirst { it.uri == selectedUri }
-            listOfNotNull(nodes.getOrNull(idx + 1) ?: nodes.firstOrNull()).map { it to 0L }
+            NodeStore.getNodes(this)
         }
-        val best = sorted.firstOrNull()
-        if (best == null) {
-            LogStore.append("[failover] 所有节点测活均无响应 (网络中断/服务器维护)")
-            return false
+        val idx = nodes.indexOfFirst { it.uri == nodeUri }
+        if (idx < 0) {
+            // 内核清单比外壳的新 (用户刚删节点而重推还没到) 时会落到这里。
+            // 不猜下标: 写错的 selected_index 会让 UI 显示另一个节点。
+            LogStore.append("[core] 内核切到的节点不在外壳清单内, 跳过下标回流")
+            return
         }
-        if (best.first.uri != selectedUri) {
-            LogStore.append("[failover] 切换到: ${best.first.displayName} (${best.second}ms)")
-            serviceConfig.uri = best.first.uri
-            runCatching { MirageNative.setNode(best.first.uri) }
-            val newIdx = nodes.indexOfFirst { it.uri == best.first.uri }
-            if (newIdx >= 0) {
-                // 修复 3.1: 删掉 NodeStore.setSelected(this, newIdx)，单向回流经 ICoreCallback 由 UI 进程落盘持久化
-                broadcast { it.onNodeChanged(newIdx, best.first.uri) }
-            }
-            return true
-        } else {
-            // 最优还是当前 → 重启连接 (清 stale 隧道, 保持 TUN 避免明文泄露)
-            LogStore.append("[failover] 当前节点仍最优, 重启连接 (保持 TUN)")
-            runCatching { MirageNative.stop() }
-            // 修复 2.1: 不关闭 tunFd
-            failoverRestartJob?.cancel()
-            failoverRestartJob = scope.launch {
-                delay(3000)
-                if (isActive && !isRunningInternal()) startInternal()
-            }
-            return false // 修复 2.1: 未能切换到不同可用节点，返回 false 允许退避
+        // 单向回流: :core 不写 selected_index, 由 UI 进程经 ICoreCallback 落盘,
+        // 避免两个进程并发写同一份 prefs (与旧 doFailover 同一约定)。
+        broadcast { it.onNodeChanged(idx, nodeUri) }
+    }
+
+    /** 内核要求重建隧道 (它拿不到 TUN fd): 由外壳执行重启。 */
+    private fun onKernelRestartRequested() {
+        // 内核在 emit 之前已经等过 policy.restart_delay_ms, 这里不再叠加延迟。
+        // 刻意不关 tunFd: 重启窗口里撤掉 TUN, 流量会立刻改走物理网卡明文外发。
+        LogStore.append("[core] 按内核请求重启隧道 (保持 TUN)")
+        runCatching { MirageNative.stop() }
+        val rc = startInternal()
+        if (rc != 0) {
+            LogStore.append("[core] 内核请求的重启失败 rc=$rc")
         }
     }
 
@@ -917,7 +940,7 @@ class CoreService : VpnService() {
      * 期望排队中的 startInternal 拿到锁时看到 Stopping 而放弃。那是无效的:
      * 临界区内没有任何挂起点, 按 JMM 的 monitor happens-before, 阻塞在同一把锁上的
      * 线程重新获得锁时观测到的必然已经是 Stopped —— Stopping 对外永不可见,
-     * 守卫形同虚设, failoverRestartJob 排队的重启照样会复活用户刚停掉的 VPN。
+     * 守卫形同虚设, 排队中的重启照样会复活用户刚停掉的 VPN。
      *
      * 现在 Stopping 在一把短锁里提交并立即释放, 拆除在锁外进行。这样排队者能真正
      * 观测到 Stopping 并在守卫处退出。锁外拆除是安全的: 此刻任何 startInternal
@@ -1250,26 +1273,33 @@ class CoreService : VpnService() {
         }
         override fun getRecentRequestsJson(): String =
             native("[]") { MirageNative.getRecentRequestsJson() }
+        // 下沉方案 P3: 这三项原先由外壳看门狗每轮实时读 serviceConfig, 改后用户的
+        // 设置必须显式重推, 否则内核一直用启动时那份快照 —— 表现为「改了检查间隔
+        // 要重连才生效」「关掉自动重连后仍会自己切节点」。
         override fun setAutoReconnect(enabled: Boolean): Boolean {
             serviceConfig.autoReconnect = enabled
+            pushFailoverPolicy()
             return true
         }
         override fun isAutoReconnect(): Boolean = serviceConfig.autoReconnect
         override fun setCheckInterval(interval: Int): Boolean {
             serviceConfig.checkIntervalSec = interval.coerceAtLeast(5)
+            pushFailoverPolicy()
             return true
         }
         override fun getCheckInterval(): Int = serviceConfig.checkIntervalSec
         override fun setFailoverMode(mode: String?): Boolean {
             serviceConfig.failoverMode = mode ?: "best"
+            pushFailoverPolicy()
             return true
         }
         override fun getFailoverMode(): String = serviceConfig.failoverMode
         override fun updateNodes(nodesJson: String?): Boolean {
             if (!nodesJson.isNullOrBlank()) {
                 serviceConfig.nodes = NodeStore.parseNodesJson(nodesJson)
-                // 下沉方案 P1: 同步给内核。内核当前只存不用 (看门狗仍在外壳),
-                // P2 据此自主选路。形状与 parseNodesJson 一致, 无需转换。
+                // 下沉方案 P3: 同步给内核, 内核的看门狗据此选路。形状与
+                // parseNodesJson 一致, 无需转换。UI 进程没装原生库, 只能走这条
+                // AIDL 路径下发, 不能在 VpnRepository 里直接调 setNodeList。
                 if (!NativeLoader.isLoaded()) {
                     LogStore.append("[core] 原生库未装载, 节点全表改由启动前补发 count=${serviceConfig.nodes.size}")
                 } else {
@@ -1310,11 +1340,11 @@ class CoreService : VpnService() {
 
         @JvmStatic
         /**
-         * 内核的故障切换事件 (下沉方案 P1)。
+         * 内核的故障切换事件 (下沉方案 P3: 外壳看门狗已拆除, 这里接管执行)。
          *
-         * P1 只建通道: 外壳的看门狗仍在跑, 这里只落日志, **不执行任何切换或重启**,
-         * 否则会与 startFailoverWatchdog 形成双重决策 (方案 §5 风险 1)。
-         * P3 拆除外壳看门狗后, 这里才接管重启执行。
+         * 由 Rust 的 `failover::emit_event` 经 JavaVM 上行调用, 线程是内核
+         * runtime 的 worker —— 实际工作必须交给实例的 scope, 见
+         * [dispatchFailoverEvent] 里关于 drop runtime 会 panic 的说明。
          */
         fun onFailoverEvent(kind: Int, nodeUri: String) {
             val kindName = when (kind) {
@@ -1324,7 +1354,15 @@ class CoreService : VpnService() {
             }
             // 节点 URI 含密码, 只记前缀 —— core.log 可被用户导出分享。
             val redacted = if (nodeUri.length > 24) nodeUri.take(24) + "..." else nodeUri
-            LogStore.append("[core] 故障切换事件: $kindName node=$redacted (P1 仅记录, 未执行)")
+            val inst = active
+            if (inst == null) {
+                // 服务已销毁而内核任务尚未退出时会落到这里。丢弃是对的:
+                // 没有 CoreService 实例就没有 TUN, 也无从重启。
+                LogStore.append("[core] 故障切换事件: $kindName node=$redacted (无活跃实例, 丢弃)")
+                return
+            }
+            LogStore.append("[core] 故障切换事件: $kindName node=$redacted")
+            inst.dispatchFailoverEvent(kind, nodeUri)
         }
 
         fun protectFd(fd: Int) {
