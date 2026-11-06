@@ -201,6 +201,68 @@ cd native/mirage-core && cargo test --lib && cargo build --release
 复活用户刚停掉的 VPN，「已热切换」在非 Running 下放行会把下标回流落盘到 UI 的
 `selected_index`，表现为用户停掉 VPN 后选中的节点被悄悄换了。
 
+#### 导航换成全手势三页外壳（D 阶段 S1，2026-11-06）
+
+动手改 UI 前必须知道的六件事。方案与裁定依据见
+`UI_REDESIGN_PROPOSAL.md` §13。
+
+1. **页序即视觉顺序，方向按手指方向。** `ShellPage` 的 `ordinal` 直接当页下标：
+   `Nodes=0 ‹ Home=1 › Settings=2`。手指向右滑露出左边那页（节点），
+   向左滑露出右边那页（设置）。把枚举顺序改成 `[设置][首页][节点]` 会让两条
+   滑动手势的语义同时反过来，而**编译照样通过** —— `ShellContractTest`
+   的第一条测试就是钉这个的。
+
+2. **不要自己写动量投射或速度接力。** `AnchoredDraggableState` 的
+   `decayAnimationSpec` 与 `settle(velocity)` 已经是完整实现（foundation 1.7.8，
+   签名已在本地 aar 里逐个核过）；`HorizontalPager` 的 `PagerDefaults.flingBehavior`
+   同理。`ShellMotion.kt` 里**只有**参数换算，没有手势引擎 —— 这是
+   `UI_REDESIGN_PROPOSAL.md` §0.2 与 §12.5 第 5 条的明令，UI-3 已实测过框架能力够用。
+
+3. **弹簧参数走 `ShellMotion.stiffnessForResponse`，不要直接挑 `Spring.Stiffness*` 常量。**
+   Compose 弹簧质量恒为 1，`stiffness = (2π/response)²`。WWDC 的 0.4s（移动）与
+   0.3s（抽屉）对应 246.7 / 438.6，而 `StiffnessMedium` 是 1500、`StiffnessMediumLow`
+   是 400、`StiffnessLow` 是 200，**一个都不在点上**。套常量会让抽屉快一倍或慢一半。
+
+4. **页点与面板把手是无障碍路径，不是装饰。** TalkBack 发现不了滑动手势，
+   所以页点做成真正可点并带 `Role.Tab` + `contentDescription`，面板把手整条可点。
+   删掉它们等于让读屏用户只能停在首页。页点的触控热区刻意是 28dp 而非 48dp：
+   它浮在内容之上，48dp 的透明热区会吃掉底部内容的点击 —— 代价由语义动作补偿。
+
+5. **收起态偏移减的是「把手 56dp + 页点行 48dp」，两个都不能漏。**
+   只减把手的话，收起态的把手正好落在页点那一行上，两者抢同一片 48dp。
+   同理 Pager 的 `contentPadding` 必须是「窥视宽 + 页间隙」：页宽 = 视口宽 −
+   横向 contentPadding，相邻页右缘落在 `contentPadding.start − pageSpacing` 处，
+   只写窥视宽的话相邻页正好贴屏幕边缘，一点都露不出来。
+
+6. **返回键有两层，注册顺序决定优先级。** 外壳的 `PredictiveBackHandler`
+   （非首页 → 回首页，只按系统给的 progress 缩放当前页，**不驱动 pager 滚动**）
+   先注册；首页面板的 `BackHandler`（展开 → 收起）在 Pager 内容里组合，
+   因而后注册、优先级更高（`OnBackPressedDispatcher` 后注册者先得）。
+   漏掉面板那一层的表现是：用户上滑看详情，按返回直接退出应用。
+
+**两件过渡件，都写了何时删：**
+- `RulesHostActivity` —— 承载 `RulesFragment` 的薄宿主。刻意不用 `AndroidView`
+  把它嵌进 Pager 页：Pager 按需组合/销毁页面，Fragment 跟着反复重建，
+  拖拽状态与滚动位置都保不住。规则页 Compose 化（S3）时与 `RulesFragment` 一并删。
+- `SettingsActions` —— 从 `SettingsActivity` 抽出的弹层与摘要构建逻辑，
+  新设置页与旧 `SettingsActivity` 共用，避免备份/还原/版本弹层写两遍。S4 处置。
+
+**首页必须在 `onResume` 调 `checkCurrentState()`。** `VpnRepository` 把
+`bindService` 挂在 Activity 可见性上（见该类 `init` 的注释：最后一个 Activity
+不可见即解绑，否则 `BIND_AUTO_CREATE` 会把 `:core` 永久吊住）。于是每次回前台都有
+一段「已 bind 但状态未同步」的窗口，而从设置页的子界面（Geo / 分应用 / 规则）返回
+必然经过它。漏掉的表现是：在子界面停留期间内核停了，回到首页按钮还显示「断开」。
+真机实测（2026-11-06）确认这一处在改写成 Compose 外壳时漏掉过。
+
+**`Connecting` 态不要禁用主开关。** 建连可能卡在握手上，用户得能再点一下中止；
+被替换的 `HomeFragment` 就是这个取舍。只有 `Syncing`（还在查状态）与 `Stopping`
+（正在拆）该禁。
+
+**DNS / TUN 摘要不是 `StateFlow`。** 它们来自 `TunConfigStore` 与 `DnsRepository`
+的同步读取，弹层改完值不会自己推给 Compose。`MainActivity.settingsRevision`
+是显式的重算触发器，弹层回调里自增。删掉它的表现是：改完 MTU 回到设置页，
+副标题还是旧值。
+
 #### `src/vendor/` 不参与编译（2026-11-03 实证）
 
 `native/vendor-sync.sh` 把上游 22 个模块复制到 `native/mirage-core/src/vendor/`，
@@ -620,6 +682,14 @@ JNI 门禁               protectFd 1 · resolveConnectionOwner 1 · dex 43 = .so
    `onFailoverEvent` 的 `nodeUri.take(24)` 都会漏出 `mirage://` 之后的十几到二十几个字符，
    而那一段正是口令。core.log 是用户可导出分享的文件。应改成只保留 scheme + host:port
    （内核侧的 `redact_uri` 已经是这个形状，外壳侧两处尚未对齐）。
+7. **全手势外壳只在一台真机上验过**（D 阶段 S1，2026-11-06）。SO-02K（API 28）全项通过，
+   **Galaxy S24+（API 36）未参与** —— 该机仍在 Qualcomm QDL 模式，§5.2 门禁二未满足。
+   高版本侧有两处没实测：预测式返回的系统动画（API 36 默认开启，S1 只按系统给的
+   progress 缩放当前页，没有真机确认过缩放与系统预览窗口叠在一起的观感），
+   以及**手势导航下 `navigationBars` inset 为 0 时**面板收起位与页点的几何
+   —— SO-02K 的 inset 是 96px，为 0 的那一侧只在代码上成立。
+8. **上滑面板的嵌套滚动契约未验**。S1 的面板里还没有可滚动内容。S2 加入连接信息
+   列表时必须一起验：面板展开后列表滚到顶继续下拉应当收面板，而不是两套滚动打架。
 
 ---
 
