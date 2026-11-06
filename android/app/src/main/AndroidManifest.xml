@@ -40,6 +40,11 @@
             </intent-filter>
         </activity>
 
+        <!-- 分流规则页宿主 (过渡件: 规则页 Compose 化后与 RulesFragment 一并删除) -->
+        <activity
+            android:name=".ui.RulesHostActivity"
+            android:exported="false" />
+
         <!-- Geo 规则集资产中心 -->
         <activity
             android:name=".ui.GeoAssetActivity"
