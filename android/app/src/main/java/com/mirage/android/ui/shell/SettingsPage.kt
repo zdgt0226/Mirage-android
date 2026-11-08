@@ -15,15 +15,18 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,6 +39,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import com.mirage.android.R
 import com.mirage.android.ui.theme.mirage
 
@@ -115,6 +119,9 @@ fun SettingsPage(
     // 展开态过 rememberSaveable: 翻到别的页再翻回来, 用户展开的分块必须还在。
     // Pager 的 beyondViewportPageCount=1 已经保证本页不被回收, 这里防的是进程重建。
     var expanded by rememberSaveable { mutableStateOf(SettingsBlock.Routing.ordinal) }
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val haptics = rememberShellHaptics()
 
     Column(
         modifier = modifier
@@ -123,6 +130,7 @@ fun SettingsPage(
     ) {
         PageHeader(title = stringResource(R.string.settings_title))
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 72.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -136,7 +144,15 @@ fun SettingsPage(
                     // 手风琴: 同时只开一块。全开会让这一页退化成一条长列表,
                     // 而「分块」的意义正是一次只看一组。
                     onToggle = {
-                        expanded = if (expanded == block.ordinal) NONE_EXPANDED else block.ordinal
+                        haptics.tap()
+                        val opening = expanded != block.ordinal
+                        expanded = if (opening) block.ordinal else NONE_EXPANDED
+                        if (opening) {
+                            // 展开后把这一块滚到顶。不滚的话点开靠底部的分块,
+                            // 内容整段落在屏幕外 —— 用户按了一下, 看起来什么都没发生,
+                            // 还得自己再滑一次才看见。
+                            scope.launch { listState.animateScrollToItem(i) }
+                        }
                     },
                 )
             }
@@ -213,6 +229,7 @@ private fun SettingsBlockCard(
 @Composable
 private fun SettingsRow(entry: SettingsEntry) {
     val colors = MaterialTheme.mirage
+    val haptics = rememberShellHaptics()
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(
@@ -230,8 +247,13 @@ private fun SettingsRow(entry: SettingsEntry) {
             .clickable(
                 interactionSource = interaction,
                 indication = null,
-                onClick = entry.onClick,
-            )
+            ) {
+                haptics.tap()
+                entry.onClick()
+            }
+            // 44dp 下限: 两行文字的行本来就够高, 但只有标题没有副标题的行
+            // (将来可能出现) 会塌到 40dp 以下。
+            .defaultMinSize(minHeight = 44.dp)
             .padding(horizontal = 16.dp, vertical = 13.dp),
     ) {
         Text(

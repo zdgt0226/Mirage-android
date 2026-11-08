@@ -18,22 +18,34 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -110,6 +122,7 @@ fun NodesPage(
                     if (autoSelect) R.string.nodes_auto_on else R.string.nodes_auto_off,
                 ),
                 modifier = Modifier.weight(1f),
+                toggleLike = true,
             ) { viewModel.toggleAutoSelect() }
             ActionChip(
                 label = stringResource(R.string.nodes_test_method_fmt, testMethod.uppercase()),
@@ -160,6 +173,7 @@ fun NodesPage(
                         onSelect = { viewModel.selectNode(index) },
                         onTest = { viewModel.testNode(index) },
                         onEdit = { showNodeDialog(context, viewModel, index) },
+                        onCopy = { copyUri(context, node) },
                         onDelete = { confirmDelete(context, viewModel, index, node) },
                     )
                 }
@@ -175,9 +189,11 @@ private fun NodeRow(
     onSelect: () -> Unit,
     onTest: () -> Unit,
     onEdit: () -> Unit,
+    onCopy: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val colors = MaterialTheme.mirage
+    val haptics = rememberShellHaptics()
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(
@@ -185,9 +201,8 @@ private fun NodeRow(
         animationSpec = motionAware(ShellMotion.press()),
         label = "nodeRowScale",
     )
-    val context = LocalContext.current
 
-    Column(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
             .graphicsLayer {
@@ -201,45 +216,137 @@ private fun NodeRow(
                 color = if (selected) colors.blue else colors.outline,
                 shape = RoundedCornerShape(14.dp),
             )
-            .clickable(interactionSource = interaction, indication = null, onClick = onSelect)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = node.displayName,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = colors.ink,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    // 只显示 host:port。URI 里 `@` 之前那一段是口令,
-                    // 整条打出来等于把口令画在屏幕上。
-                    text = "${node.server}:${node.port}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = colors.inkSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+            .clickable(interactionSource = interaction, indication = null) {
+                haptics.toggle()
+                onSelect()
             }
-            LatencyBadge(node = node)
+            .padding(start = 14.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        SelectedMark(selected = selected)
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = node.displayName,
+                style = MaterialTheme.typography.titleMedium,
+                color = colors.ink,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                // 只显示 host:port。URI 里 `@` 之前那一段是口令,
+                // 整条打出来等于把口令画在屏幕上。
+                text = "${node.server}:${node.port}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.inkSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            RowAction(stringResource(R.string.node_menu_test), onClick = onTest)
-            RowAction(stringResource(R.string.action_edit), onClick = onEdit)
-            RowAction(stringResource(R.string.node_menu_copy)) { copyUri(context, node) }
-            RowAction(stringResource(R.string.delete), danger = true, onClick = onDelete)
+        LatencyBadge(node = node, onTest = onTest)
+        NodeOverflow(
+            onTest = onTest,
+            onCopy = onCopy,
+            onEdit = onEdit,
+            onDelete = onDelete,
+        )
+    }
+}
+
+/** 选中标记。取代被替换的 `item_node.xml` 里的 `radioSelected`。 */
+@Composable
+private fun SelectedMark(selected: Boolean) {
+    val colors = MaterialTheme.mirage
+    Box(
+        Modifier
+            .size(14.dp)
+            .clip(CircleShape)
+            .background(if (selected) colors.blue else Color.Transparent)
+            .border(
+                width = if (selected) 0.dp else 1.5.dp,
+                color = if (selected) colors.blue else colors.outline,
+                shape = CircleShape,
+            ),
+    )
+}
+
+/**
+ * 节点行的溢出菜单。
+ *
+ * 四个动作（测试延迟 / 复制链接 / 编辑 / 删除）收进 `⋮`，逐项对齐被替换的
+ * `NodeAdapter.showPopupMenu`。**不要把它们摊成并排的文字按钮**：那样「删除」
+ * 会紧挨「复制链接」，两者都只有 30dp 上下的热区，误触代价是不可逆的删节点；
+ * 而每行四个蓝字也让列表读不出层级。删除项单独标红并与其余拉开一条分隔。
+ */
+@Composable
+private fun NodeOverflow(
+    onTest: () -> Unit,
+    onCopy: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val colors = MaterialTheme.mirage
+    val haptics = rememberShellHaptics()
+    var open by remember { mutableStateOf(false) }
+    val moreDesc = stringResource(R.string.node_menu_more)
+
+    Box {
+        Text(
+            text = "⋮",
+            style = MaterialTheme.typography.headlineSmall,
+            color = colors.inkSecondary,
+            modifier = Modifier
+                .clip(CircleShape)
+                .clickable {
+                    haptics.tap()
+                    open = true
+                }
+                // 48dp 方形热区: 这一次给足规范值 —— 它不叠在任何内容之上。
+                .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                .padding(horizontal = 18.dp, vertical = 10.dp)
+                .semantics { contentDescription = moreDesc },
+        )
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            MenuAction(R.string.node_menu_test) { open = false; onTest() }
+            MenuAction(R.string.node_menu_copy) { open = false; onCopy() }
+            MenuAction(R.string.node_edit_title) { open = false; onEdit() }
+            HorizontalDivider()
+            MenuAction(R.string.node_delete_title, danger = true) { open = false; onDelete() }
         }
     }
 }
 
 @Composable
-private fun LatencyBadge(node: Node) {
+private fun MenuAction(titleRes: Int, danger: Boolean = false, onClick: () -> Unit) {
     val colors = MaterialTheme.mirage
-    val (text, tint) = when {
+    val haptics = rememberShellHaptics()
+    DropdownMenuItem(
+        text = {
+            Text(
+                text = stringResource(titleRes),
+                color = if (danger) colors.error else colors.ink,
+            )
+        },
+        onClick = {
+            // 破坏性动作用 reject 而非 tap: 触感本身就该提示"这一下不一样"。
+            // 真正的拦截仍在后面的确认对话框。
+            if (danger) haptics.reject() else haptics.tap()
+            onClick()
+        },
+    )
+}
+
+/**
+ * 节点延迟的文案与配色。
+ *
+ * 抽成一处是因为它有**两个**展示点：节点页的每一行，以及首页节点下拉里的每一项。
+ * 阈值分头写会让同一个 120ms 在两个界面显示成不同颜色。
+ */
+@Composable
+internal fun nodeLatencyDisplay(node: Node): Pair<String, Color> {
+    val colors = MaterialTheme.mirage
+    return when {
         node.isTesting -> stringResource(R.string.node_testing) to colors.inkSecondary
         node.testError != null -> stringResource(R.string.node_unreachable) to colors.error
         node.latencyMs == null -> stringResource(R.string.node_untested) to colors.inkSecondary
@@ -247,25 +354,33 @@ private fun LatencyBadge(node: Node) {
         node.latencyMs <= RTT_FAIR_MS -> "${node.latencyMs}ms" to colors.ginger
         else -> "${node.latencyMs}ms" to colors.error
     }
+}
+
+/**
+ * 延迟徽章。**整块可点, 点一下就测这一个节点。**
+ *
+ * 这是被替换的 `NodeAdapter:95` 的交互: 徽章本身就是测速按钮。
+ * 显示值的地方同时是刷新这个值的地方 —— 不必先去溢出菜单找「测试延迟」。
+ */
+@Composable
+private fun LatencyBadge(node: Node, onTest: () -> Unit) {
+    val haptics = rememberShellHaptics()
+    val (text, tint) = nodeLatencyDisplay(node)
     Text(
         text = text,
         style = MaterialTheme.typography.labelLarge,
         color = tint,
         maxLines = 1,
-    )
-}
-
-@Composable
-private fun RowAction(label: String, danger: Boolean = false, onClick: () -> Unit) {
-    val colors = MaterialTheme.mirage
-    Text(
-        text = label,
-        style = MaterialTheme.typography.labelLarge,
-        color = if (danger) colors.error else colors.blue,
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 6.dp),
+            .clickable(enabled = !node.isTesting) {
+                haptics.tap()
+                onTest()
+            }
+            // 热区撑到 44dp 高: 徽章文字本身只有 18dp 左右, 不撑的话这是个
+            // 几乎点不中的按钮。
+            .defaultMinSize(minHeight = 44.dp)
+            .padding(horizontal = 10.dp, vertical = 12.dp),
     )
 }
 
@@ -279,14 +394,23 @@ internal fun PageHeader(title: String) {
     )
 }
 
+/**
+ * 操作 chip。
+ *
+ * @param toggleLike 这个 chip 代表一个开关态（如「自动优选」）而不是一次动作。
+ *   触感走 `toggle` 而非 `tap` —— 两者在 API 28 上是不同的常量，用户摸得出
+ *   「我切了个状态」和「我按了个按钮」的区别。
+ */
 @Composable
 internal fun ActionChip(
     label: String,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    toggleLike: Boolean = false,
     onClick: () -> Unit,
 ) {
     val colors = MaterialTheme.mirage
+    val haptics = rememberShellHaptics()
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(
@@ -308,8 +432,10 @@ internal fun ActionChip(
                 interactionSource = interaction,
                 indication = null,
                 enabled = enabled,
-                onClick = onClick,
-            )
+            ) {
+                if (toggleLike) haptics.toggle() else haptics.tap()
+                onClick()
+            }
             .padding(horizontal = 12.dp, vertical = 11.dp),
         contentAlignment = Alignment.Center,
     ) {

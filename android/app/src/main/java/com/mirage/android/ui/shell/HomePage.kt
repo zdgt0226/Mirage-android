@@ -1,8 +1,14 @@
 package com.mirage.android.ui.shell
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -16,6 +22,7 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -37,6 +44,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -46,6 +54,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -114,6 +126,7 @@ fun HomePage(
 ) {
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
+    val haptics = rememberShellHaptics()
     // 导航栏 inset: 面板收起位与静息层的底部留白都要把它算进去 (见 DOTS_RESERVE)。
     val navBottomPx = WindowInsets.navigationBars.getBottom(density)
     val snapSpec = motionAware(ShellMotion.drawer<Float>())
@@ -139,6 +152,36 @@ fun HomePage(
     /** 上一次算 anchors 时用的导航栏 inset, 用于判断是否需要重算。 */
     var anchoredNavBottomPx by remember { mutableStateOf(-1) }
 
+    // 连接结果给一次确认/拒绝震动。
+    //
+    // 按在开关上那一下只是"收到了", 不代表连上 —— 建连是异步的, 真正值得反馈的
+    // 是落到 Connected 或 Error 的那一刻。只在状态**类型**变化时响: 直接用
+    // VpnState 当 key 会因 Connected(node) 里的节点对象变化而重复触发。
+    // 跳过首次组合: 冷启动时 VPN 可能本来就连着, 那不是一次"连上了"。
+    var lastStateKey by remember { mutableStateOf<Any?>(null) }
+    val stateKey: Any = state::class
+    LaunchedEffect(stateKey) {
+        val first = lastStateKey == null
+        lastStateKey = stateKey
+        if (first) return@LaunchedEffect
+        when (state) {
+            is VpnState.Connected -> haptics.confirm()
+            is VpnState.Error -> haptics.reject()
+            else -> Unit
+        }
+    }
+
+    // 面板吸附到档位时一次滴答。用 settledValue 而非 currentValue:
+    // 后者在拖过阈值时就变, 来回拖一次会连响两下而面板并没有换档。
+    var panelSettleSeen by remember { mutableStateOf(false) }
+    LaunchedEffect(panelState.settledValue) {
+        if (!panelSettleSeen) {
+            panelSettleSeen = true
+            return@LaunchedEffect
+        }
+        haptics.segmentTick()
+    }
+
     // 面板展开时返回键先收面板。不挂这个回调的表现是: 用户上滑看详情,
     // 按返回直接退出应用 —— 面板是覆盖层, 返回理应先撤掉覆盖层。
     // 注册在外壳的回首页回调之后, 因此优先级更高 (OnBackPressedDispatcher 后注册者先得)。
@@ -154,6 +197,15 @@ fun HomePage(
                 .fillMaxSize()
                 .statusBarsPadding()
                 .navigationBarsPadding()
+                // 整页都是面板的拖拽源, 不只是那条 56dp 的把手。
+                //
+                // 同一个 AnchoredDraggableState 挂两处是支持的 (Material 的
+                // BottomSheetScaffold 对 sheet 与内容就是这么做的), 两处都只是
+                // 往同一个 state 喂手势。方向锁住竖直, 所以横滑仍然归 Pager:
+                // anchoredDraggable 的竖直识别器不认领横向拖动。
+                // 不挂的话用户必须精准摸到屏幕最底下那条才能调出详情, 而用户
+                // 给的交互模型是"向上滑动调出"。
+                .anchoredDraggable(panelState, Orientation.Vertical)
                 .padding(horizontal = 24.dp)
                 .padding(bottom = HANDLE_HEIGHT + DOTS_RESERVE),
             verticalArrangement = Arrangement.Center,
@@ -171,7 +223,10 @@ fun HomePage(
             NodeDropdown(
                 nodes = nodes,
                 selectedNode = selectedNode,
-                onSelectNode = onSelectNode,
+                onSelectNode = { index ->
+                    haptics.toggle()
+                    onSelectNode(index)
+                },
             )
         }
 
@@ -216,6 +271,7 @@ fun HomePage(
             DetailPanelSurface(
                 progress = { panelProgress(panelState) },
                 onHandleClick = {
+                    haptics.tap()
                     scope.launch {
                         val next = if (panelState.targetValue == PanelAnchor.Expanded) {
                             PanelAnchor.Collapsed
@@ -391,10 +447,12 @@ private fun RateCell(
  *
  * 按压反馈起于 pointer-down（`collectIsPressedAsState` 读的是 press 交互，
  * 不是 click），缩放走临界阻尼弹簧 —— 等抬手再反馈会让整个界面「发木」。
+ * 震动同样挂在 press 上，理由一样。
  */
 @Composable
 private fun HeroToggle(state: VpnState, onToggle: () -> Unit) {
     val colors = MaterialTheme.mirage
+    val haptics = rememberShellHaptics()
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(
@@ -402,6 +460,10 @@ private fun HeroToggle(state: VpnState, onToggle: () -> Unit) {
         animationSpec = motionAware(ShellMotion.press()),
         label = "toggleScale",
     )
+    LaunchedEffect(pressed) {
+        if (pressed) haptics.toggle()
+    }
+
     // Connecting 刻意**不禁用**: 建连可能卡在握手上, 用户得能再点一下中止 ——
     // 被替换的 HomeFragment 就是这个取舍 (Connecting 时 connectBtn.isEnabled = true)。
     // 只有 Syncing (还在查状态) 与 Stopping (正在拆) 这两个瞬时态才禁。
@@ -413,6 +475,12 @@ private fun HeroToggle(state: VpnState, onToggle: () -> Unit) {
         else -> colors.disconnected
     }
 
+    // 进行中 = 内核在动而结果未定。此前这三个状态只靠换颜色表达, 而静止的环
+    // 读不出"正在进行", 用户唯一的线索是中间那行文字。
+    val inProgress = state is VpnState.Connecting ||
+        state is VpnState.Stopping ||
+        state is VpnState.Syncing
+
     Box(
         modifier = Modifier
             .size(168.dp)
@@ -422,7 +490,6 @@ private fun HeroToggle(state: VpnState, onToggle: () -> Unit) {
             }
             .clip(CircleShape)
             .background(colors.card)
-            .border(width = 6.dp, color = fill, shape = CircleShape)
             .clickable(
                 interactionSource = interaction,
                 indication = null,
@@ -431,6 +498,13 @@ private fun HeroToggle(state: VpnState, onToggle: () -> Unit) {
             ),
         contentAlignment = Alignment.Center,
     ) {
+        // 减弱动效时退回静态环: 无限循环动画正是 prefers-reduced-motion 要压的
+        // 那一类 (持续运动、无终点)。状态本身仍由颜色与文字表达, 信息不丢。
+        if (inProgress && !rememberReducedMotion()) {
+            SweepRing(arc = fill, track = colors.outline)
+        } else {
+            StaticRing(color = fill)
+        }
         Text(
             text = stringResource(toggleLabel(state)),
             style = MaterialTheme.typography.headlineMedium,
@@ -440,7 +514,82 @@ private fun HeroToggle(state: VpnState, onToggle: () -> Unit) {
     }
 }
 
-/** 节点下拉。从触发行原位展开 —— `DropdownMenu` 自带锚定，不要换成全屏弹层。 */
+/** 开关外圈：静止态的整圈描边。 */
+@Composable
+private fun BoxScope.StaticRing(color: Color) {
+    Canvas(Modifier.matchParentSize()) {
+        val stroke = RING_STROKE_DP.dp.toPx()
+        drawCircle(
+            color = color,
+            radius = (size.minDimension - stroke) / 2f,
+            style = Stroke(width = stroke),
+        )
+    }
+}
+
+/**
+ * 开关外圈：进行中的扫动弧。
+ *
+ * 一圈 1100ms、线性缓动、弧长 100°。线性是刻意的：这是进度指示而非位移，
+ * 加减速会被读成"快要好了"又"卡住了"。弧长取 100° 是为了在 168dp 的圈上
+ * 任何角度都能看见一段，而不至于长到看不出在转。
+ */
+@Composable
+private fun BoxScope.SweepRing(
+    arc: Color,
+    track: Color,
+) {
+    val transition = rememberInfiniteTransition(label = "toggleSweep")
+    val angle by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1100, easing = LinearEasing),
+        ),
+        label = "sweepAngle",
+    )
+    Canvas(Modifier.matchParentSize()) {
+        val stroke = RING_STROKE_DP.dp.toPx()
+        val inset = stroke / 2f
+        val box = Size(size.width - stroke, size.height - stroke)
+        drawArc(
+            color = track,
+            startAngle = 0f,
+            sweepAngle = 360f,
+            useCenter = false,
+            topLeft = Offset(inset, inset),
+            size = box,
+            style = Stroke(width = stroke),
+        )
+        drawArc(
+            color = arc,
+            // -90 让起点落在 12 点方向, 与"从上往下读"的直觉一致。
+            startAngle = angle - 90f,
+            sweepAngle = SWEEP_DEGREES,
+            useCenter = false,
+            topLeft = Offset(inset, inset),
+            size = box,
+            style = Stroke(width = stroke, cap = StrokeCap.Round),
+        )
+    }
+}
+
+/** 开关外圈描边宽度。Canvas 与两个环共用, 不要各写一份。 */
+private const val RING_STROKE_DP = 6
+
+/** 扫动弧的弧长（度）。 */
+private const val SWEEP_DEGREES = 100f
+
+/**
+ * 节点下拉。
+ *
+ * 从触发行原位展开 —— `DropdownMenu` 自带锚定，不要换成全屏弹层。
+ *
+ * 每项带**延迟**与**当前选中标记**。只列名字是不够的：首页的下拉是用户换节点的
+ * 主路径，而决定换哪一个的信息就是延迟，数据本来就在 `Node.latencyMs` 里。
+ * 少了选中标记则在只有两三个同名前缀节点时读不出自己正连着哪一个。
+ * 阈值配色与节点页共用 [nodeLatencyDisplay]，避免同一个 120ms 两处显示成不同颜色。
+ */
 @Composable
 private fun NodeDropdown(
     nodes: List<Node>,
@@ -478,12 +627,41 @@ private fun NodeDropdown(
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             nodes.forEachIndexed { index, node ->
+                val isCurrent = node.uri == selectedNode?.uri
+                val (rtt, rttTint) = nodeLatencyDisplay(node)
                 DropdownMenuItem(
                     text = {
-                        Text(
-                            text = node.displayName,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.width(240.dp),
+                        ) {
+                            Text(
+                                text = node.displayName,
+                                color = if (isCurrent) colors.blue else colors.ink,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                text = rtt,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = rttTint,
+                                maxLines = 1,
+                            )
+                        }
+                    },
+                    leadingIcon = {
+                        Box(
+                            Modifier
+                                .size(10.dp)
+                                .clip(CircleShape)
+                                .background(if (isCurrent) colors.blue else Color.Transparent)
+                                .border(
+                                    width = if (isCurrent) 0.dp else 1.5.dp,
+                                    color = if (isCurrent) colors.blue else colors.outline,
+                                    shape = CircleShape,
+                                ),
                         )
                     },
                     onClick = {

@@ -1511,3 +1511,84 @@ lib/arm64-v8a/libmirage_jni.so:             compress_type=0, offset=1523712, rem
   `navigationBars` inset 为 0 的几何）**没有实测**，合并前需补。
 - 面板内容尚无可滚动内容，**嵌套滚动契约未验**。S2 加入连接列表时必须一起验：
   面板展开后列表滚到顶继续下拉应当收面板，而不是两套滚动打架。
+
+### 13.8 S1b — 交互打磨（2026-11-09）
+
+S1 立住了骨架，这一段补的是「手感」。六项里有四项是**相对旧 UI 的回归**，
+不是新想法 —— 骨架重写时掉的东西。
+
+| 项 | 为什么改 |
+| :--- | :--- |
+| 触觉反馈全面接回 | 旧 UI 31 处 `Haptic.*`，`ui/shell/` 五个文件**全是 0** |
+| 首页任意位置上滑都能调出面板 | 此前 `anchoredDraggable` 只挂在面板上，收起态屏上只有 56dp 把手。用户给的模型是「向上滑动调出」 |
+| 节点行回到 `⋮` 溢出菜单 | 旧 `NodeAdapter:109` 就是 `⋮` + `PopupMenu`。S1 摊成四个并排文字按钮，热区不足且「删除」紧挨「复制链接」 |
+| 延迟徽章可点即测速 | 旧 `NodeAdapter:95` 的交互。显示值的地方就是刷新它的地方 |
+| 节点下拉显示延迟与选中标记 | 下拉是换节点的主路径，而决定换哪个的信息就是延迟，数据本来就在 `Node.latencyMs` |
+| `Connecting` 扫动环 | 此前三个进行中状态只靠换颜色表达，静止的环读不出「正在进行」 |
+| 设置分块展开后滚到可见 | 点开靠底部的分块，内容整段落在屏幕外 |
+
+#### 触觉在 Compose 侧怎么接
+
+走 `ShellHaptics`（`rememberShellHaptics()`）包装既有的 `util/Haptic`，
+**不用** Compose 的 `LocalHapticFeedback` —— 后者只暴露 `LongPress` 与
+`TextHandleMove` 两档，而 `Haptic` 有六档且各自带 API 30 / API 34 的回退
+（下限机是 API 28）。换过去等于把六种语义压成一种。
+
+两个容易写错的地方：
+
+1. **用 `settledPage` / `settledValue`，不要用 `currentPage` / `currentValue`。**
+   后者在拖过阈值的瞬间就变，一次来回拖动会连响两下，而用户并没有换页或换档。
+2. **跳过首次组合。** 冷启动时 VPN 可能本来就连着，那不是一次「连上了」；
+   面板的初始档位也不是一次「吸附」。不跳的话每次启动都白震一下。
+
+连接结果的震动挂在**状态类型**变化上（`state::class`），不是 `VpnState` 本身 ——
+`Connected(node)` 里的节点对象变化会让后者重复触发。
+
+#### 首页整页都是面板的拖拽源
+
+同一个 `AnchoredDraggableState` 挂两处（面板 + 静息层），这是支持的 ——
+Material 的 `BottomSheetScaffold` 对 sheet 与内容就是这么做的，两处都只是往同一个
+state 喂手势。方向锁死竖直，所以横滑仍归 Pager。
+
+**实测确认两者不打架**（SO-02K）：在同一片区域（y=600，距把手 400px）
+竖直上滑 → 面板展开；横滑 → 翻页，且面板保持收起。
+
+#### 撞上的一个配色缺陷：`surfaceContainer` 系列没覆盖
+
+节点下拉做出来之后，菜单底色是**淡紫**，与全应用的 Telegram 蓝完全脱节。
+
+根因：**Material3 1.3 起，菜单 / 弹层 / Card 取的是 `surfaceContainer*` 而不是
+`surface`。** `MirageTheme` 只定义了 `surface`，这几个角色没覆盖，M3 就回落到它
+自己那套基线紫调色板。这与 §11.2 C 阶段记过的「管理内核按钮显示 M3 默认紫」
+是同一个根因 —— 当时只修了按钮没修容器。
+
+已在 `MirageTheme` 的明暗两套 scheme 里补全
+`surfaceContainerLowest/Low/surfaceContainer/High/Highest`、
+`surfaceBright/surfaceDim`、`inverseSurface/inverseOnSurface`、`scrim`，
+并把 `surfaceTint` 设为透明 —— M3 会按 elevation 把 primary 叠到容器上，
+叠出来的仍然偏紫；层级由 `surfaceContainer` 系列自身的明度差表达。
+
+#### 实测（SO-02K，2026-11-09）
+
+| 项 | 结果 |
+| :--- | :--- |
+| 中部上滑（y=600，距把手 400px） | 面板展开 |
+| 同一区域横滑 | 翻页正常，面板保持收起 —— 方向锁定生效 |
+| 节点行 | 四个并排文字按钮已消失；延迟徽章热区 62×48dp，`⋮` 48×48dp |
+| 延迟徽章点击 | 触发单节点测速，`未测速 → 25ms` |
+| `⋮` 菜单 | 测试延迟 / 复制链接 / 编辑节点 / 删除节点，删除项单独标红并隔一条分隔线 |
+| 节点下拉 | 每项显示延迟；当前节点实心蓝点 + 蓝字，其余空心圈 |
+| 菜单底色 | 补全 `surfaceContainer*` 后由淡紫变为卡片白 |
+| 触觉 | `dumpsys vibrator` 历史出现 `opPkg: com.mirage.android` 条目（`usageHint: 13` 触摸用途） |
+| 连接 | `tun0` up，扫动环期间无异常，0 FATAL |
+
+**两条诚实说明：**
+
+1. **这台设备的系统「触摸振动」原本是关的**（`haptic_feedback_enabled=0`）。
+   `View.performHapticFeedback` 尊重该开关，而我们**不加**
+   `FLAG_IGNORE_GLOBAL_SETTING` 去覆盖用户的系统设置。为取证临时置 1，验完已还原为 0。
+   另外在 API 28 上六档语义大多映射到同一个 `Prebaked{mEffectId=0}`，
+   分档的收益要到 API 30（`CONFIRM`/`REJECT`）与 API 34（`SEGMENT_TICK`）才体现。
+2. **设置页的「展开后滚到可见」没能在本机构造出可区分的场景。** 当前只有 5 个
+   分块，一块收起另一块展开后整页正好放得下，`animateScrollToItem` 退化为 no-op。
+   代码路径正确且无害，但**不声称实测生效**。

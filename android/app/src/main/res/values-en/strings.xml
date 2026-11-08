@@ -458,4 +458,5 @@
     <string name="home_panel_handle">Swipe up for details</string>
     <string name="home_panel_collapse">Collapse details</string>
     <string name="home_latency_none">Tunnel RTT: --</string>
+    <string name="node_menu_more">More actions</string>
 </resources>

@@ -21,7 +21,11 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -89,6 +93,20 @@ fun MirageShell(
 ) {
     val pagerState = rememberPagerState(initialPage = ShellPage.Home.ordinal) { ShellPage.COUNT }
     val scope = rememberCoroutineScope()
+    val haptics = rememberShellHaptics()
+
+    // 翻页落定给一次分段滴答。
+    //
+    // 用 settledPage 而不是 currentPage: currentPage 在拖过半程时就会改, 于是
+    // 一次来回拖动会连响两下, 而用户并没有换页。settledPage 只在吸附结束后变。
+    // 跳过首次组合 —— 冷启动落在首页不是一次"换页"。
+    var lastSettled by remember { mutableIntStateOf(pagerState.settledPage) }
+    LaunchedEffect(pagerState.settledPage) {
+        if (pagerState.settledPage != lastSettled) {
+            lastSettled = pagerState.settledPage
+            haptics.segmentTick()
+        }
+    }
 
     // 预测式返回的配合形变。§0.2「拒绝 1」的正确做法是把返回交给系统管线驱动，
     // 应用层只提供缩放 —— 所以这里**不去动 pager 的滚动**，只随系统给的 progress
@@ -141,7 +159,10 @@ fun MirageShell(
 
         PageDots(
             pagerState = pagerState,
-            onSelect = { page -> scope.launch { pagerState.animateScrollToPage(page.ordinal) } },
+            onSelect = { page ->
+                haptics.tap()
+                scope.launch { pagerState.animateScrollToPage(page.ordinal) }
+            },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()

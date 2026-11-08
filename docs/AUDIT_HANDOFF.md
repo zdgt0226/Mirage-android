@@ -247,6 +247,23 @@ cd native/mirage-core && cargo test --lib && cargo build --release
 - `SettingsActions` —— 从 `SettingsActivity` 抽出的弹层与摘要构建逻辑，
   新设置页与旧 `SettingsActivity` 共用，避免备份/还原/版本弹层写两遍。S4 处置。
 
+**`MirageTheme` 必须覆盖 `surfaceContainer*` 系列。** Material3 1.3 起，菜单
+（`DropdownMenu`）、弹层、`Card` 取的是 `surfaceContainer*` 而**不是** `surface`。
+只定义 `surface` 的话这些容器会回落到 M3 自己的基线紫调色板 —— 2026-11-09 实测
+（SO-02K）首页节点下拉的底色就是淡紫。这与 C 阶段记过的「管理内核按钮显示 M3
+默认紫」同根，当时只修了按钮没修容器。`surfaceTint` 一并设为透明：M3 会按
+elevation 把 primary 叠到容器上，叠出来仍然偏紫，层级交给 `surfaceContainer`
+系列自身的明度差。**新增任何 M3 容器组件前先确认它取的是哪个角色。**
+
+**Compose 侧的触觉走 `ui.shell.ShellHaptics`，不要用 `LocalHapticFeedback`。**
+后者只有 `LongPress` 与 `TextHandleMove` 两档，而 `util/Haptic` 有六档且各自带
+API 30 / API 34 的回退（下限机是 API 28）。两个必踩的坑：(1) 用 `settledPage` /
+`settledValue` 而不是 `currentPage` / `currentValue`，后者在拖过阈值时就变，
+来回拖一次会连响两下；(2) 跳过首次组合，否则每次冷启动白震一下。
+另外 `performHapticFeedback` 尊重系统「触摸振动」开关，**不要**加
+`FLAG_IGNORE_GLOBAL_SETTING` 去覆盖用户设置 —— 测试机上该开关默认可能是关的，
+取证时临时置 1 并记得还原。
+
 **首页必须在 `onResume` 调 `checkCurrentState()`。** `VpnRepository` 把
 `bindService` 挂在 Activity 可见性上（见该类 `init` 的注释：最后一个 Activity
 不可见即解绑，否则 `BIND_AUTO_CREATE` 会把 `:core` 永久吊住）。于是每次回前台都有
