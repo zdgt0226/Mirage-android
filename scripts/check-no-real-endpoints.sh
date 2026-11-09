@@ -6,8 +6,8 @@
 #
 # 检查项：
 # a. mirage://…@HOST 节点 URI（必须为 RFC 5737/3849 文档占位或保留域名）
-# b. 环境变量或默认值回退为公网 IPv4 或长十六进制口令串 (>=24位)
-# c. 源码与文档中出现的公网 IPv4 字面量（非保留/文档段且未列入 allowlist）
+# b. 环境变量或默认值回退为公网 IPv4/IPv6 或长十六进制口令串 (>=24位)
+# c. 源码与文档中出现的公网 IPv4/IPv6 字面量（非保留/文档段且未列入 allowlist）
 #
 # 排除项说明：
 # - *.lock (依赖锁文件)
@@ -45,6 +45,8 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     line="$(echo "$line" | tr -d '[:space:]')"
     [[ -z "$line" ]] && continue
     ALLOWED_MAP["$line"]=1
+    lower="$(echo "$line" | tr '[:upper:]' '[:lower:]')"
+    ALLOWED_MAP["$lower"]=1
 done < "$ALLOWLIST_FILE"
 
 is_public_ipv4() {
@@ -82,6 +84,159 @@ is_public_ipv4() {
     (( a >= 224 && a <= 239 )) && return 1
     # 240.0.0.0/4 (Reserved / Bogon / Broadcast 255.255.255.255)
     (( a >= 240 )) && return 1
+
+    return 0
+}
+
+is_public_ipv6() {
+    local raw="$1"
+    local ip="$raw"
+    # 剥离方括号及可选端口: [2001:db8::1]:443 或 [2001:db8::1] -> 2001:db8::1
+    if [[ "$ip" =~ ^\[([0-9a-fA-F:]+)\](:[0-9]+)?$ ]]; then
+        ip="${BASH_REMATCH[1]}"
+    fi
+    # 剥离 CIDR 前缀长度 /32, /128 等
+    ip="${ip%%/*}"
+    ip="$(echo "$ip" | tr '[:upper:]' '[:lower:]')"
+
+    # 白名单直接放行 (检查原始串与去括号转小写后的串)
+    [[ -n "${ALLOWED_MAP[$raw]:-}" || -n "${ALLOWED_MAP[$ip]:-}" ]] && return 1
+
+    # 禁止连续 3 个及以上冒号 (非法语法)
+    [[ "$ip" == *":::"* ]] && return 1
+
+    # :: 与 ::1
+    if [[ "$ip" == "::" || "$ip" == "::1" ]]; then
+        return 1
+    fi
+
+    # 检查是否包含双冒号 ::
+    local left right
+    local -a left_words=() right_words=()
+    local has_double_colon=0
+    local v4_embedded=""
+
+    if [[ "$ip" == *"::"* ]]; then
+        has_double_colon=1
+        left="${ip%%::*}"
+        right="${ip#*::}"
+        # 只能有一个 ::
+        [[ "$right" == *"::"* ]] && return 1
+    else
+        left="$ip"
+        right=""
+    fi
+
+    # 检查末尾是否内嵌 IPv4 (如 ::ffff:192.0.2.1 或 0:0:0:0:0:ffff:192.0.2.1)
+    if [[ "$right" =~ (.*:)?([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})$ ]]; then
+        v4_embedded="${BASH_REMATCH[2]}"
+        local prefix="${BASH_REMATCH[1]}"
+        right="${prefix%:}"
+    elif [[ $has_double_colon -eq 0 && "$left" =~ (.*:)?([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})$ ]]; then
+        v4_embedded="${BASH_REMATCH[2]}"
+        local prefix="${BASH_REMATCH[1]}"
+        left="${prefix%:}"
+    fi
+
+    if [[ -n "$left" ]]; then
+        IFS=: read -r -a left_words <<< "$left"
+    fi
+    if [[ -n "$right" ]]; then
+        IFS=: read -r -a right_words <<< "$right"
+    fi
+
+    local total_words=$(( ${#left_words[@]} + ${#right_words[@]} ))
+    local expected_words=8
+    if [[ -n "$v4_embedded" ]]; then
+        expected_words=6
+    fi
+
+    if [[ $has_double_colon -eq 1 ]]; then
+        (( total_words <= expected_words - 1 )) || return 1
+    else
+        (( total_words == expected_words )) || return 1
+    fi
+
+    # 至少有一段十六进制长度 >= 2 位 (防止纯单字母噪声如 a:b:c)
+    local has_2plus_hex=0
+    for w in "${left_words[@]}" "${right_words[@]}"; do
+        [[ -z "$w" ]] && continue
+        [[ "$w" =~ ^[0-9a-fA-F]{1,4}$ ]] || return 1
+        (( ${#w} >= 2 )) && has_2plus_hex=1
+    done
+    if [[ -n "$v4_embedded" ]]; then
+        has_2plus_hex=1
+    fi
+    (( has_2plus_hex == 1 )) || return 1
+
+    local -a words=(0 0 0 0 0 0 0 0)
+    local idx=0
+    for w in "${left_words[@]}"; do
+        [[ -z "$w" ]] && continue
+        words[idx]=$(( 16#$w ))
+        (( idx++ ))
+    done
+
+    if [[ $has_double_colon -eq 1 ]]; then
+        local missing=$(( expected_words - total_words ))
+        (( idx += missing ))
+    fi
+
+    for w in "${right_words[@]}"; do
+        [[ -z "$w" ]] && continue
+        words[idx]=$(( 16#$w ))
+        (( idx++ ))
+    done
+
+    if [[ -n "$v4_embedded" ]]; then
+        local a b c d
+        IFS=. read -r a b c d <<< "$v4_embedded"
+        [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ && "$c" =~ ^[0-9]+$ && "$d" =~ ^[0-9]+$ ]] || return 1
+        (( a <= 255 && b <= 255 && c <= 255 && d <= 255 )) || return 1
+        words[6]=$(( (a << 8) | b ))
+        words[7]=$(( (c << 8) | d ))
+    fi
+
+    local w0=${words[0]} w1=${words[1]} w2=${words[2]} w3=${words[3]}
+    local w4=${words[4]} w5=${words[5]} w6=${words[6]} w7=${words[7]}
+
+    # 1. ::1 (Loopback) 与 :: (Unspecified)
+    if (( w0 == 0 && w1 == 0 && w2 == 0 && w3 == 0 && w4 == 0 && w5 == 0 && w6 == 0 && (w7 == 0 || w7 == 1) )); then
+        return 1
+    fi
+
+    # 2. RFC 3849 documentation prefix 2001:db8::/32
+    if (( w0 == 0x2001 && w1 == 0x0db8 )); then
+        return 1
+    fi
+
+    # 3. fe80::/10 (Link-Local)
+    if (( (w0 & 0xffc0) == 0xfe80 )); then
+        return 1
+    fi
+
+    # 4. fc00::/7 (Unique Local Address ULA: fc00.. - fdff..)
+    if (( (w0 & 0xfe00) == 0xfc00 )); then
+        return 1
+    fi
+
+    # 5. ff00::/8 (Multicast)
+    if (( (w0 & 0xff00) == 0xff00 )); then
+        return 1
+    fi
+
+    # 6. IPv4-mapped (::ffff:0:0/96)
+    if (( w0 == 0 && w1 == 0 && w2 == 0 && w3 == 0 && w4 == 0 && w5 == 0xffff )); then
+        local v4
+        if [[ -n "$v4_embedded" ]]; then
+            v4="$v4_embedded"
+        else
+            v4="$(( w6 >> 8 )).$(( w6 & 0xff )).$(( w7 >> 8 )).$(( w7 & 0xff ))"
+        fi
+        if [[ -n "${ALLOWED_MAP[$v4]:-}" ]] || ! is_public_ipv4 "$v4"; then
+            return 1
+        fi
+    fi
 
     return 0
 }
@@ -172,8 +327,41 @@ if [[ -n "$matches_b_ip" ]]; then
     done <<< "$matches_b_ip"
 fi
 
-# ── 检查 c: 源码与文档中的公网 IPv4 字面量 ──────────────────────────────────
-echo "[*] [Check C] 正在扫描源码与文档中的未授权公网 IPv4 字面量..."
+matches_b_ipv6=$(git grep --untracked -n -I -E '(unwrap_or|\?:|\$\{[^}]*:-).*((\[[0-9a-fA-F:]+\](:[0-9]+)?)|(\b[0-9a-fA-F]{1,4}::([0-9a-fA-F]{1,4}\b|[0-9a-fA-F]{1,4}:|[^a-zA-Z0-9_]|$))|::[0-9a-fA-F]{1,4}\b|\b([0-9a-fA-F]{1,4}:){2,}[0-9a-fA-F:.]*)' -- "${PATH_EXCLUDES[@]}" || true)
+if [[ -n "$matches_b_ipv6" ]]; then
+    regex_v6="(\[[0-9a-fA-F:]+\](:[0-9]+)?|(^|[^a-zA-Z0-9_:])(([0-9a-fA-F]{1,4}:){2,}[0-9a-fA-F:.]*|([0-9a-fA-F]{1,4}:)*::[0-9a-fA-F:.]*)([^a-zA-Z0-9_:]|$))"
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        file="${line%%:*}"
+        rest="${line#*:}"
+        line_no="${rest%%:*}"
+        content="${rest#*:}"
+
+        cur="$content"
+        while [[ "$cur" =~ $regex_v6 ]]; do
+            matched="${BASH_REMATCH[0]}"
+            b1="${BASH_REMATCH[1]}"
+            b4="${BASH_REMATCH[4]}"
+            [[ -z "$matched" ]] && break
+            if [[ "$b1" == "["* ]]; then
+                token="$b1"
+            else
+                token="$b4"
+            fi
+            if is_public_ipv6 "$token"; then
+                token_clean="${token%%/*}"
+                if [[ -z "${ALLOWED_MAP[$token]:-}" && -z "${ALLOWED_MAP[$token_clean]:-}" ]]; then
+                    echo "${file}:${line_no}: [Check B] 命中环境变量回退公网 IPv6 默认值: $token"
+                    FAILED=1
+                fi
+            fi
+            cur="${cur#*"$matched"}"
+        done
+    done <<< "$matches_b_ipv6"
+fi
+
+# ── 检查 c: 源码与文档中的公网 IPv4/IPv6 字面量 ──────────────────────────────
+echo "[*] [Check C] 正在扫描源码与文档中的未授权公网 IPv4/IPv6 字面量..."
 
 matches_c=$(git grep --untracked -n -I -E '([0-9]{1,3}\.){3}[0-9]{1,3}' -- "${PATH_EXCLUDES[@]}" || true)
 if [[ -n "$matches_c" ]]; then
@@ -196,6 +384,39 @@ if [[ -n "$matches_c" ]]; then
             cur="${cur#*"$ip"}"
         done
     done <<< "$matches_c"
+fi
+
+matches_c_ipv6=$(git grep --untracked -n -I -E '\[[0-9a-fA-F:]*:[0-9a-fA-F:]*\](:[0-9]+)?|\b[0-9a-fA-F]{1,4}::([0-9a-fA-F]{1,4}\b|[0-9a-fA-F]{1,4}:|[^a-zA-Z0-9_]|$)|::[0-9a-fA-F]{1,4}\b|\b([0-9a-fA-F]{1,4}:){2,}[0-9a-fA-F:.]*' -- "${PATH_EXCLUDES[@]}" || true)
+if [[ -n "$matches_c_ipv6" ]]; then
+    regex_v6="(\[[0-9a-fA-F:]+\](:[0-9]+)?|(^|[^a-zA-Z0-9_:])(([0-9a-fA-F]{1,4}:){2,}[0-9a-fA-F:.]*|([0-9a-fA-F]{1,4}:)*::[0-9a-fA-F:.]*)([^a-zA-Z0-9_:]|$))"
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        file="${line%%:*}"
+        rest="${line#*:}"
+        line_no="${rest%%:*}"
+        content="${rest#*:}"
+
+        cur="$content"
+        while [[ "$cur" =~ $regex_v6 ]]; do
+            matched="${BASH_REMATCH[0]}"
+            b1="${BASH_REMATCH[1]}"
+            b4="${BASH_REMATCH[4]}"
+            [[ -z "$matched" ]] && break
+            if [[ "$b1" == "["* ]]; then
+                token="$b1"
+            else
+                token="$b4"
+            fi
+            if is_public_ipv6 "$token"; then
+                token_clean="${token%%/*}"
+                if [[ -z "${ALLOWED_MAP[$token]:-}" && -z "${ALLOWED_MAP[$token_clean]:-}" ]]; then
+                    echo "${file}:${line_no}: [Check C] 发现未在白名单中的公网 IPv6 字面量: $token"
+                    FAILED=1
+                fi
+            fi
+            cur="${cur#*"$matched"}"
+        done
+    done <<< "$matches_c_ipv6"
 fi
 
 if [[ $FAILED -eq 0 ]]; then

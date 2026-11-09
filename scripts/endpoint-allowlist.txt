@@ -114,3 +114,47 @@
 202.101.48.33 # 上海电信 GFW 污染假 IP (docs/VERIFICATION.md)
 180.163.151.33 # 上海电信 GFW 污染假 IP (docs/VERIFICATION.md)
 180.163.150.34 # 上海电信 GFW 污染假 IP (docs/VERIFICATION.md)
+
+# ── 公共 DNS IPv6 解析器 (已知合法公共递归服务) ──────────────────────────────
+2001:4860:4860::8888 # Google 公共 DNS IPv6 (direct.rs is_cn_ip / is_private_ip 单元测试用例)
+2606:4700:4700::1111 # Cloudflare 公共 DNS IPv6 (direct.rs / net_util.rs 单元测试用例)
+2400:3200::1 # 阿里 AliDNS IPv6 (direct.rs is_cn_ip / is_private_ip 单元测试用例)
+
+# ── Android VpnService 绕过局域网 (Bypass LAN) IPv6 路由表前缀基址 (CoreService.kt)
+2000:: # Bypass LAN 全球单播公网地址 (2000::/3) 路由表前缀基址 (CoreService.kt)
+
+# ── direct.rs 亚太/国内/海外 IPv6 分流测试桩与 CIDR 网段说明注释 ───────────────
+2408:: # 联通 IPv6 CIDR 网段 (direct.rs 注释)
+2408:8000::1 # 联通 IPv6 单测目标 (direct.rs is_cn_ip 用例)
+2409:: # 移动 IPv6 CIDR 网段 (direct.rs 注释)
+2409:8000::1 # 移动 IPv6 单测目标 (direct.rs is_cn_ip 用例)
+240a:: # CERNET 教育网 IPv6 CIDR 网段 (direct.rs 注释)
+240b:: # CSTNET 科技网 IPv6 CIDR 网段 (direct.rs 注释)
+240c:: # 电信 IPv6 CIDR 网段 (direct.rs 注释)
+240d:: # 电信 IPv6 CIDR 网段 (direct.rs 注释)
+240e:: # 电信 IPv6 CIDR 网段 (direct.rs 注释)
+240e:8000::1 # 电信 IPv6 单测目标 (direct.rs is_cn_ip 用例)
+240f:: # 铁通 IPv6 CIDR 网段 (direct.rs 注释)
+2400:: # APNIC 亚太 IPv6 总保留块 (direct.rs 粗粒度反模式说明注释)
+2400:1f00:: # 日本 IIJ IPv6 CIDR 网段 (direct.rs 注释)
+2400:1f00::1 # 日本 IIJ IPv6 单测目标 (direct.rs !is_cn_ip 用例)
+2400:2e00:: # 韩国 IPv6 CIDR 网段 (direct.rs 注释)
+2400:2e00::1 # 韩国 IPv6 单测目标 (direct.rs !is_cn_ip 用例)
+2400:3200:: # 阿里公共 DNS IPv6 CIDR 网段 (direct.rs 注释)
+2400:7800::1 # 印度 IPv6 单测目标 (direct.rs !is_cn_ip 用例)
+2400:8500:: # 日本 NTT IPv6 CIDR 网段 (direct.rs 注释)
+2400:8500::1 # 日本 NTT IPv6 单测目标 (direct.rs !is_cn_ip 用例)
+2400:cb00::1 # 台湾 IPv6 单测目标 (direct.rs !is_cn_ip 用例)
+2400:da00:: # 百度公共 DNS IPv6 CIDR 网段 (direct.rs 注释)
+2401:1800::1 # 印尼 IPv6 单测目标 (direct.rs !is_cn_ip 用例)
+2402:4e00::1 # 新加坡 IPv6 单测目标 (direct.rs !is_cn_ip 用例)
+2407:4000::1 # 日本 IPv6 单测目标 (direct.rs !is_cn_ip 用例)
+2001:250:: # CSTNET 中国科技网 IPv6 CIDR 网段 (direct.rs 注释)
+2001:250::1 # CSTNET 中国科技网 IPv6 单测目标 (direct.rs is_cn_ip 用例)
+2001:cc0:: # CERNET IPv6 CIDR 网段 (direct.rs 注释)
+2001:da8:: # CERNET2 中国教育网 IPv6 CIDR 网段 (direct.rs 注释)
+2001:da8::1 # CERNET2 中国教育网 IPv6 单测目标 (direct.rs is_cn_ip 用例)
+
+# ── net_util.rs / node_uri.rs IPv6 格式与歧义测试用例与注释 ──────────────────
+2606::1 # net_util.rs / node_uri.rs 裸 IPv6 与端口拼接测试桩
+2606::1:443 # net_util.rs 无括号歧义端口格式说明注释
