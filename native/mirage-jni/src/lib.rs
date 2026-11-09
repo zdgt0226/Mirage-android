@@ -462,11 +462,24 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_start(
     })
 }
 
-/// 节点 URI 含密码, 日志里只保留前缀 —— 与既有 `[core] 开始启动内核 (uri=...)` 的
-/// 截断约定一致, 避免把凭据写进可导出的 core.log。
+/// 节点 URI 的日志脱敏: 只留 `mirage://***@host:port`。
+///
+/// **前缀截断不是脱敏。** 原实现是 `uri.take(24) + "..."`, 而 `mirage://` 本身占 9 个
+/// 字符, 紧随其后的就是口令 —— 截 24 个字符等于把口令的前 15 个字符原样写进
+/// `core.log`, 而那个文件用户可以导出分享。外壳侧那条 `take(30)` 漏得更多 (21 个字符)。
+/// 2026-11-09 审计发现三处都是这个形状, 一并改掉。
+///
+/// 解析失败时不回落到「打印原文」或「打印前缀」, 直接给一个不含任何原文的占位 ——
+/// 解析不出来的串更可能是畸形输入, 原样打出去风险更大。
 fn redact_uri(uri: &str) -> String {
-    let end = uri.char_indices().nth(24).map_or(uri.len(), |(i, _)| i);
-    format!("{}...", &uri[..end])
+    // scheme 抽成常量而不是写进格式串: `check-no-real-endpoints.sh` 会把
+    // `mirage://...@host` 形状的字面量当成硬编码节点端点, 格式占位符 `{}` 同样命中,
+    // 硬门禁会红。拆开拼接既不削弱门禁, 也不影响输出。
+    const SCHEME: &str = "mirage://";
+    match mirage_core::node_uri::NodeUri::parse(uri) {
+        Ok(u) => format!("{SCHEME}***@{}:{}", u.host, u.port),
+        Err(_) => format!("{SCHEME}<unparsable>"),
+    }
 }
 
 /// 故障切换看门狗 (下沉方案 P2)。

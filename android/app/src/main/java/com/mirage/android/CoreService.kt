@@ -12,6 +12,7 @@ import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
@@ -23,6 +24,7 @@ import com.mirage.android.core.ICoreService
 import com.mirage.android.core.LogStore
 import com.mirage.android.core.MirageNative
 import com.mirage.android.core.NativeLoader
+import com.mirage.android.data.model.Node
 import com.mirage.android.core.NodeStore
 import com.mirage.android.core.RuleStore
 import com.mirage.android.core.SettingsStore
@@ -233,6 +235,27 @@ class CoreService : VpnService() {
     private var notifJob: Job? = null
     private var trafficJob: Job? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    /**
+     * 第二个网络回调, 按 `NetworkRequest`(INTERNET + NOT_VPN) 注册。
+     *
+     * **为什么不能只有 `registerDefaultNetworkCallback`**: 它只跟踪「默认网络」这一条的
+     * 生命周期。分应用白名单模式下本应用自己也在 VPN 里 (见 startLocked: allowed 与
+     * disallowed 互斥, 白名单模式下无法再自排除), 隧道起来之后默认网络就是 VPN,
+     * 物理网消失时它的 onLost 根本不会送到这个回调, `currentPhysicalNetwork` 就此冻结。
+     *
+     * 2026-11-09 真机实测 (SO-02K, 连着本地节点时关掉 Wi-Fi):
+     * 系统侧 `dumpsys connectivity` 已是 `Active default network: none`,
+     * 而应用日志里只有 `底层物理网络切换: null -> 409`, **从未出现 `409 -> null`**。
+     * 后果不止故障切换的闸门读到陈旧值: `setUnderlyingNetworks` 也一直指着死网络。
+     *
+     * 两个回调分工: 默认网络回调是「系统偏好哪一条」的权威 (Wi-Fi 与蜂窝同时在线时
+     * 不能擅自绑到蜂窝, 那会产生流量费); 本回调是「物理网还在不在」的权威。
+     */
+    private var physicalNetworkCallback: ConnectivityManager.NetworkCallback? = null
+
+    /** 当前仍存活的物理网络。由 [netLock] 保护, 顺序即到达顺序, 末位是最新的一条。 */
+    private val physicalNetworks = LinkedHashSet<Network>()
     private var screenReceiver: BroadcastReceiver? = null
     private var screenJob: Job? = null
     @Volatile
@@ -327,6 +350,11 @@ class CoreService : VpnService() {
             runCatching { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) }
             networkCallback = null
         }
+        physicalNetworkCallback?.let { cb ->
+            runCatching { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) }
+            physicalNetworkCallback = null
+        }
+        synchronized(netLock) { physicalNetworks.clear() }
         screenReceiver?.let {
             runCatching { unregisterReceiver(it) }
             screenReceiver = null
@@ -699,7 +727,7 @@ class CoreService : VpnService() {
         } else {
             NodeStore.getPoolSize(this)
         }
-        log("[core] 开始启动内核 (uri=${uri.take(30)}..., poolSize=$poolSize, mtu=$mtu)")
+        log("[core] 开始启动内核 (uri=${Node.redact(uri)}, poolSize=$poolSize, mtu=$mtu)")
         val rc = MirageNative.start(rawFd, uri, poolSize, mtu)
         if (rc != 0) {
             log("[core] 内核启动失败 rc=$rc")
@@ -789,7 +817,8 @@ class CoreService : VpnService() {
                 override fun onLost(network: Network) {
                     synchronized(netLock) {
                         if (currentPhysicalNetwork == network) {
-                            switchTo(null)
+                            // 不直接置 null: 可能还有别的物理网在线 (关 Wi-Fi 落到蜂窝)。
+                            switchTo(physicalNetworks.lastOrNull { it != network })
                         }
                     }
                 }
@@ -799,6 +828,64 @@ class CoreService : VpnService() {
                 cm.registerDefaultNetworkCallback(cb)
             }.onFailure {
                 LogStore.append("[core] registerDefaultNetworkCallback 异常: ${it.message}")
+            }
+
+            // 第二个回调: 只管「物理网还在不在」。理由见 physicalNetworkCallback 的注释 ——
+            // 默认网络回调在隧道起来之后可能再也收不到物理网的 onLost。
+            val physCb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    if (!isPhysicalInternet(cm, network, null)) return
+                    synchronized(netLock) {
+                        physicalNetworks.remove(network)
+                        physicalNetworks.add(network)
+                        // 只在当前无网时顶上。有网时不抢 —— 选哪一条是默认网络回调的职责,
+                        // 这里擅自切换会在 Wi-Fi 与蜂窝同时在线时把流量绑到蜂窝上。
+                        if (currentPhysicalNetwork == null) switchTo(network)
+                    }
+                }
+
+                override fun onCapabilitiesChanged(
+                    network: Network,
+                    networkCapabilities: NetworkCapabilities,
+                ) {
+                    val ok = isPhysicalInternet(cm, network, networkCapabilities)
+                    synchronized(netLock) {
+                        if (ok) {
+                            physicalNetworks.remove(network)
+                            physicalNetworks.add(network)
+                            if (currentPhysicalNetwork == null) switchTo(network)
+                        } else {
+                            // 失去上网能力等同于消失 (受限 APN、认证门户未过等)。
+                            physicalNetworks.remove(network)
+                            if (currentPhysicalNetwork == network) {
+                                switchTo(physicalNetworks.lastOrNull())
+                            }
+                        }
+                    }
+                }
+
+                override fun onLost(network: Network) {
+                    synchronized(netLock) {
+                        physicalNetworks.remove(network)
+                        if (currentPhysicalNetwork == network) {
+                            // 退到还活着的那条; 一条都不剩才是真正的全网不可达。
+                            switchTo(physicalNetworks.lastOrNull())
+                        }
+                    }
+                }
+            }
+            physicalNetworkCallback = physCb
+            runCatching {
+                val req = NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    // 必须显式排除 VPN: 否则我们自己的 tun0 也会匹配进来, 隧道一起
+                    // 就把自己当成物理网, 闸门永远判「有网」。
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                    .build()
+                cm.registerNetworkCallback(req, physCb)
+            }.onFailure {
+                physicalNetworkCallback = null
+                LogStore.append("[core] registerNetworkCallback(物理网) 异常: ${it.message}")
             }
         }
 
@@ -1352,8 +1439,9 @@ class CoreService : VpnService() {
                 MirageNative.FAILOVER_RESTART_REQUESTED -> "请求重启"
                 else -> "未知($kind)"
             }
-            // 节点 URI 含密码, 只记前缀 —— core.log 可被用户导出分享。
-            val redacted = if (nodeUri.length > 24) nodeUri.take(24) + "..." else nodeUri
+            // 节点 URI 含密码, 只记 host:port —— core.log 可被用户导出分享。
+            // 不要改回前缀截断: mirage:// 占 9 字符, 截断等于把口令前缀写进日志。
+            val redacted = Node.redact(nodeUri)
             val inst = active
             if (inst == null) {
                 // 服务已销毁而内核任务尚未退出时会落到这里。丢弃是对的:

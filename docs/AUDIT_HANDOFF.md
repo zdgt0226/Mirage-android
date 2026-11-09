@@ -845,17 +845,43 @@ JNI 门禁               protectFd 1 · resolveConnectionOwner 1 · dex 43 = .so
    `startForeground(type)` 分支），建议在高版本机型上至少复跑前两项。
 4. **`jniLibs/` 是 gitignore 的本地产物**。改了 `native/` 后必须
    `bash scripts/build-android.sh native`，否则 APK 里仍是旧 `.so`。
-5. **`registerDefaultNetworkCallback` 看不见底层物理网络的消失**（2026-11-05 实测，
-   详见 §Rust 侧「网络闸门的输入是陈旧的」）。隧道起来之后关掉 Wi-Fi + 移动数据，
-   `onLost` 不送达，`currentPhysicalNetwork` 与内核的 `failover::network_state()`
-   一起冻结在旧网络上。影响面不止故障切换的闸门：`setUnderlyingNetworks` 在断网期间
-   也不会被撤下。修法是改成按 `NetworkRequest`（`NET_CAPABILITY_INTERNET` +
-   `NET_CAPABILITY_NOT_VPN`）注册的 `registerNetworkCallback`，但它会动到
-   `setUnderlyingNetworks` 的时序与暖池冲刷的触发点，须单独一轮并在两台真机上都验。
-6. **节点 URI 在日志里的脱敏不够**。`[core] 开始启动内核 (uri=${uri.take(30)}...)` 与
-   `onFailoverEvent` 的 `nodeUri.take(24)` 都会漏出 `mirage://` 之后的十几到二十几个字符，
-   而那一段正是口令。core.log 是用户可导出分享的文件。应改成只保留 scheme + host:port
-   （内核侧的 `redact_uri` 已经是这个形状，外壳侧两处尚未对齐）。
+5. ~~**`registerDefaultNetworkCallback` 看不见底层物理网络的消失**~~
+   **（2026-11-09 已修并实测）**。`registerDefaultNetworkCallback` 只跟踪「默认网络」
+   这一条的生命周期；**分应用白名单模式下本应用自己也在 VPN 里**（`startLocked` 中
+   allowed 与 disallowed 互斥，白名单模式下无法再 `addDisallowedApplication` 自排除），
+   隧道起来后默认网络就是 VPN，物理网消失时它的 `onLost` 根本不会送达。
+   复现（SO-02K，连着本地节点关 Wi-Fi）：系统侧已是 `Active default network: none`，
+   应用日志里却只有 `底层物理网络切换: null -> 409`，**从未出现 `409 -> null`**。
+
+   **改法是「加」不是「换」**：保留默认网络回调（它是「系统偏好哪一条」的权威 ——
+   Wi-Fi 与蜂窝同时在线时擅自绑到蜂窝会给用户产生流量费），另加一个按
+   `NetworkRequest(INTERNET + NOT_VPN)` 注册的回调，只负责「物理网还在不在」，
+   维护 `physicalNetworks` 存活集合。新回调**只在当前无网时顶上，有网时不抢**；
+   丢网时退到集合里还活着的那条，一条不剩才置 null。
+   `NOT_VPN` 必须显式加：否则我们自己的 `tun0` 会匹配进来，隧道一起就把自己当物理网，
+   闸门永远判「有网」。
+
+   实测（同机同场景）：`418 -> null (handle=0)` 如期出现；内核 6 次
+   `[failover] 物理网络不可用, 本轮跳过`；**`请求外壳重启` 0 次**（修复前这里是无限
+   循环的整核重启）。Wi-Fi 开回后 `null -> 420` 且内核 `物理网络变更: internet=true`。
+
+6. ~~**节点 URI 在日志里的脱敏不够**~~ **（2026-11-09 已修）**。
+   原记录说「内核侧 `redact_uri` 已经是这个形状」——**记错了**：内核侧同样是
+   `uri.take(24) + "..."`，**三处全是前缀截断、三处全漏口令**。`mirage://` 本身占
+   9 个字符，`take(24)` 露出口令前 15 位，外壳那条 `take(30)` 露 21 位。
+   现统一为只保留 scheme 与 host:port（口令位置打星号）：内核侧走 `NodeUri::parse`，
+   外壳侧用 `Node.redact()`，两边输出同形状便于对照日志；解析失败时给不含原文的占位，
+   **不回落到打印前缀或原文**。`NodeRedactionTest` 逐段检查结果不含口令的任何前缀，
+   挡住「换个截断长度」这类退化。
+
+   两个实现时踩到的坑，改这块时注意：
+   - **脱敏不能复用 `Node.server` / `Node.port`**：这两个 getter 很宽松，
+     `substringBeforeLast(":")` 找不到分隔符时返回全文，畸形输入会把整条带口令的串
+     当成 host 打进日志。必须自己做严格校验。
+   - **Rust 侧不要把 `mirage://` 写进 `format!` 的字面量**：
+     `scripts/check-no-real-endpoints.sh` 会把这个形状当成硬编码节点端点（占位符 `{}`
+     同样命中），硬门禁会红。把 scheme 抽成常量再拼接。
+
 7. **全手势外壳只在一台真机上验过**（D 阶段 S1，2026-11-06）。SO-02K（API 28）全项通过，
    **Galaxy S24+（API 36）未参与** —— 该机仍在 Qualcomm QDL 模式，§5.2 门禁二未满足。
    高版本侧有两处没实测：预测式返回的系统动画（API 36 默认开启，S1 只按系统给的
