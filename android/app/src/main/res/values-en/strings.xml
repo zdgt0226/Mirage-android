@@ -459,4 +459,6 @@
     <string name="home_panel_collapse">Collapse details</string>
     <string name="home_latency_none">Tunnel RTT: --</string>
     <string name="node_menu_more">More actions</string>
+    <string name="status_upstream_down">Tunnel up, upstream unreachable</string>
+    <string name="status_upstream_down_hint">Handshake with the node is failing, so traffic cannot be forwarded. Switch nodes or check the server.</string>
 </resources>

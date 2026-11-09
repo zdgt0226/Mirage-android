@@ -117,6 +117,11 @@ fun HomePage(
     state: VpnState,
     stats: TrafficStats,
     latencyMs: Long,
+    /**
+     * 上游是否可用。为 false 时「已连接」要显式降级 —— 隧道建好了不等于能用。
+     * 详见 `VpnRepository.upstreamHealthy`。
+     */
+    upstreamHealthy: Boolean,
     nodes: List<Node>,
     selectedNode: Node?,
     onToggle: () -> Unit,
@@ -211,10 +216,10 @@ fun HomePage(
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            HeroToggle(state = state, onToggle = onToggle)
+            HeroToggle(state = state, upstreamHealthy = upstreamHealthy, onToggle = onToggle)
             Spacer(Modifier.height(20.dp))
             Text(
-                text = statusLabel(state),
+                text = statusLabel(state, upstreamHealthy),
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.mirage.inkSecondary,
                 textAlign = TextAlign.Center,
@@ -283,7 +288,12 @@ fun HomePage(
                 },
                 expanded = panelState.targetValue == PanelAnchor.Expanded,
             ) {
-                PanelSummary(state = state, stats = stats, latencyMs = latencyMs)
+                PanelSummary(
+                    state = state,
+                    stats = stats,
+                    latencyMs = latencyMs,
+                    upstreamHealthy = upstreamHealthy,
+                )
                 detail()
             }
         }
@@ -372,9 +382,23 @@ private fun DetailPanelSurface(
 
 /** 面板里的速率 / 延迟 / 累计摘要。连接信息列表留给 S2。 */
 @Composable
-private fun PanelSummary(state: VpnState, stats: TrafficStats, latencyMs: Long) {
+private fun PanelSummary(
+    state: VpnState,
+    stats: TrafficStats,
+    latencyMs: Long,
+    upstreamHealthy: Boolean,
+) {
     val colors = MaterialTheme.mirage
     Column {
+        // 面板里再说一次: 用户上滑来看详情, 正是想知道「为什么没速度」。
+        if (state is VpnState.Connected && !upstreamHealthy) {
+            Text(
+                text = stringResource(R.string.status_upstream_down_hint),
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.ginger,
+            )
+            Spacer(Modifier.height(12.dp))
+        }
         Row(Modifier.fillMaxWidth()) {
             RateCell(
                 label = stringResource(R.string.rate_up_label),
@@ -450,7 +474,7 @@ private fun RateCell(
  * 震动同样挂在 press 上，理由一样。
  */
 @Composable
-private fun HeroToggle(state: VpnState, onToggle: () -> Unit) {
+private fun HeroToggle(state: VpnState, upstreamHealthy: Boolean, onToggle: () -> Unit) {
     val colors = MaterialTheme.mirage
     val haptics = rememberShellHaptics()
     val interaction = remember { MutableInteractionSource() }
@@ -468,10 +492,13 @@ private fun HeroToggle(state: VpnState, onToggle: () -> Unit) {
     // 被替换的 HomeFragment 就是这个取舍 (Connecting 时 connectBtn.isEnabled = true)。
     // 只有 Syncing (还在查状态) 与 Stopping (正在拆) 这两个瞬时态才禁。
     val busy = state is VpnState.Syncing || state is VpnState.Stopping
-    val fill = when (state) {
-        is VpnState.Error -> colors.error
-        is VpnState.Connected -> colors.connected
-        is VpnState.Connecting -> colors.ginger
+    val fill = when {
+        state is VpnState.Error -> colors.error
+        // 已连接但上游不可用: 用警示色而不是绿色。绿环 + 「加密隧道保护中」
+        // 在节点其实握不上手时是**误导**, 用户据此以为流量受保护。
+        state is VpnState.Connected && !upstreamHealthy -> colors.ginger
+        state is VpnState.Connected -> colors.connected
+        state is VpnState.Connecting -> colors.ginger
         else -> colors.disconnected
     }
 
@@ -508,7 +535,7 @@ private fun HeroToggle(state: VpnState, onToggle: () -> Unit) {
         Text(
             text = stringResource(toggleLabel(state)),
             style = MaterialTheme.typography.headlineMedium,
-            color = if (state is VpnState.Connected) colors.connected else colors.ink,
+            color = if (state is VpnState.Connected && upstreamHealthy) colors.connected else colors.ink,
             textAlign = TextAlign.Center,
         )
     }
@@ -675,9 +702,14 @@ private fun NodeDropdown(
 }
 
 @Composable
-private fun statusLabel(state: VpnState): String = when (state) {
+private fun statusLabel(state: VpnState, upstreamHealthy: Boolean): String = when (state) {
     is VpnState.Syncing -> stringResource(R.string.status_syncing)
-    is VpnState.Connected -> stringResource(R.string.status_connected_detail)
+    is VpnState.Connected ->
+        if (upstreamHealthy) {
+            stringResource(R.string.status_connected_detail)
+        } else {
+            stringResource(R.string.status_upstream_down)
+        }
     is VpnState.Connecting -> stringResource(R.string.status_establishing)
     is VpnState.Stopping -> stringResource(R.string.status_disconnecting)
     is VpnState.Error -> stringResource(R.string.status_error, state.message)

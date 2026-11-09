@@ -280,6 +280,74 @@ API 30 / API 34 的回退（下限机是 API 28）。两个必踩的坑：(1) �
 是显式的重算触发器，弹层回调里自增。删掉它的表现是：改完 MTU 回到设置页，
 副标题还是旧值。
 
+#### 连接状态与诊断信号：三处「算出来却没用上」（2026-11-09 实测）
+
+用户报「软件自己测试总是提示连接成功，但节点其实不可用」。查下来不是一个 bug，
+是同一类病的三处表现：**诊断信号在内核里算好了，到界面这一层断掉。**
+
+**1. 「已连接」只代表核心起来了。** 链路是
+`STARTED: AtomicBool`（`mirage-jni/src/lib.rs:32`，`start()` 成功即置位）→
+`isRunning()` → `VpnRepository` 的 7 处 `VpnState.Connected` 赋值 → 界面
+「已连接 (加密隧道保护中)」。**全链路没有任何一环检查过上游握手成功过。**
+`start()` 返回 0 只代表本地装配完成，暖池是异步填的。真机佐证：生产节点暖池
+100% 失败、内核每 15s 请求一次重启，界面全程绿色。
+修法已落地：`VpnRepository.upstreamHealthy` 取内核 `Engine::is_healthy()`，
+主开关环变警示色 + 状态行「隧道已建立，但上游不可用」。
+**这个信号一直存在且经 AIDL 暴露，但 P3 删掉外壳看门狗后 Kotlin 侧就没有消费者了。**
+
+**2. 测速默认 `tcp` 测不出协议故障。** `NodeRepository.doTest` 里只有
+`connect` 走内核完整握手，其余（含默认的 `tcp` 与名不副实的 `ping`）都是一次
+`Socket.connect()`。节点 TCP 可达而协议握手失败时照样报绿色 4ms。
+默认已改 `connect`，`ping` 选项移除（它和 `tcp` 落同一分支）。
+**改默认值时必须同时给批量测速加并发上限** —— 原先是对全表无上限 `async`，
+几十个节点会同时发起完整握手（上游 v0.16.1 CHANGELOG：两个错口令客户端几分钟
+让服务端记录 662 条 auth failed）。现为 `Semaphore(4)`。
+
+**3. 「隧道 RTT」在 Android 上结构性地永远是 `--`。** `latencyMs()` →
+`Engine::latency_ms()` → `OutboundNode::latency_rtt_ms()` 读 `Mirage { rtt_ms }`
+原子；该原子在 `outbound.rs:501` 初始化为 `u64::MAX`，而**裁剪树里没有任何一处写它**。
+上游唯一的写入方是 `src/startup.rs:493`，走 **eBPF**（socket cookie 读内核
+`srtt_us`）。Android 裁剪树没有 `startup.rs`，普通应用也拿不到 eBPF ——
+两条都断，所以这个值永远取不到。**未修**；修法是改读暖池已有的
+`PoolStats::record_latency(elapsed)`（`pool.rs:939`、`:1406` 实际在调），
+而不是那个没人写的原子。
+
+#### 排查盲区：断开状态下 `core.log` 不刷新（2026-11-09 踩到）
+
+`core.log` 由 `CoreService` 的 `logJob` 每 60s 落盘，而该 job 只在 VPN 运行时跑。
+VPN 断开时测速/建连的日志**一行都不会落盘**，表现为「操作明明执行了但日志空白」。
+本轮一度据此误判「测速没有发出连接」。断开态排查必须改用别的通道
+（`MirageNative.recentLogs()` 环形缓冲，或先连上再复现）。
+
+#### 协议兼容性：v0.15 代客户端与 v0.16 / v0.17 服务端互通（2026-11-09 实测）
+
+用户提出「上游已到 v0.17.x，v0.15 起与老协议切割」，疑为连不上的原因。**实测否定。**
+
+- **APK 的协议是 v0.15.0 代**，不是 vendor 目录写的 v0.17.3 —— `vendor/SYNC.md`
+  自己写明「vendor/ 不参与编译……那个 commit 号只代表参考副本的版本」。
+  最后一次协议同步是 2026-09-29 的 v0.15.0。
+- **实测 A**：同一客户端 × 本地 **v0.16.2** 服务端，多次握手成功并中继真实流量。
+- **实测 B**：现编上游 **v0.17.12** 起本地服务端（设备经 `adb reverse` 接入），
+  服务端日志 **846 次 `Successfully consumed 64 bytes tail`**，并中继
+  `mtalk.google.com:5228`、`android.apis.google.com:443`、`www.google.com:443`。
+- **文档佐证**：上游 v0.15.1 → v0.17.12 每一版 CHANGELOG 均注明「无协议变更」
+  「与 v0.15.x / v0.16.x / v0.17.x 两端互通」，多处点名 Android 老客户端兼容。
+
+**结论：断代发生在 v0.15.0，而本客户端在断代之后那一侧。** 若真有版本不兼容，
+方向只能是服务端停在 ≤ v0.14。归一化比对（去 rustfmt 换行噪音）也显示
+`time_sync.rs` / `crypto/{cipher,tls_raw,aead}.rs` 与 v0.17.3 的差异全是格式与
+import 顺序。
+
+#### `Timeout before CCS` 现在带 `sh/ccs/enc` 标志
+
+`pool.rs` 的超时与 `Incomplete header` 两个分支都会打出三个标志。
+`sh=false` = 服务端对我们的 ClientHello 一字节未回（链路/端口/进程问题）；
+`sh=true` = 走了一段真 TLS 才停（典型是认证前被回落到伪装站，方向是我们这端被拒）。
+两者排查方向相反，原先混成同一条日志。
+真机首用即定性：生产节点 **46 次 `(sh=false, ccs=false, enc=false)`**，
+而同机 TCP 连接 4ms 即通 —— TCP 握手完成后应用层零字节，指向中间盒黑洞 /
+前置转发无后端 / 服务进程未运行，**不是协议或版本问题**。
+
 #### `src/vendor/` 不参与编译（2026-11-03 实证）
 
 `native/vendor-sync.sh` 把上游 22 个模块复制到 `native/mirage-core/src/vendor/`，

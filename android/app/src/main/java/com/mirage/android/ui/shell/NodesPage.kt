@@ -54,6 +54,7 @@ import com.mirage.android.R
 import com.mirage.android.data.model.Node
 import com.mirage.android.ui.NodeEditDialog
 import com.mirage.android.ui.theme.mirage
+import com.mirage.android.data.repository.NodeRepository
 import com.mirage.android.ui.viewmodel.NodesViewModel
 
 /** 节点行 RTT 着色的分档阈值（毫秒）。沿用 `NodeAdapter` 的 100 / 250 两档。 */
@@ -543,12 +544,14 @@ private fun choosePoolSize(context: Context, viewModel: NodesViewModel) {
 }
 
 private fun chooseTestMethod(context: Context, viewModel: NodesViewModel) {
+    // 只剩两项。原先还有一个「ping」, 但它在 NodeRepository.doTest 里落到和
+    // 「tcp」同一个分支 —— 三个选项只有两种行为, 名字与实现不符。
+    // 顺序也换了: connect 在前, 因为它是默认, 也是唯一测得出协议故障的那个。
     val items = arrayOf(
-        context.getString(R.string.nodes_test_tcp),
-        context.getString(R.string.nodes_test_ping),
         context.getString(R.string.nodes_test_connect),
+        context.getString(R.string.nodes_test_tcp),
     )
-    val keys = arrayOf("tcp", "ping", "connect")
+    val keys = arrayOf(NodeRepository.METHOD_CONNECT, NodeRepository.METHOD_TCP)
     val currentIdx = keys.indexOf(viewModel.testMethod.value).coerceAtLeast(0)
     AlertDialog.Builder(context)
         .setTitle(R.string.nodes_test_method_title)

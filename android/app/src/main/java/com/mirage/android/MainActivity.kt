@@ -128,6 +128,7 @@ class MainActivity : AppCompatActivity() {
         val state by homeViewModel.vpnState.collectAsStateWithLifecycle()
         val stats by homeViewModel.trafficStats.collectAsStateWithLifecycle()
         val latency by homeViewModel.latencyMs.collectAsStateWithLifecycle()
+        val healthy by homeViewModel.upstreamHealthy.collectAsStateWithLifecycle()
         val nodes by nodesViewModel.nodes.collectAsStateWithLifecycle()
         val selected by homeViewModel.selectedNode.collectAsStateWithLifecycle()
 
@@ -135,6 +136,7 @@ class MainActivity : AppCompatActivity() {
             state = state,
             stats = stats,
             latencyMs = latency,
+            upstreamHealthy = healthy,
             nodes = nodes,
             selectedNode = selected,
             onToggle = {

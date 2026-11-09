@@ -22,6 +22,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     val vpnState: StateFlow<VpnState> = vpnRepo.vpnState
     val trafficStats: StateFlow<TrafficStats> = vpnRepo.trafficStats
     val latencyMs: StateFlow<Long> = vpnRepo.latencyMs
+
+    /** 上游是否可用。与 [vpnState] 正交 —— 详见 `VpnRepository.upstreamHealthy` 的注释。 */
+    val upstreamHealthy: StateFlow<Boolean> = vpnRepo.upstreamHealthy
     val outboundMode: StateFlow<Int> = vpnRepo.outboundMode
 
     val selectedNode: StateFlow<Node?> = combine(nodeRepo.nodes, nodeRepo.selectedIndex) { nodes, index ->
