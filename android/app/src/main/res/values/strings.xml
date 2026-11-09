@@ -456,6 +456,8 @@
     <string name="settings_row_outbound">出站模式</string>
     <string name="settings_row_pool">预热池</string>
     <string name="action_edit">编辑</string>
+    <string name="action_back">返回</string>
+    <string name="rule_kind_label">匹配类型:</string>
     <string name="home_panel_handle">上滑查看详情</string>
     <string name="home_panel_collapse">收起详情</string>
     <string name="home_latency_none">隧道 RTT: --</string>

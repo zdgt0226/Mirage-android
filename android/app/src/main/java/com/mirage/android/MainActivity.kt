@@ -15,7 +15,10 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
@@ -25,16 +28,17 @@ import com.mirage.android.data.repository.NodeRepository
 import com.mirage.android.ui.AppFilterActivity
 import com.mirage.android.ui.CoreManagerDialog
 import com.mirage.android.ui.GeoAssetActivity
-import com.mirage.android.ui.RulesHostActivity
 import com.mirage.android.ui.SettingsActions
 import com.mirage.android.ui.shell.HomePage
 import com.mirage.android.ui.shell.MirageShell
 import com.mirage.android.ui.shell.NodesPage
+import com.mirage.android.ui.shell.RulesScreen
 import com.mirage.android.ui.shell.SettingsPage
 import com.mirage.android.ui.shell.outboundModeTitleRes
 import com.mirage.android.ui.theme.MirageTheme
 import com.mirage.android.ui.viewmodel.HomeViewModel
 import com.mirage.android.ui.viewmodel.NodesViewModel
+import com.mirage.android.ui.viewmodel.RulesViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
@@ -50,6 +54,7 @@ class MainActivity : AppCompatActivity() {
 
     private val homeViewModel: HomeViewModel by viewModels()
     private val nodesViewModel: NodesViewModel by viewModels()
+    private val rulesViewModel: RulesViewModel by viewModels()
 
     private var coreManagerDialog: CoreManagerDialog? = null
 
@@ -104,10 +109,19 @@ class MainActivity : AppCompatActivity() {
 
         setContent {
             MirageTheme {
+                // 子界面开关提到外壳之上: 打开全屏子界面时要同时锁掉横滑与页点,
+                // 否则用户能把一个带返回箭头的子界面横滑走 (真机实测会跳到首页)。
+                var showRules by rememberSaveable { mutableStateOf(false) }
                 MirageShell(
                     nodesPage = { NodesPage(viewModel = nodesViewModel) },
                     homePage = { HomeHost() },
-                    settingsPage = { SettingsHost() },
+                    settingsPage = {
+                        SettingsHost(
+                            showRules = showRules,
+                            onShowRulesChange = { showRules = it },
+                        )
+                    },
+                    shellNavEnabled = !showRules,
                 )
             }
         }
@@ -150,31 +164,38 @@ class MainActivity : AppCompatActivity() {
     }
 
     @Composable
-    private fun SettingsHost() {
-        val outbound by homeViewModel.outboundMode.collectAsStateWithLifecycle()
-        val poolSize by nodesViewModel.poolSize.collectAsStateWithLifecycle()
-        val revision = settingsRevision.intValue
-        // key(revision): 摘要是同步读取, 必须随 revision 重算 (见字段注释)。
-        val dnsSummary = remember(revision) { SettingsActions.dnsSummary(this) }
-        val tunSummary = remember(revision) { SettingsActions.tunSummary(this) }
+    private fun SettingsHost(showRules: Boolean, onShowRulesChange: (Boolean) -> Unit) {
+        if (showRules) {
+            RulesScreen(
+                viewModel = rulesViewModel,
+                onBack = { onShowRulesChange(false) },
+            )
+        } else {
+            val outbound by homeViewModel.outboundMode.collectAsStateWithLifecycle()
+            val poolSize by nodesViewModel.poolSize.collectAsStateWithLifecycle()
+            val revision = settingsRevision.intValue
+            // key(revision): 摘要是同步读取, 必须随 revision 重算 (见字段注释)。
+            val dnsSummary = remember(revision) { SettingsActions.dnsSummary(this) }
+            val tunSummary = remember(revision) { SettingsActions.tunSummary(this) }
 
-        SettingsPage(
-            outboundMode = outbound,
-            dnsSummary = dnsSummary,
-            tunSummary = tunSummary,
-            poolSize = poolSize,
-            onOpenRules = { startActivity(Intent(this, RulesHostActivity::class.java)) },
-            onOpenGeo = { startActivity(Intent(this, GeoAssetActivity::class.java)) },
-            onOpenPerApp = { startActivity(Intent(this, AppFilterActivity::class.java)) },
-            onPickOutboundMode = { pickOutboundMode() },
-            onOpenDns = { SettingsActions.showDns(this) { bumpSettings() } },
-            onOpenPool = { pickPoolSize() },
-            onOpenTun = { SettingsActions.showTun(this) { bumpSettings() } },
-            onOpenCore = { showCoreManager() },
-            onOpenVersion = { SettingsActions.showVersion(this) { showCoreManager() } },
-            onBackup = { SettingsActions.showBackup(this) },
-            onRestore = { SettingsActions.showRestore(this) },
-        )
+            SettingsPage(
+                outboundMode = outbound,
+                dnsSummary = dnsSummary,
+                tunSummary = tunSummary,
+                poolSize = poolSize,
+                onOpenRules = { onShowRulesChange(true) },
+                onOpenGeo = { startActivity(Intent(this, GeoAssetActivity::class.java)) },
+                onOpenPerApp = { startActivity(Intent(this, AppFilterActivity::class.java)) },
+                onPickOutboundMode = { pickOutboundMode() },
+                onOpenDns = { SettingsActions.showDns(this) { bumpSettings() } },
+                onOpenPool = { pickPoolSize() },
+                onOpenTun = { SettingsActions.showTun(this) { bumpSettings() } },
+                onOpenCore = { showCoreManager() },
+                onOpenVersion = { SettingsActions.showVersion(this) { showCoreManager() } },
+                onBackup = { SettingsActions.showBackup(this) },
+                onRestore = { SettingsActions.showRestore(this) },
+            )
+        }
     }
 
     private fun bumpSettings() {

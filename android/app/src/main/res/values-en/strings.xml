@@ -455,6 +455,8 @@
     <string name="settings_row_outbound">Outbound Mode</string>
     <string name="settings_row_pool">Warm Pool</string>
     <string name="action_edit">Edit</string>
+    <string name="action_back">Back</string>
+    <string name="rule_kind_label">Match type:</string>
     <string name="home_panel_handle">Swipe up for details</string>
     <string name="home_panel_collapse">Collapse details</string>
     <string name="home_latency_none">Tunnel RTT: --</string>
