@@ -515,7 +515,12 @@ class CoreService : VpnService() {
         if (rc != 0) {
             // 任何失败都必须回到干净状态: 否则服务会带着「已连接」的前台通知
             // 和零隧道继续驻留, 用户以为自己受保护。
-            cancelPeriodicJobs()
+            //
+            // 用 cancelAllJobs 而不是 cancelPeriodicJobs: 后者只停协程, 不注销
+            // screenReceiver 与两个 NetworkCallback。而 startLocked 在 MirageNative.start
+            // 失败之前就已经把它们注册进系统了 —— UI 进程持 BIND_AUTO_CREATE,
+            // 服务组件不会走 onDestroy, 那些回调会永久驻留并继续向已停止的内核转发事件。
+            cancelAllJobs()
             runCatching { MirageNative.stop() }
             tunFd?.let { runCatching { it.close() } }
             tunFd = null
@@ -1437,7 +1442,21 @@ class CoreService : VpnService() {
             "126.0.0.0" to 8,
             "128.0.0.0" to 3,
             "160.0.0.0" to 5,
-            "168.0.0.0" to 6,
+            // 168.0.0.0/6 会覆盖 168-171, 把 169.254.0.0/16 (链路本地 / APIPA) 一并吞进隧道,
+            // 与上面注释声明的排除项矛盾。拆成十段, 精确挖掉 169.254/16:
+            // 无 DHCP 时的直连设备 (部分打印机、投屏回退) 走的就是这个网段,
+            // 被卷进隧道后在「绕过局域网」开启时仍然不通, 而用户以为自己已经绕过了。
+            "168.0.0.0" to 8,
+            "169.0.0.0" to 9,
+            "169.128.0.0" to 10,
+            "169.192.0.0" to 11,
+            "169.224.0.0" to 12,
+            "169.240.0.0" to 13,
+            "169.248.0.0" to 14,
+            "169.252.0.0" to 15,
+            // 169.254.0.0/16 刻意缺席 —— 这一行的"没有"就是修复本身, 不要补上。
+            "169.255.0.0" to 16,
+            "170.0.0.0" to 7,
             "172.0.0.0" to 12,
             "172.32.0.0" to 11,
             "172.64.0.0" to 10,
