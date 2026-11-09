@@ -280,6 +280,57 @@ API 30 / API 34 的回退（下限机是 API 28）。两个必踩的坑：(1) �
 是显式的重算触发器，弹层回调里自增。删掉它的表现是：改完 MTU 回到设置页，
 副标题还是旧值。
 
+#### 看门狗任务**绝不能**持有 `Arc<Runtime>`，整个 `RunState` 也不行（2026-11-09 真机）
+
+症状：
+```
+PANIC: panicked at tokio-1.53.1/src/runtime/blocking/shutdown.rs:51:21:
+Cannot drop a runtime in a context where blocking is not allowed.
+```
+S24+ 上 8 次整核重启炸 2 次（竞态）。panic 发生在 spawn 的任务里，`jni_boundary!`
+捕不到，进程不死但旧 runtime 的 shutdown 中途断掉。
+
+根因：`RunState` 持 `rt: Arc<Runtime>`。重启路径是 `stop()` 取走并 drop 一份，
+`start()` 再建新的。谁手里是**最后一个** `Arc` 就由谁来 drop runtime —— 而如果那
+发生在该 runtime 自己的 worker 线程上，tokio 直接 panic。
+
+**本仓库踩到的是两处，修第一处不够：**
+1. 任务捕获的 `let rt_for_task = state.rt.clone()`（只为了传给 `pick_best_node`）。
+   改成 `state.rt.handle().clone()`，`pick_best_node` 参数改 `&tokio::runtime::Handle`
+   —— `Handle` 不保活 runtime。
+2. **看门狗每一轮循环里的 `RUNTIME...cloned()`**，克隆的是整个 `Arc<RunState>`，
+   里面就带着 `rt`。这份在迭代结束时于 worker 线程上释放。
+   改成只克隆 `Arc<TunStack>`（`.map(|s| s.stack.clone())`），
+   `switch_engine_to` 的参数一并从 `&Arc<RunState>` 改为 `&Arc<TunStack>`
+   —— 它本来就只用 `state.stack`。`TunStack` 不持有 runtime。
+
+只修第 1 处后真机仍复现（2026-11-09 05:32:08）。**改这块代码时的规则：
+看门狗任务可达的对象里不得出现任何 `Arc<Runtime>`，`Arc<RunState>` 也算。**
+
+修好之后有一个可观测的副作用可作验收标志：日志里**不再出现
+`[failover] 看门狗 gen=N 已被接替, 退出`**。因为 `stop()` 现在总是最后一个持有者，
+runtime 在 Kotlin 线程上干净关闭并带走它的所有任务，旧看门狗根本醒不过来。
+反过来说，这行日志若重新出现，说明又有谁在任务里攥着 runtime 不放。
+
+#### 重启循环会抹掉故障证据，给界面的健康位必须有迟滞（2026-11-09 真机）
+
+节点持续不可用时，看门狗请求整核重启，而重启建的是新引擎新池，
+`PoolStats::consecutive_failures` 随之归零，`Engine::is_healthy()` 立刻又是 true。
+于是界面每隔 30-50s 就被喂一次「健康」，持续坏掉的节点表现为红绿跳动。
+
+解法在 `mirage-jni`：`LAST_UNHEALTHY_MS`（单调时钟）+ `UNHEALTHY_STICKY_MS = 40s`。
+看门狗判异常时写入；**清零要求有成功的证据** —— `is_healthy()` 为真
+**且** `engine.latency_ms().is_some()`（延迟样本只由 `record_latency` 写入，
+而那是一次成功建连的唯一路径）。只看失败计数为 0 是不够的：重启后的新池本来就是 0。
+给外壳/界面读的 `isHealthy()` 套这层迟滞，**看门狗自己的决策不读它**。
+
+**刻意不在 `stop()` 里清零** —— 内核请求的重启走的就是 stop + start，在那里清零
+等于自废。用户主动断开的残留由时间窗兜底，且断开期间外壳 `stopTelemetry()` 会把
+`upstreamHealthy` 复位，界面看不到。
+
+真机验收（SO-02K，两台本地服务端全停）：5.5 分钟 21 次界面采样**全部**
+「隧道已建立，但上游不可用」，零次跳回绿色，同期内核确实在反复判异常并请求重启。
+
 #### 连接状态与诊断信号：三处「算出来却没用上」（2026-11-09 实测）
 
 用户报「软件自己测试总是提示连接成功，但节点其实不可用」。查下来不是一个 bug，
@@ -308,9 +359,16 @@ API 30 / API 34 的回退（下限机是 API 28）。两个必踩的坑：(1) �
 原子；该原子在 `outbound.rs:501` 初始化为 `u64::MAX`，而**裁剪树里没有任何一处写它**。
 上游唯一的写入方是 `src/startup.rs:493`，走 **eBPF**（socket cookie 读内核
 `srtt_us`）。Android 裁剪树没有 `startup.rs`，普通应用也拿不到 eBPF ——
-两条都断，所以这个值永远取不到。**未修**；修法是改读暖池已有的
+两条都断，所以这个值永远取不到。原记录的修法是改读暖池已有的
 `PoolStats::record_latency(elapsed)`（`pool.rs:939`、`:1406` 实际在调），
 而不是那个没人写的原子。
+**（2026-11-09 已修）** 实际改法比这里设想的更小：`OutboundNode::latency_http_ms()`
+本来就读 `PoolStats::latency_ms()`（池的握手中位数），而
+`OutboundNode::latency_ms("rtt")` 本来就是 `latency_rtt_ms().or_else(latency_http_ms)`。
+缺口只在 `Engine::latency_ms()` 绕过了这个 `or_else` —— 改成调 `n.latency_ms("rtt")`
+即可，不新增任何统计实现。真机实测：此前永远 `--`，改后显示「隧道 RTT: 22ms」。
+**不要再新增第二个中位数实现**（本轮一度写出过 `median_latency_ms`，与既有
+`PoolStats::latency_ms` 重复且决胜规则不同，已撤回）。
 
 #### `:core` 没 `start()` 过时，一切原生查询都返回默认值（2026-11-09 实测）
 
@@ -787,17 +845,43 @@ JNI 门禁               protectFd 1 · resolveConnectionOwner 1 · dex 43 = .so
    `startForeground(type)` 分支），建议在高版本机型上至少复跑前两项。
 4. **`jniLibs/` 是 gitignore 的本地产物**。改了 `native/` 后必须
    `bash scripts/build-android.sh native`，否则 APK 里仍是旧 `.so`。
-5. **`registerDefaultNetworkCallback` 看不见底层物理网络的消失**（2026-11-05 实测，
-   详见 §Rust 侧「网络闸门的输入是陈旧的」）。隧道起来之后关掉 Wi-Fi + 移动数据，
-   `onLost` 不送达，`currentPhysicalNetwork` 与内核的 `failover::network_state()`
-   一起冻结在旧网络上。影响面不止故障切换的闸门：`setUnderlyingNetworks` 在断网期间
-   也不会被撤下。修法是改成按 `NetworkRequest`（`NET_CAPABILITY_INTERNET` +
-   `NET_CAPABILITY_NOT_VPN`）注册的 `registerNetworkCallback`，但它会动到
-   `setUnderlyingNetworks` 的时序与暖池冲刷的触发点，须单独一轮并在两台真机上都验。
-6. **节点 URI 在日志里的脱敏不够**。`[core] 开始启动内核 (uri=${uri.take(30)}...)` 与
-   `onFailoverEvent` 的 `nodeUri.take(24)` 都会漏出 `mirage://` 之后的十几到二十几个字符，
-   而那一段正是口令。core.log 是用户可导出分享的文件。应改成只保留 scheme + host:port
-   （内核侧的 `redact_uri` 已经是这个形状，外壳侧两处尚未对齐）。
+5. ~~**`registerDefaultNetworkCallback` 看不见底层物理网络的消失**~~
+   **（2026-11-09 已修并实测）**。`registerDefaultNetworkCallback` 只跟踪「默认网络」
+   这一条的生命周期；**分应用白名单模式下本应用自己也在 VPN 里**（`startLocked` 中
+   allowed 与 disallowed 互斥，白名单模式下无法再 `addDisallowedApplication` 自排除），
+   隧道起来后默认网络就是 VPN，物理网消失时它的 `onLost` 根本不会送达。
+   复现（SO-02K，连着本地节点关 Wi-Fi）：系统侧已是 `Active default network: none`，
+   应用日志里却只有 `底层物理网络切换: null -> 409`，**从未出现 `409 -> null`**。
+
+   **改法是「加」不是「换」**：保留默认网络回调（它是「系统偏好哪一条」的权威 ——
+   Wi-Fi 与蜂窝同时在线时擅自绑到蜂窝会给用户产生流量费），另加一个按
+   `NetworkRequest(INTERNET + NOT_VPN)` 注册的回调，只负责「物理网还在不在」，
+   维护 `physicalNetworks` 存活集合。新回调**只在当前无网时顶上，有网时不抢**；
+   丢网时退到集合里还活着的那条，一条不剩才置 null。
+   `NOT_VPN` 必须显式加：否则我们自己的 `tun0` 会匹配进来，隧道一起就把自己当物理网，
+   闸门永远判「有网」。
+
+   实测（同机同场景）：`418 -> null (handle=0)` 如期出现；内核 6 次
+   `[failover] 物理网络不可用, 本轮跳过`；**`请求外壳重启` 0 次**（修复前这里是无限
+   循环的整核重启）。Wi-Fi 开回后 `null -> 420` 且内核 `物理网络变更: internet=true`。
+
+6. ~~**节点 URI 在日志里的脱敏不够**~~ **（2026-11-09 已修）**。
+   原记录说「内核侧 `redact_uri` 已经是这个形状」——**记错了**：内核侧同样是
+   `uri.take(24) + "..."`，**三处全是前缀截断、三处全漏口令**。`mirage://` 本身占
+   9 个字符，`take(24)` 露出口令前 15 位，外壳那条 `take(30)` 露 21 位。
+   现统一为只保留 scheme 与 host:port（口令位置打星号）：内核侧走 `NodeUri::parse`，
+   外壳侧用 `Node.redact()`，两边输出同形状便于对照日志；解析失败时给不含原文的占位，
+   **不回落到打印前缀或原文**。`NodeRedactionTest` 逐段检查结果不含口令的任何前缀，
+   挡住「换个截断长度」这类退化。
+
+   两个实现时踩到的坑，改这块时注意：
+   - **脱敏不能复用 `Node.server` / `Node.port`**：这两个 getter 很宽松，
+     `substringBeforeLast(":")` 找不到分隔符时返回全文，畸形输入会把整条带口令的串
+     当成 host 打进日志。必须自己做严格校验。
+   - **Rust 侧不要把 `mirage://` 写进 `format!` 的字面量**：
+     `scripts/check-no-real-endpoints.sh` 会把这个形状当成硬编码节点端点（占位符 `{}`
+     同样命中），硬门禁会红。把 scheme 抽成常量再拼接。
+
 7. **全手势外壳只在一台真机上验过**（D 阶段 S1，2026-11-06）。SO-02K（API 28）全项通过，
    **Galaxy S24+（API 36）未参与** —— 该机仍在 Qualcomm QDL 模式，§5.2 门禁二未满足。
    高版本侧有两处没实测：预测式返回的系统动画（API 36 默认开启，S1 只按系统给的
