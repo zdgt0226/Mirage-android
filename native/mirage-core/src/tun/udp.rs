@@ -18,7 +18,7 @@
 //! 裸 IP 目的 → ATYP=0x01/0x04。
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -29,7 +29,7 @@ use tracing::{debug, warn};
 
 use crate::engine::Engine;
 use crate::proxy::outbound::OutboundNode;
-use crate::tun::{TunStack, TUN_MTU};
+use crate::tun::TunStack;
 
 const UDP_IDLE: Duration = Duration::from_secs(60);
 /// 首下行超时 (对齐上游 FIRST_DOWNLINK_TIMEOUT)。
@@ -136,11 +136,6 @@ impl UdpEngine {
             }
         };
         let _ = flow.tx.try_send((src, dst, payload.to_vec()));
-    }
-
-    /// 流数 (App 状态展示)。
-    pub fn flow_count(&self) -> usize {
-        self.flows.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// 释放流并同步更新计数 (RAII 自动清理，杜绝 FD / 内存泄露)
@@ -828,17 +823,6 @@ pub fn parse_udp_datagram(pkt: &[u8]) -> Option<(SocketAddr, SocketAddr, &[u8])>
         }
         _ => None,
     }
-}
-
-#[allow(dead_code)]
-fn _mtu_const() -> usize {
-    TUN_MTU
-}
-
-/// 防未使用告警: Ipv4Addr/Ipv6Addr 在测试/未来功能里用。
-#[allow(dead_code)]
-fn _type_pins() -> (Ipv4Addr, Ipv6Addr, Duration) {
-    (Ipv4Addr::UNSPECIFIED, Ipv6Addr::UNSPECIFIED, UDP_IDLE)
 }
 
 #[cfg(test)]

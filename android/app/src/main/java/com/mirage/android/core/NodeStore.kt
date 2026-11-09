@@ -80,17 +80,6 @@ object NodeStore {
     private const val KEY_SELECTED = "selected_index"
     private const val KEY_POOL = "pool_size"
 
-    /** 迁移旧版单节点数据 (node_uri → 节点列表)。幂等。 */
-    fun migrateLegacy(ctx: Context) {
-        val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val legacy = prefs.getString("node_uri", null)
-        if (!legacy.isNullOrBlank() && getNodes(ctx).isEmpty()) {
-            val idx = addNode(ctx, Node(legacy, defaultName(legacy)))
-            setSelected(ctx, idx)
-            prefs.edit().remove("node_uri").apply()
-        }
-    }
-
     fun getNodesJson(ctx: Context): String =
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_NODES, "[]") ?: "[]"

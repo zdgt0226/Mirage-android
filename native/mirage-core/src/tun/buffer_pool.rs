@@ -117,11 +117,6 @@ impl PooledBuf {
         pbuf
     }
 
-    /// 包装现有的 Vec<u8>，其析构后将自动进入缓冲池供后续重用
-    pub fn from_vec(vec: Vec<u8>) -> Self {
-        Self { buf: vec }
-    }
-
     /// 从全局池分配指定容量
     #[inline]
     pub fn acquire(cap: usize) -> Self {
@@ -181,11 +176,6 @@ impl PooledBuf {
     #[inline]
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
         self.buf.as_mut_ptr()
-    }
-
-    /// 提取内部 Vec<u8>，剥离对象将不会回收入池
-    pub fn into_vec(mut self) -> Vec<u8> {
-        std::mem::take(&mut self.buf)
     }
 }
 
