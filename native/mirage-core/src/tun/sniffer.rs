@@ -60,26 +60,6 @@ impl Sniffer {
         SniffResult::default()
     }
 
-    /// 嗅探 UDP 首包 (QUIC / HTTP3)
-    pub fn sniff_udp(payload: &[u8]) -> SniffResult {
-        if payload.len() < 12 {
-            return SniffResult::default();
-        }
-
-        // QUIC Long Header Initial: 0x80 | 0x40 (Fixed bit) | Type (0x00 for v1 Initial)
-        let first_byte = payload[0];
-        if (first_byte & 0x80) != 0 && (first_byte & 0x40) != 0 {
-            if let Some(sni) = Self::parse_quic_sni(payload) {
-                return SniffResult {
-                    protocol: SniffProtocol::Quic,
-                    host: Some(sni),
-                };
-            }
-        }
-
-        SniffResult::default()
-    }
-
     /// 解析 TLS ClientHello 载荷提取 SNI 扩展 (从 Handshake 头部开始，零堆分配)
     pub fn parse_client_hello_payload(data: &[u8]) -> Option<String> {
         // Handshake Header: Type 0x01 (ClientHello), Length 3 字节
