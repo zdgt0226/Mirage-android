@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -73,6 +74,7 @@ import com.mirage.android.data.model.Node
 import com.mirage.android.data.model.TrafficStats
 import com.mirage.android.data.model.VpnState
 import com.mirage.android.ui.theme.mirage
+import com.mirage.android.ui.viewmodel.TrafficViewModel
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
@@ -126,8 +128,8 @@ fun HomePage(
     selectedNode: Node?,
     onToggle: () -> Unit,
     onSelectNode: (Int) -> Unit,
+    trafficViewModel: TrafficViewModel,
     modifier: Modifier = Modifier,
-    detail: @Composable () -> Unit = {},
 ) {
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
@@ -294,7 +296,14 @@ fun HomePage(
                     latencyMs = latencyMs,
                     upstreamHealthy = upstreamHealthy,
                 )
-                detail()
+                Spacer(Modifier.height(10.dp))
+                DetailPanelContent(
+                    panelState = panelState,
+                    vm = trafficViewModel,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                )
             }
         }
     }
@@ -322,12 +331,12 @@ private fun DetailPanelSurface(
     progress: () -> Float,
     expanded: Boolean,
     onHandleClick: () -> Unit,
-    content: @Composable () -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
 ) {
     val colors = MaterialTheme.mirage
     Column(
         modifier = Modifier
-            .fillMaxWidth()
+            .fillMaxSize()
             .clip(RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp))
             .background(colors.card)
             .border(
@@ -369,13 +378,14 @@ private fun DetailPanelSurface(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .weight(1f)
                 .padding(horizontal = 20.dp)
                 .navigationBarsPadding()
                 .padding(bottom = DOTS_RESERVE)
                 // 内容随展开淡入。收起态它在屏幕外, 但仍参与测量 ——
                 // 面板高度正是由它决定的, 这也是 anchors 的来源。
                 .graphicsLayer { alpha = progress() },
-            content = { content() },
+            content = content,
         )
     }
 }

@@ -1424,7 +1424,7 @@ MainActivity (Compose 宿主)
 | 段 | 内容 | 状态 |
 | :-- | :--- | :--- |
 | **S1** | 外壳骨架 + 首页 + 节点页（Compose）+ 设置页分块；面板装速率/RTT/累计/连接数 | 本轮 |
-| S2 | 上滑面板补连接信息列表与流量图表（取代 `TrafficFragment`），并接嵌套滚动契约 | 待做 |
+| S2 | 上滑面板补连接信息列表与流量图表（取代 `TrafficFragment`），并接嵌套滚动契约 | **已完成（2026-11-09）** |
 | S3 | 分流规则页 Compose 化，删 `RulesHostActivity` 与 `RulesFragment` | 待做 |
 | S4 | `GeoAssetActivity` / `AppFilterActivity` 下沉为设置页子面板；吸收 `SettingsActivity` | 待做 |
 | S5 | 清理：`ViewPager2` 依赖、悬浮胶囊底栏、`activity_main.xml`、四个旧 Fragment 与其 Adapter/XML | 待做 |
@@ -1592,3 +1592,36 @@ state 喂手势。方向锁死竖直，所以横滑仍归 Pager。
 2. **设置页的「展开后滚到可见」没能在本机构造出可区分的场景。** 当前只有 5 个
    分块，一块收起另一块展开后整页正好放得下，`animateScrollToItem` 退化为 no-op。
    代码路径正确且无害，但**不声称实测生效**。
+
+### 13.9 S2 — 详情面板内容（2026-11-09）
+
+面板从「只有四行数字」补成完整的监控视图。数据全部取自既有的 `TrafficViewModel`
+（`historyUp` / `historyDown` / `filteredRecentRequests` / `protocolFilter`），
+**没有新增任何数据通路**。
+
+| 组成 | 说明 |
+| :--- | :--- |
+| 吞吐曲线 | Compose `Canvas` 双折线，不引第三方图表库。分母用 `maxOf(maxUp, maxDown, 1024f)` 钳死，空列表与全零都不会除零 |
+| 请求流列表 | `LazyColumn`，显示目标、协议、出站与解析方式；空态给中性提示而非空白 |
+| 协议筛选 | 全部 / TCP / UDP，走 `setProtocolFilter` |
+
+#### 嵌套滚动契约（这一段是重点）
+
+`LazyColumn` 与 `anchoredDraggable` 共用同一个竖直手势方向，不协调的话列表会把
+向下拖动全部吃掉，面板再也收不起来。`rememberPanelNestedScrollConnection`：
+
+- `onPreScroll`：向上拖且面板未完全展开 → 喂给 `dispatchRawDelta` 并消费；展开到位后放行给列表
+- `onPostScroll`：列表触顶后剩余的向下增量 → 喂给面板驱动收起
+- `onPreFling` / `onPostFling`：相应方向的速度交给 `panelState.settle(velocity)`
+
+**真机实测（SO-02K，连本地节点跑真实流量）**：面板展开后在列表区内上滑 → 列表滚动、
+面板保持展开；滚到顶继续下拉 → 面板收起。曲线画出真实速率，列表显示真实目标
+（`PROXY` / `TCP` / `远程代理解析 (Fake-IP)`）；断开态显示零值与空态提示且不崩。
+
+#### 评审时改掉的一处
+
+生成版本把 `TrafficViewModel` 写成 `viewModel: TrafficViewModel? = null`，并在为空时
+**手工 `new` 一个 ViewModel**（`TrafficViewModel(context.applicationContext as Application)`）。
+那个实例游离在 `ViewModelStore` 之外、自带协程作用域，既泄漏又会让状态与正牌实例分叉；
+而可空带默认值本身也意味着调用方漏传照样编译、面板静默空白。已改为必填参数并删掉回退，
+`HomePage` 里那个已被取代的 `detail` 槽位也一并删掉，避免两条注入内容的路径。
