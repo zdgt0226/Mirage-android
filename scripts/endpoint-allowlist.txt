@@ -86,7 +86,7 @@
 126.0.0.0 # Bypass LAN /8 前缀
 128.0.0.0 # Bypass LAN /3 前缀
 160.0.0.0 # Bypass LAN /5 前缀
-168.0.0.0 # Bypass LAN /6 前缀
+168.0.0.0 # Bypass LAN /8 前缀 (原 /6 覆盖 168-171, 会吞掉 169.254/16 链路本地, 2026-11-10 拆分)
 172.0.0.0 # Bypass LAN /12 前缀
 172.32.0.0 # Bypass LAN /11 前缀
 172.64.0.0 # Bypass LAN /10 前缀
@@ -114,3 +114,65 @@
 202.101.48.33 # 上海电信 GFW 污染假 IP (docs/VERIFICATION.md)
 180.163.151.33 # 上海电信 GFW 污染假 IP (docs/VERIFICATION.md)
 180.163.150.34 # 上海电信 GFW 污染假 IP (docs/VERIFICATION.md)
+# --- Bypass LAN: 169.254.0.0/16 (链路本地/APIPA) 的精确挖除 (2026-11-10) ---
+# 下列全部是 CIDR 网段边界值, 不是任何真实服务端。原先一条 168.0.0.0/6 覆盖 168-171,
+# 把链路本地整段吞进隧道, 与 NON_LAN_IPV4_ROUTES 的 KDoc 声明矛盾; 拆成八段后
+# 169.254/16 被精确挖掉 (该网段本身刻意不出现在路由表与本白名单里)。
+169.0.0.0 # Bypass LAN /9 前缀 (169.0-169.127)
+169.128.0.0 # Bypass LAN /10 前缀 (169.128-169.191)
+169.192.0.0 # Bypass LAN /11 前缀 (169.192-169.223)
+169.224.0.0 # Bypass LAN /12 前缀 (169.224-169.239)
+169.240.0.0 # Bypass LAN /13 前缀 (169.240-169.247)
+169.248.0.0 # Bypass LAN /14 前缀 (169.248-169.251)
+169.252.0.0 # Bypass LAN /15 前缀 (169.252-169.253)
+169.255.0.0 # Bypass LAN /16 前缀 (169.255, 链路本地之后的那一段)
+170.0.0.0 # Bypass LAN /7 前缀 (170-171)
+# --- BypassLanRoutesTest 的边界取样 (单测断言用, 非端点) ---
+168.0.0.1 # 链路本地下侧相邻网段取样, 断言仍须进隧道
+169.253.255.255 # 169.254/16 下边界的前一个地址, 断言仍须进隧道 (防挖多)
+170.0.0.1 # 链路本地上侧相邻网段取样, 断言仍须进隧道
+171.255.255.255 # Bypass LAN 170.0.0.0/7 的上边界, 断言仍须进隧道
+
+# ── 公共 DNS IPv6 解析器 (已知合法公共递归服务) ──────────────────────────────
+2001:4860:4860::8888 # Google 公共 DNS IPv6 (direct.rs is_cn_ip / is_private_ip 单元测试用例)
+2606:4700:4700::1111 # Cloudflare 公共 DNS IPv6 (direct.rs / net_util.rs 单元测试用例)
+2400:3200::1 # 阿里 AliDNS IPv6 (direct.rs is_cn_ip / is_private_ip 单元测试用例)
+
+# ── Android VpnService 绕过局域网 (Bypass LAN) IPv6 路由表前缀基址 (CoreService.kt)
+2000:: # Bypass LAN 全球单播公网地址 (2000::/3) 路由表前缀基址 (CoreService.kt)
+
+# ── direct.rs 亚太/国内/海外 IPv6 分流测试桩与 CIDR 网段说明注释 ───────────────
+2408:: # 联通 IPv6 CIDR 网段 (direct.rs 注释)
+2408:8000::1 # 联通 IPv6 单测目标 (direct.rs is_cn_ip 用例)
+2409:: # 移动 IPv6 CIDR 网段 (direct.rs 注释)
+2409:8000::1 # 移动 IPv6 单测目标 (direct.rs is_cn_ip 用例)
+240a:: # CERNET 教育网 IPv6 CIDR 网段 (direct.rs 注释)
+240b:: # CSTNET 科技网 IPv6 CIDR 网段 (direct.rs 注释)
+240c:: # 电信 IPv6 CIDR 网段 (direct.rs 注释)
+240d:: # 电信 IPv6 CIDR 网段 (direct.rs 注释)
+240e:: # 电信 IPv6 CIDR 网段 (direct.rs 注释)
+240e:8000::1 # 电信 IPv6 单测目标 (direct.rs is_cn_ip 用例)
+240f:: # 铁通 IPv6 CIDR 网段 (direct.rs 注释)
+2400:: # APNIC 亚太 IPv6 总保留块 (direct.rs 粗粒度反模式说明注释)
+2400:1f00:: # 日本 IIJ IPv6 CIDR 网段 (direct.rs 注释)
+2400:1f00::1 # 日本 IIJ IPv6 单测目标 (direct.rs !is_cn_ip 用例)
+2400:2e00:: # 韩国 IPv6 CIDR 网段 (direct.rs 注释)
+2400:2e00::1 # 韩国 IPv6 单测目标 (direct.rs !is_cn_ip 用例)
+2400:3200:: # 阿里公共 DNS IPv6 CIDR 网段 (direct.rs 注释)
+2400:7800::1 # 印度 IPv6 单测目标 (direct.rs !is_cn_ip 用例)
+2400:8500:: # 日本 NTT IPv6 CIDR 网段 (direct.rs 注释)
+2400:8500::1 # 日本 NTT IPv6 单测目标 (direct.rs !is_cn_ip 用例)
+2400:cb00::1 # 台湾 IPv6 单测目标 (direct.rs !is_cn_ip 用例)
+2400:da00:: # 百度公共 DNS IPv6 CIDR 网段 (direct.rs 注释)
+2401:1800::1 # 印尼 IPv6 单测目标 (direct.rs !is_cn_ip 用例)
+2402:4e00::1 # 新加坡 IPv6 单测目标 (direct.rs !is_cn_ip 用例)
+2407:4000::1 # 日本 IPv6 单测目标 (direct.rs !is_cn_ip 用例)
+2001:250:: # CSTNET 中国科技网 IPv6 CIDR 网段 (direct.rs 注释)
+2001:250::1 # CSTNET 中国科技网 IPv6 单测目标 (direct.rs is_cn_ip 用例)
+2001:cc0:: # CERNET IPv6 CIDR 网段 (direct.rs 注释)
+2001:da8:: # CERNET2 中国教育网 IPv6 CIDR 网段 (direct.rs 注释)
+2001:da8::1 # CERNET2 中国教育网 IPv6 单测目标 (direct.rs is_cn_ip 用例)
+
+# ── net_util.rs / node_uri.rs IPv6 格式与歧义测试用例与注释 ──────────────────
+2606::1 # net_util.rs / node_uri.rs 裸 IPv6 与端口拼接测试桩
+2606::1:443 # net_util.rs 无括号歧义端口格式说明注释

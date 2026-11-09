@@ -84,17 +84,6 @@ pub fn set_protect_callback(f: ProtectFn) {
     let _ = PROTECT.set(f);
 }
 
-/// 清空 (测试用)。
-pub fn clear_protect_callback() {
-    // OnceLock 无法重置; 用哨兵函数替代 (见下)
-    let _ = PROTECT.set(Box::new(|_| {}));
-}
-
-/// 是否已注册。
-pub fn is_set() -> bool {
-    PROTECT.get().is_some()
-}
-
 /// 保护一个 socket (未注册时无操作)。
 pub fn protect(fd: i32) {
     // 1. 原生 NDK 物理网络显式绑定 (消除 Java 反射与 PFD 堆分配开销)

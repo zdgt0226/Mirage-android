@@ -29,8 +29,6 @@ data class RuleCondition(
         "protocol" -> R.string.cond_kind_protocol
         else -> R.string.cond_kind_domain_suffix
     }
-
-    fun displayString(ctx: Context): String = "${ctx.getString(typeDisplayNameRes)}: $pattern"
 }
 
 /**

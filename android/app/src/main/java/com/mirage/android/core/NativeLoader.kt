@@ -18,7 +18,6 @@ object NativeLoader {
     private var loadedVersion = ""
 
     fun isLoaded(): Boolean = isLoaded
-    fun getActiveCoreName(): String = activeCoreDisplayName
     fun getLoadedVersion(): String = loadedVersion
 
     @Synchronized

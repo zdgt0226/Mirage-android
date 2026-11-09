@@ -12,6 +12,7 @@ import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
@@ -23,6 +24,7 @@ import com.mirage.android.core.ICoreService
 import com.mirage.android.core.LogStore
 import com.mirage.android.core.MirageNative
 import com.mirage.android.core.NativeLoader
+import com.mirage.android.data.model.Node
 import com.mirage.android.core.NodeStore
 import com.mirage.android.core.RuleStore
 import com.mirage.android.core.SettingsStore
@@ -212,7 +214,27 @@ class CoreService : VpnService() {
         var nodes: List<NodeStore.Node> = emptyList(),
         var outboundMode: Int = 0,
     )
+    /**
+     * 当前生效的服务配置。
+     *
+     * **写入一律走 [updateConfig]，不要直接改字段。** 这个对象被三类线程碰:
+     * AIDL setter 跑在 Binder 线程池, `startLocked` 跑在服务线程,
+     * `onKernelSwitched` 跑在 [scope] 的协程上。原先它是普通 `var` 持可变 data class,
+     * 字段全是裸 `var`, 既没有 `@Volatile` 也不在 [stateLock] 临界区内 ——
+     * JMM 下没有 happens-before 保证, UI 刚下发的节点、路由模式或 DNS 参数
+     * 可能在本次连接里根本不生效, 而且不会有任何报错。
+     *
+     * 现在: 引用 `@Volatile` 保证发布, 写入在 [stateLock] 下整体替换 (copy-on-write)
+     * 保证不丢更新, 读取方拿到的永远是某一次写入的完整快照。
+     * 多字段连读请先取一次本地快照 (`val cfg = serviceConfig`), 否则仍可能跨写入撕裂。
+     */
+    @Volatile
     private var serviceConfig = ServiceConfig()
+
+    /** 在 [stateLock] 下整体替换配置。所有字段写入的唯一入口。 */
+    private inline fun updateConfig(block: (ServiceConfig) -> ServiceConfig) {
+        synchronized(stateLock) { serviceConfig = block(serviceConfig) }
+    }
 
     private val stateLock = Any()
     @Volatile
@@ -233,6 +255,27 @@ class CoreService : VpnService() {
     private var notifJob: Job? = null
     private var trafficJob: Job? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    /**
+     * 第二个网络回调, 按 `NetworkRequest`(INTERNET + NOT_VPN) 注册。
+     *
+     * **为什么不能只有 `registerDefaultNetworkCallback`**: 它只跟踪「默认网络」这一条的
+     * 生命周期。分应用白名单模式下本应用自己也在 VPN 里 (见 startLocked: allowed 与
+     * disallowed 互斥, 白名单模式下无法再自排除), 隧道起来之后默认网络就是 VPN,
+     * 物理网消失时它的 onLost 根本不会送到这个回调, `currentPhysicalNetwork` 就此冻结。
+     *
+     * 2026-11-09 真机实测 (SO-02K, 连着本地节点时关掉 Wi-Fi):
+     * 系统侧 `dumpsys connectivity` 已是 `Active default network: none`,
+     * 而应用日志里只有 `底层物理网络切换: null -> 409`, **从未出现 `409 -> null`**。
+     * 后果不止故障切换的闸门读到陈旧值: `setUnderlyingNetworks` 也一直指着死网络。
+     *
+     * 两个回调分工: 默认网络回调是「系统偏好哪一条」的权威 (Wi-Fi 与蜂窝同时在线时
+     * 不能擅自绑到蜂窝, 那会产生流量费); 本回调是「物理网还在不在」的权威。
+     */
+    private var physicalNetworkCallback: ConnectivityManager.NetworkCallback? = null
+
+    /** 当前仍存活的物理网络。由 [netLock] 保护, 顺序即到达顺序, 末位是最新的一条。 */
+    private val physicalNetworks = LinkedHashSet<Network>()
     private var screenReceiver: BroadcastReceiver? = null
     private var screenJob: Job? = null
     @Volatile
@@ -327,6 +370,11 @@ class CoreService : VpnService() {
             runCatching { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) }
             networkCallback = null
         }
+        physicalNetworkCallback?.let { cb ->
+            runCatching { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) }
+            physicalNetworkCallback = null
+        }
+        synchronized(netLock) { physicalNetworks.clear() }
         screenReceiver?.let {
             runCatching { unregisterReceiver(it) }
             screenReceiver = null
@@ -379,23 +427,26 @@ class CoreService : VpnService() {
             return START_NOT_STICKY
         }
 
-        val uri = intent.getStringExtra("uri") ?: serviceConfig.uri
+        // 多字段连读先取一次快照: 逐个读 volatile 字段时, 中途被 Binder 线程写入
+        // 就会读到半旧半新的组合。
+        val cfg = serviceConfig
+        val uri = intent.getStringExtra("uri") ?: cfg.uri
         val poolSize = intent.getIntExtra("pool_size", serviceConfig.poolSize)
-        val bypassLan = if (intent.hasExtra("bypass_lan")) intent.getBooleanExtra("bypass_lan", false) else serviceConfig.bypassLan
-        val ipv6 = if (intent.hasExtra("enable_ipv6")) intent.getBooleanExtra("enable_ipv6", false) else serviceConfig.ipv6Enabled
-        val mtu = if (intent.hasExtra("mtu")) intent.getIntExtra("mtu", 1500) else serviceConfig.mtu
-        val blockQuic = if (intent.hasExtra("block_quic")) intent.getBooleanExtra("block_quic", true) else serviceConfig.blockQuic
-        val udpMux = if (intent.hasExtra("udp_mux")) intent.getBooleanExtra("udp_mux", true) else serviceConfig.udpMux
-        val autoReconnect = if (intent.hasExtra("auto_reconnect")) intent.getBooleanExtra("auto_reconnect", true) else serviceConfig.autoReconnect
-        val checkInterval = if (intent.hasExtra("check_interval")) intent.getIntExtra("check_interval", 15) else serviceConfig.checkIntervalSec
-        val failoverMode = intent.getStringExtra("failover_mode") ?: serviceConfig.failoverMode
-        val directDns = intent.getStringExtra("direct_dns") ?: serviceConfig.directDns
-        val remoteDns = intent.getStringExtra("remote_dns") ?: serviceConfig.remoteDns
-        val outboundMode = if (intent.hasExtra("outbound_mode")) intent.getIntExtra("outbound_mode", 0) else serviceConfig.outboundMode
+        val bypassLan = if (intent.hasExtra("bypass_lan")) intent.getBooleanExtra("bypass_lan", false) else cfg.bypassLan
+        val ipv6 = if (intent.hasExtra("enable_ipv6")) intent.getBooleanExtra("enable_ipv6", false) else cfg.ipv6Enabled
+        val mtu = if (intent.hasExtra("mtu")) intent.getIntExtra("mtu", 1500) else cfg.mtu
+        val blockQuic = if (intent.hasExtra("block_quic")) intent.getBooleanExtra("block_quic", true) else cfg.blockQuic
+        val udpMux = if (intent.hasExtra("udp_mux")) intent.getBooleanExtra("udp_mux", true) else cfg.udpMux
+        val autoReconnect = if (intent.hasExtra("auto_reconnect")) intent.getBooleanExtra("auto_reconnect", true) else cfg.autoReconnect
+        val checkInterval = if (intent.hasExtra("check_interval")) intent.getIntExtra("check_interval", 15) else cfg.checkIntervalSec
+        val failoverMode = intent.getStringExtra("failover_mode") ?: cfg.failoverMode
+        val directDns = intent.getStringExtra("direct_dns") ?: cfg.directDns
+        val remoteDns = intent.getStringExtra("remote_dns") ?: cfg.remoteDns
+        val outboundMode = if (intent.hasExtra("outbound_mode")) intent.getIntExtra("outbound_mode", 0) else cfg.outboundMode
         val appFilterJson = intent.getStringExtra("app_filter_json")
-        val appFilterConfig = if (!appFilterJson.isNullOrBlank()) com.mirage.android.core.AppFilterStore.fromJson(appFilterJson) else serviceConfig.appFilterConfig
+        val appFilterConfig = if (!appFilterJson.isNullOrBlank()) com.mirage.android.core.AppFilterStore.fromJson(appFilterJson) else cfg.appFilterConfig
         val nodesJson = intent.getStringExtra("nodes_json")
-        val nodes = if (!nodesJson.isNullOrBlank()) NodeStore.parseNodesJson(nodesJson) else serviceConfig.nodes
+        val nodes = if (!nodesJson.isNullOrBlank()) NodeStore.parseNodesJson(nodesJson) else cfg.nodes
 
         serviceConfig = ServiceConfig(
             uri = uri,
@@ -515,7 +566,12 @@ class CoreService : VpnService() {
         if (rc != 0) {
             // 任何失败都必须回到干净状态: 否则服务会带着「已连接」的前台通知
             // 和零隧道继续驻留, 用户以为自己受保护。
-            cancelPeriodicJobs()
+            //
+            // 用 cancelAllJobs 而不是 cancelPeriodicJobs: 后者只停协程, 不注销
+            // screenReceiver 与两个 NetworkCallback。而 startLocked 在 MirageNative.start
+            // 失败之前就已经把它们注册进系统了 —— UI 进程持 BIND_AUTO_CREATE,
+            // 服务组件不会走 onDestroy, 那些回调会永久驻留并继续向已停止的内核转发事件。
+            cancelAllJobs()
             runCatching { MirageNative.stop() }
             tunFd?.let { runCatching { it.close() } }
             tunFd = null
@@ -686,7 +742,7 @@ class CoreService : VpnService() {
         runCatching {
             val nodesJson = NodeStore.getNodesJson(this)
             val ok = MirageNative.setNodeList(nodesJson)
-            serviceConfig.nodes = NodeStore.parseNodesJson(nodesJson)
+            updateConfig { it.copy(nodes = NodeStore.parseNodesJson(nodesJson)) }
             LogStore.append("[core] 启动前补发节点全表: ok=$ok count=${serviceConfig.nodes.size}")
         }.onFailure { e ->
             LogStore.append("[core] 启动前补发节点全表异常: ${e::class.java.simpleName}: ${e.message}")
@@ -699,7 +755,7 @@ class CoreService : VpnService() {
         } else {
             NodeStore.getPoolSize(this)
         }
-        log("[core] 开始启动内核 (uri=${uri.take(30)}..., poolSize=$poolSize, mtu=$mtu)")
+        log("[core] 开始启动内核 (uri=${Node.redact(uri)}, poolSize=$poolSize, mtu=$mtu)")
         val rc = MirageNative.start(rawFd, uri, poolSize, mtu)
         if (rc != 0) {
             log("[core] 内核启动失败 rc=$rc")
@@ -789,7 +845,8 @@ class CoreService : VpnService() {
                 override fun onLost(network: Network) {
                     synchronized(netLock) {
                         if (currentPhysicalNetwork == network) {
-                            switchTo(null)
+                            // 不直接置 null: 可能还有别的物理网在线 (关 Wi-Fi 落到蜂窝)。
+                            switchTo(physicalNetworks.lastOrNull { it != network })
                         }
                     }
                 }
@@ -799,6 +856,64 @@ class CoreService : VpnService() {
                 cm.registerDefaultNetworkCallback(cb)
             }.onFailure {
                 LogStore.append("[core] registerDefaultNetworkCallback 异常: ${it.message}")
+            }
+
+            // 第二个回调: 只管「物理网还在不在」。理由见 physicalNetworkCallback 的注释 ——
+            // 默认网络回调在隧道起来之后可能再也收不到物理网的 onLost。
+            val physCb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    if (!isPhysicalInternet(cm, network, null)) return
+                    synchronized(netLock) {
+                        physicalNetworks.remove(network)
+                        physicalNetworks.add(network)
+                        // 只在当前无网时顶上。有网时不抢 —— 选哪一条是默认网络回调的职责,
+                        // 这里擅自切换会在 Wi-Fi 与蜂窝同时在线时把流量绑到蜂窝上。
+                        if (currentPhysicalNetwork == null) switchTo(network)
+                    }
+                }
+
+                override fun onCapabilitiesChanged(
+                    network: Network,
+                    networkCapabilities: NetworkCapabilities,
+                ) {
+                    val ok = isPhysicalInternet(cm, network, networkCapabilities)
+                    synchronized(netLock) {
+                        if (ok) {
+                            physicalNetworks.remove(network)
+                            physicalNetworks.add(network)
+                            if (currentPhysicalNetwork == null) switchTo(network)
+                        } else {
+                            // 失去上网能力等同于消失 (受限 APN、认证门户未过等)。
+                            physicalNetworks.remove(network)
+                            if (currentPhysicalNetwork == network) {
+                                switchTo(physicalNetworks.lastOrNull())
+                            }
+                        }
+                    }
+                }
+
+                override fun onLost(network: Network) {
+                    synchronized(netLock) {
+                        physicalNetworks.remove(network)
+                        if (currentPhysicalNetwork == network) {
+                            // 退到还活着的那条; 一条都不剩才是真正的全网不可达。
+                            switchTo(physicalNetworks.lastOrNull())
+                        }
+                    }
+                }
+            }
+            physicalNetworkCallback = physCb
+            runCatching {
+                val req = NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    // 必须显式排除 VPN: 否则我们自己的 tun0 也会匹配进来, 隧道一起
+                    // 就把自己当成物理网, 闸门永远判「有网」。
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                    .build()
+                cm.registerNetworkCallback(req, physCb)
+            }.onFailure {
+                physicalNetworkCallback = null
+                LogStore.append("[core] registerNetworkCallback(物理网) 异常: ${it.message}")
             }
         }
 
@@ -901,7 +1016,7 @@ class CoreService : VpnService() {
         }
         // 必须同步: startLocked 在没有 uriOverride 时正是取 serviceConfig.uri 建连。
         // 不更新的话, 下一次重启 (无论来自内核请求还是用户) 都会回到刚被判死的节点。
-        serviceConfig.uri = nodeUri
+        updateConfig { it.copy(uri = nodeUri) }
         val nodes = if (serviceConfig.nodes.isNotEmpty()) {
             serviceConfig.nodes
         } else {
@@ -979,14 +1094,14 @@ class CoreService : VpnService() {
     }
 
     fun setNodeInternal(uri: String): Boolean {
-        serviceConfig.uri = uri
+        updateConfig { it.copy(uri = uri) }
         return if (isRunningInternal()) {
             native(false) { MirageNative.setNode(uri) }
         } else true
     }
 
     fun setPoolSizeInternal(poolSize: Int): Boolean {
-        serviceConfig.poolSize = poolSize
+        updateConfig { it.copy(poolSize = poolSize) }
         return if (isRunningInternal()) {
             native(false) { MirageNative.setPoolSize(poolSize) }
         } else true
@@ -1001,22 +1116,22 @@ class CoreService : VpnService() {
 
     fun setRulesInternal(json: String): Boolean = native(false) { MirageNative.setRules(json) }
     fun setBlockQuicInternal(block: Boolean): Boolean {
-        serviceConfig.blockQuic = block
+        updateConfig { it.copy(blockQuic = block) }
         return if (isRunningInternal()) native(false) { MirageNative.setBlockQuic(block) } else true
     }
     fun isBlockQuicInternal(): Boolean =
         if (isRunningInternal()) native(serviceConfig.blockQuic) { MirageNative.isBlockQuic() } else serviceConfig.blockQuic
     fun setUdpMuxInternal(enabled: Boolean): Boolean {
         log("[core] 切换 UDP Mux: $enabled")
-        serviceConfig.udpMux = enabled
+        updateConfig { it.copy(udpMux = enabled) }
         return if (isRunningInternal()) native(false) { MirageNative.setUdpMux(enabled) } else true
     }
     fun isUdpMuxInternal(): Boolean =
         if (isRunningInternal()) native(serviceConfig.udpMux) { MirageNative.isUdpMux() } else serviceConfig.udpMux
     fun clearDnsCacheInternal(): Boolean = native(false) { MirageNative.clearDnsCache() }
     fun setDnsServersInternal(directDns: String, remoteDns: String): Boolean {
-        serviceConfig.directDns = directDns
-        serviceConfig.remoteDns = remoteDns
+        updateConfig { it.copy(directDns = directDns) }
+        updateConfig { it.copy(remoteDns = remoteDns) }
         return if (isRunningInternal()) native(false) { MirageNative.setDnsServers(directDns, remoteDns) } else true
     }
     fun getDirectDnsInternal(): String = serviceConfig.directDns
@@ -1261,7 +1376,7 @@ class CoreService : VpnService() {
         override fun closeAllConnections(): Int =
             native(0) { MirageNative.closeAllConnections() }
         override fun setOutboundMode(mode: Int): Boolean {
-            serviceConfig.outboundMode = mode
+            updateConfig { it.copy(outboundMode = mode) }
             return if (isRunningInternal()) native(false) { MirageNative.setOutboundMode(mode) } else true
         }
         override fun getOutboundMode(): Int {
@@ -1277,26 +1392,26 @@ class CoreService : VpnService() {
         // 设置必须显式重推, 否则内核一直用启动时那份快照 —— 表现为「改了检查间隔
         // 要重连才生效」「关掉自动重连后仍会自己切节点」。
         override fun setAutoReconnect(enabled: Boolean): Boolean {
-            serviceConfig.autoReconnect = enabled
+            updateConfig { it.copy(autoReconnect = enabled) }
             pushFailoverPolicy()
             return true
         }
         override fun isAutoReconnect(): Boolean = serviceConfig.autoReconnect
         override fun setCheckInterval(interval: Int): Boolean {
-            serviceConfig.checkIntervalSec = interval.coerceAtLeast(5)
+            updateConfig { it.copy(checkIntervalSec = interval.coerceAtLeast(5)) }
             pushFailoverPolicy()
             return true
         }
         override fun getCheckInterval(): Int = serviceConfig.checkIntervalSec
         override fun setFailoverMode(mode: String?): Boolean {
-            serviceConfig.failoverMode = mode ?: "best"
+            updateConfig { it.copy(failoverMode = mode ?: "best") }
             pushFailoverPolicy()
             return true
         }
         override fun getFailoverMode(): String = serviceConfig.failoverMode
         override fun updateNodes(nodesJson: String?): Boolean {
             if (!nodesJson.isNullOrBlank()) {
-                serviceConfig.nodes = NodeStore.parseNodesJson(nodesJson)
+                updateConfig { it.copy(nodes = NodeStore.parseNodesJson(nodesJson)) }
                 // 下沉方案 P3: 同步给内核, 内核的看门狗据此选路。形状与
                 // parseNodesJson 一致, 无需转换。UI 进程没装原生库, 只能走这条
                 // AIDL 路径下发, 不能在 VpnRepository 里直接调 setNodeList。
@@ -1352,8 +1467,9 @@ class CoreService : VpnService() {
                 MirageNative.FAILOVER_RESTART_REQUESTED -> "请求重启"
                 else -> "未知($kind)"
             }
-            // 节点 URI 含密码, 只记前缀 —— core.log 可被用户导出分享。
-            val redacted = if (nodeUri.length > 24) nodeUri.take(24) + "..." else nodeUri
+            // 节点 URI 含密码, 只记 host:port —— core.log 可被用户导出分享。
+            // 不要改回前缀截断: mirage:// 占 9 字符, 截断等于把口令前缀写进日志。
+            val redacted = Node.redact(nodeUri)
             val inst = active
             if (inst == null) {
                 // 服务已销毁而内核任务尚未退出时会落到这里。丢弃是对的:
@@ -1437,7 +1553,21 @@ class CoreService : VpnService() {
             "126.0.0.0" to 8,
             "128.0.0.0" to 3,
             "160.0.0.0" to 5,
-            "168.0.0.0" to 6,
+            // 168.0.0.0/6 会覆盖 168-171, 把 169.254.0.0/16 (链路本地 / APIPA) 一并吞进隧道,
+            // 与上面注释声明的排除项矛盾。拆成十段, 精确挖掉 169.254/16:
+            // 无 DHCP 时的直连设备 (部分打印机、投屏回退) 走的就是这个网段,
+            // 被卷进隧道后在「绕过局域网」开启时仍然不通, 而用户以为自己已经绕过了。
+            "168.0.0.0" to 8,
+            "169.0.0.0" to 9,
+            "169.128.0.0" to 10,
+            "169.192.0.0" to 11,
+            "169.224.0.0" to 12,
+            "169.240.0.0" to 13,
+            "169.248.0.0" to 14,
+            "169.252.0.0" to 15,
+            // 169.254.0.0/16 刻意缺席 —— 这一行的"没有"就是修复本身, 不要补上。
+            "169.255.0.0" to 16,
+            "170.0.0.0" to 7,
             "172.0.0.0" to 12,
             "172.32.0.0" to 11,
             "172.64.0.0" to 10,

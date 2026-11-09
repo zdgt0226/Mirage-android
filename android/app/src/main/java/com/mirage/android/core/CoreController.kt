@@ -244,8 +244,16 @@ object CoreController {
         }.getOrDefault("{}")
     fun getDiagnosticSnapshotJson(): String =
         call { it.diagnosticSnapshotJson } ?: "{}"
+    /**
+     * 清空内核日志。**未绑定或 Binder 异常时返回 false, 不得回退 true。**
+     *
+     * 原实现是 `?: true`: :core 崩了、还没就绪、或 Binder 抛异常时一律报成功,
+     * 调用方 (VpnRepository.clearLogs) 以为已清空, 跨进程中断被彻底掩盖。
+     * 本文件其余 call 包装的默认值都偏向失败侧 (isHealthy ?: false、testNode ?: -1、
+     * start ?: -100), 只有这一个反着来。
+     */
     fun clearNativeLogs(): Boolean =
-        call { it.clearNativeLogs() } ?: true
+        call { it.clearNativeLogs() } ?: false
     fun getLogs(): String =
         call { it.logs } ?: ""
     fun closeConnection(id: Long): Boolean {
