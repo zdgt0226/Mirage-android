@@ -312,6 +312,37 @@ API 30 / API 34 的回退（下限机是 API 28）。两个必踩的坑：(1) �
 `PoolStats::record_latency(elapsed)`（`pool.rs:939`、`:1406` 实际在调），
 而不是那个没人写的原子。
 
+#### `:core` 没 `start()` 过时，一切原生查询都返回默认值（2026-11-09 实测）
+
+`CoreService` 的原生守卫 `native(default) { ... }` 以 `NativeLoader.isLoaded()`
+为闸门，而 **`NativeLoader.load()` 只在 `onStartCommand` 里调用一次**
+（`CoreService.kt:376`）。守卫原则第 3 条明写：「绝不在查询/设置等非启动路径隐式
+触发 `NativeLoader.load`（内核选择必须只发生在受控的启动流程中）」—— 这是为运行时
+换核与符号门禁定的规矩，**不要为了让某个查询能用而破例**。
+
+后果：`:core` 若只被 `bindService` 拉起（Activity 可见即绑定）而从未 `start()` 过，
+`isRunning` / `getStats` / `testNode` / `isHealthy` 等**全部返回安全默认值**。
+对 `testNode` 来说默认值是 `-1`，界面显示「不可用」。
+
+**这一条直接决定了节点测速的默认值不能简单改成 `connect`。**
+真机对照（SO-02K，Wi-Fi 同网段，本地 v0.16.2 服务端 ×2）：
+
+| VPN 状态 | `connect` 测速结果 | 服务端新增成功握手 |
+| :--- | :--- | :--- |
+| 未连接 | 两个节点全「不可用」 | **0** |
+| 已连接 | 94ms / 92ms | **17** |
+
+而未连接正是用户最常测速的时机（连之前挑节点）。
+
+**现行解法**：`NodeRepository.effectiveMethod(requested, coreRunning)` ——
+请求 `connect` 但内核未运行时降级为 `tcp`，并把降级事实记在
+`Node.latencyTcpOnly` 上；节点行显示成 `TCP 28ms` 且**刻意不走绿/黄/红分档**
+（分档是「节点好不好」的判断，而 TCP 数字回答不了这个问题，用中性色不让它冒充健康）。
+显式选 `tcp` 时不因连上而偷偷升级 —— 否则同一设置在不同时刻量出不同含义的数字。
+
+同一节点的实测对照很能说明问题：**TCP 28ms vs 完整握手 110ms**，差四倍，
+而且前者对「协议能不能通」零信息量。
+
 #### 排查盲区：断开状态下 `core.log` 不刷新（2026-11-09 踩到）
 
 `core.log` 由 `CoreService` 的 `logJob` 每 60s 落盘，而该 job 只在 VPN 运行时跑。

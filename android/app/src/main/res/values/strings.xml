@@ -462,4 +462,5 @@
     <string name="node_menu_more">更多操作</string>
     <string name="status_upstream_down">隧道已建立，但上游不可用</string>
     <string name="status_upstream_down_hint">节点握手失败，流量无法转发。请换节点或检查服务端。</string>
+    <string name="node_latency_tcp_fmt">TCP %1$dms</string>
 </resources>

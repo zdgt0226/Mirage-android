@@ -351,6 +351,11 @@ internal fun nodeLatencyDisplay(node: Node): Pair<String, Color> {
         node.isTesting -> stringResource(R.string.node_testing) to colors.inkSecondary
         node.testError != null -> stringResource(R.string.node_unreachable) to colors.error
         node.latencyMs == null -> stringResource(R.string.node_untested) to colors.inkSecondary
+        // 只量了 TCP 连通性: 带「TCP」前缀, 并**刻意不走绿/黄/红分档**。
+        // 分档颜色是「这个节点好不好」的判断, 而 TCP 数字回答不了这个问题 ——
+        // 节点 TCP 可达而协议握手失败时它照样很小。用中性色, 不让它冒充健康。
+        node.latencyTcpOnly ->
+            stringResource(R.string.node_latency_tcp_fmt, node.latencyMs) to colors.inkSecondary
         node.latencyMs <= RTT_GOOD_MS -> "${node.latencyMs}ms" to colors.connected
         node.latencyMs <= RTT_FAIR_MS -> "${node.latencyMs}ms" to colors.ginger
         else -> "${node.latencyMs}ms" to colors.error

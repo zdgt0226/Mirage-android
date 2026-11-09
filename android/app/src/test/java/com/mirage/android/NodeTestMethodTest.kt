@@ -38,6 +38,42 @@ class NodeTestMethodTest {
     }
 
     @Test
+    fun `内核未运行时 connect 降级为 tcp`() {
+        // CoreService 的原生守卫只在启动路径调 NativeLoader.load (守卫原则第 3 条:
+        // 查询路径不得隐式装载, 内核选择必须只发生在受控启动流程里)。于是 :core
+        // 只被 bind 拉起、从未 start() 过时, MirageNative.testNode 必返回 -1,
+        // 每个节点都显示「不可用」—— 而未连接正是最常测速的时机。
+        // 真机 2026-11-09 (SO-02K + 本地 v0.16.2): 未连接时两节点全不可用、服务端
+        // 零握手; 连接后同样操作得 94ms/92ms 且服务端新增 17 次成功握手。
+        assertEquals(
+            NodeRepository.METHOD_TCP,
+            NodeRepository.effectiveMethod(NodeRepository.METHOD_CONNECT, coreRunning = false),
+        )
+    }
+
+    @Test
+    fun `内核运行时 connect 保持 connect`() {
+        assertEquals(
+            NodeRepository.METHOD_CONNECT,
+            NodeRepository.effectiveMethod(NodeRepository.METHOD_CONNECT, coreRunning = true),
+        )
+    }
+
+    @Test
+    fun `显式选 tcp 时不受内核运行状态影响`() {
+        // 降级只针对 connect。用户显式选了 tcp 就是 tcp, 不该因为连上了就偷偷升级 ——
+        // 那会让同一个设置在不同时刻量出不同含义的数字。
+        assertEquals(
+            NodeRepository.METHOD_TCP,
+            NodeRepository.effectiveMethod(NodeRepository.METHOD_TCP, coreRunning = true),
+        )
+        assertEquals(
+            NodeRepository.METHOD_TCP,
+            NodeRepository.effectiveMethod(NodeRepository.METHOD_TCP, coreRunning = false),
+        )
+    }
+
+    @Test
     fun `未知值落到 tcp 而不是 connect`() {
         // 保守侧: 未知值不该触发对每个节点的完整协议握手。
         assertEquals(NodeRepository.METHOD_TCP, NodeRepository.normalizeTestMethod(""))

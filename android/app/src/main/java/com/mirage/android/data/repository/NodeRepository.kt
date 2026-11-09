@@ -190,8 +190,9 @@ class NodeRepository(private val context: Context) {
         val node = current[index]
         updateNodeTesting(index, isTesting = true)
 
-        val rtt = doTest(node, _testMethod.value)
-        updateNodeLatency(index, rtt)
+        val method = effectiveMethod(_testMethod.value, CoreController.isRunning())
+        val rtt = doTest(node, method)
+        updateNodeLatency(index, rtt, method == METHOD_TCP)
         rtt
     }
 
@@ -206,12 +207,13 @@ class NodeRepository(private val context: Context) {
         // 全部标记为测试中
         _nodes.value = list.map { it.copy(isTesting = true, testError = null) }
 
-        val method = _testMethod.value
+        val method = effectiveMethod(_testMethod.value, CoreController.isRunning())
+        val tcpOnly = method == METHOD_TCP
         val gate = kotlinx.coroutines.sync.Semaphore(MAX_PARALLEL_TESTS)
         val deferredList = list.mapIndexed { index, node ->
             async {
                 val rtt = gate.withPermit { doTest(node, method) }
-                updateNodeLatency(index, rtt)
+                updateNodeLatency(index, rtt, tcpOnly)
                 Pair(index, rtt)
             }
         }
@@ -231,12 +233,13 @@ class NodeRepository(private val context: Context) {
         if (list.isEmpty()) return@withContext emptyList()
         _isTestingAll.value = true
         _nodes.value = list.map { it.copy(isTesting = true, testError = null) }
-        val method = _testMethod.value
+        val method = effectiveMethod(_testMethod.value, CoreController.isRunning())
+        val tcpOnly = method == METHOD_TCP
         val gate = kotlinx.coroutines.sync.Semaphore(MAX_PARALLEL_TESTS)
         val results = list.mapIndexed { index, node ->
             async {
                 val rtt = gate.withPermit { doTest(node, method) }
-                updateNodeLatencySafe(index, rtt)
+                updateNodeLatencySafe(index, rtt, tcpOnly)
                 Pair(index, rtt)
             }
         }.awaitAll()
@@ -280,27 +283,29 @@ class NodeRepository(private val context: Context) {
         }
     }
 
-    private suspend fun updateNodeLatencySafe(index: Int, latency: Long) {
+    private suspend fun updateNodeLatencySafe(index: Int, latency: Long, tcpOnly: Boolean) {
         updateMutex.withLock {
             val list = _nodes.value.toMutableList()
             if (index in list.indices) {
                 list[index] = list[index].copy(
                     latencyMs = if (latency >= 0) latency else null,
                     isTesting = false,
-                    testError = if (latency < 0) context.getString(R.string.node_unreachable) else null
+                    testError = if (latency < 0) context.getString(R.string.node_unreachable) else null,
+                    latencyTcpOnly = latency >= 0 && tcpOnly
                 )
                 _nodes.value = list
             }
         }
     }
 
-    private fun updateNodeLatency(index: Int, latency: Long) {
+    private fun updateNodeLatency(index: Int, latency: Long, tcpOnly: Boolean) {
         val list = _nodes.value.toMutableList()
         if (index in list.indices) {
             list[index] = list[index].copy(
                 latencyMs = if (latency >= 0) latency else null,
                 isTesting = false,
-                testError = if (latency < 0) context.getString(R.string.node_unreachable) else null
+                testError = if (latency < 0) context.getString(R.string.node_unreachable) else null,
+                latencyTcpOnly = latency >= 0 && tcpOnly
             )
             _nodes.value = list
         }
@@ -354,6 +359,26 @@ class NodeRepository(private val context: Context) {
             METHOD_TCP -> METHOD_TCP
             else -> if (raw == null) DEFAULT_TEST_METHOD else METHOD_TCP
         }
+
+        /**
+         * 本次实际能用的测法。
+         *
+         * `connect` 走 `CoreController.testNode` → `:core` 的 `MirageNative.testNode`，
+         * 而 `CoreService` 的原生守卫只在**启动路径**里调 `NativeLoader.load`
+         * （`CoreService.kt:376`，守卫原则第 3 条明令不得在查询路径隐式装载，
+         * 因为内核选择必须只发生在受控的启动流程中）。所以 `:core` 只被 bind 拉起、
+         * 从未 `start()` 过时，`testNode` 必然返回 -1，每个节点都显示「不可用」——
+         * 而未连接正是用户最常测速的时机。
+         *
+         * 真机实测（2026-11-09，SO-02K + 本地 v0.16.2 服务端）：
+         * 未连接时 `connect` 两个节点全「不可用」、服务端零握手；连接后同样操作
+         * 得到 94ms / 92ms 且服务端新增 17 次成功握手。
+         *
+         * 因此未运行时降级为 TCP，并把降级事实记在 [Node.latencyTcpOnly] 上，
+         * **不隐瞒**。
+         */
+        fun effectiveMethod(requested: String, coreRunning: Boolean): String =
+            if (requested == METHOD_CONNECT && !coreRunning) METHOD_TCP else requested
 
         @Volatile
         private var instance: NodeRepository? = null

@@ -461,4 +461,5 @@
     <string name="node_menu_more">More actions</string>
     <string name="status_upstream_down">Tunnel up, upstream unreachable</string>
     <string name="status_upstream_down_hint">Handshake with the node is failing, so traffic cannot be forwarded. Switch nodes or check the server.</string>
+    <string name="node_latency_tcp_fmt">TCP %1$dms</string>
 </resources>
