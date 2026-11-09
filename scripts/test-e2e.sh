@@ -40,47 +40,78 @@ set -u
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 cd /root
 
+TEST_STATUS=0
+
 echo "=== 容器内环境 ==="
-ip link set host0 up 2>/dev/null
+ip link set host0 up 2>/dev/null || true
 ip addr add 10.88.0.2/24 dev host0 2>/dev/null || true
-ip link set lo up
+ip link set lo up 2>/dev/null || true
 ip route add default via 10.88.0.1 dev host0 2>/dev/null || true
-echo "host0: $(ip -4 addr show host0 | grep inet | awk '{print $2}')"
+echo "host0: $(ip -4 addr show host0 2>/dev/null | grep inet | awk '{print $2}')"
 
 echo "=== 起 TUN 引擎 (server 在宿主 10.88.0.1:8443) ==="
 RUST_LOG=mirage_core=debug /opt/examples/tun_e2e --server 10.88.0.1 --port 8443 --password test1234 > /root/tun_e2e.log 2>&1 &
 TUN_PID=$!
 sleep 2
 
+if ! kill -0 "$TUN_PID" 2>/dev/null; then
+    echo "[-] TUN 引擎未能启动或异常退出 (PID: $TUN_PID)"
+    TEST_STATUS=1
+fi
+
 echo "=== 配置 TUN 接口与路由 ==="
 ip addr add 198.18.0.1/32 dev mirage0 2>/dev/null || true
-ip link set mirage0 up
+ip link set mirage0 up 2>/dev/null || true
 ip route add 10.88.0.0/24 dev host0 2>/dev/null || true
 ip route add default dev mirage0 2>/dev/null || true
 ip route add 198.18.0.0/15 dev mirage0 2>/dev/null || true
 echo "路由表:"; ip route
 
+if ! ip link show dev mirage0 >/dev/null 2>&1; then
+    echo "[-] TUN 接口 mirage0 配置失败"
+    TEST_STATUS=1
+fi
+
 echo "=== DNS (fake-IP) ==="
 echo "nameserver 198.19.0.53" > /etc/resolv.conf
 # rp_filter 可能丢弃从 TUN 进、源=198.19.x 的回程包, 关掉验证
-sysctl -w net.ipv4.conf.all.rp_filter=0 2>/dev/null
-sysctl -w net.ipv4.conf.mirage0.rp_filter=0 2>/dev/null
-sysctl -w net.ipv4.conf.default.rp_filter=0 2>/dev/null
+sysctl -w net.ipv4.conf.all.rp_filter=0 2>/dev/null || true
+sysctl -w net.ipv4.conf.mirage0.rp_filter=0 2>/dev/null || true
+sysctl -w net.ipv4.conf.default.rp_filter=0 2>/dev/null || true
 echo "--- getent (fake-IP DNS) ---"
-timeout 8 getent hosts www.google.com 2>&1 | head -2
-echo "getent rc=$?"
+getent_out=$(timeout 8 getent hosts www.google.com 2>&1) && getent_rc=0 || getent_rc=$?
+echo "$getent_out" | head -2
+echo "getent rc=$getent_rc"
+if [[ $getent_rc -ne 0 || -z "$getent_out" ]]; then
+    TEST_STATUS=1
+fi
 
 echo "=== HTTPS 经隧道 ==="
-timeout 25 curl -s -o /dev/null -w "google=%{http_code}\n" --connect-timeout 12 https://www.google.com 2>&1 || echo "curl google FAIL"
-timeout 25 curl -s -o /dev/null -w "cloudflare=%{http_code}\n" --connect-timeout 12 https://www.cloudflare.com 2>&1 || echo "curl cf FAIL"
-timeout 25 curl -s -o /dev/null -w "baidu=%{http_code}\n" --connect-timeout 12 https://www.baidu.com 2>&1 || echo "curl baidu FAIL"
-timeout 25 curl -s -o /dev/null -w "cloudflare=%{http_code}\n" --connect-timeout 12 https://www.cloudflare.com 2>&1 || echo "curl cf FAIL"
+run_curl_test() {
+    local target="$1"
+    local label="$2"
+    local fail_msg="$3"
+    local out rc
+    out=$(timeout 25 curl -s -o /dev/null -w "%{http_code}" --connect-timeout 12 "$target" 2>&1) && rc=0 || rc=$?
+    if [[ $rc -eq 0 && "$out" =~ ^[23][0-9]{2}$ ]]; then
+        echo "${label}=${out}"
+    else
+        echo "$fail_msg"
+        TEST_STATUS=1
+    fi
+}
+
+run_curl_test "https://www.google.com" "google" "curl google FAIL"
+run_curl_test "https://www.cloudflare.com" "cloudflare" "curl cf FAIL"
+run_curl_test "https://www.baidu.com" "baidu" "curl baidu FAIL"
+run_curl_test "https://www.cloudflare.com" "cloudflare" "curl cf FAIL"
 
 echo "=== 引擎日志 (连接/DNS) ==="
-tr -d '\000' < /root/tun_e2e.log | grep -aE "TUN-|ERROR" | tail -20
+tr -d '\000' < /root/tun_e2e.log 2>/dev/null | grep -aE "TUN-|ERROR" | tail -20 || true
 
-kill $TUN_PID 2>/dev/null
+kill "$TUN_PID" 2>/dev/null || true
 echo "=== 完成 ==="
+exit $TEST_STATUS
 EOS
 chmod +x "$ROOTFS/root/run-test.sh"
 
@@ -95,18 +126,23 @@ NSPAWN_PID=$!
 # 3. 宿主侧 veth + NAT
 for i in $(seq 1 20); do
     HOST_VETH=$(ip link | grep -oE "${NS_PREFIX}-[^:@]*" | head -1 || true)
-    [[ -n "$HOST_VETH" ]] && break
+    if [[ -n "$HOST_VETH" ]]; then
+        break
+    fi
     sleep 0.5
 done
 if [[ -z "$HOST_VETH" ]]; then
-    echo "!! 未发现宿主 veth 接口"; exit 1
+    echo "!! 未发现宿主 veth 接口" >&2
+    exit 1
 fi
 ip addr add "$NET.1/24" dev "$HOST_VETH" 2>/dev/null || true
 ip link set "$HOST_VETH" up
 echo 1 > /proc/sys/net/ipv4/ip_forward
 OUT_IF="$(ip route | awk '/^default/ {print $5; exit}')"
-iptables -t nat -C POSTROUTING -s "$NET.0/24" -o "$OUT_IF" -j MASQUERADE 2>/dev/null || \
-  iptables -t nat -A POSTROUTING -s "$NET.0/24" -o "$OUT_IF" -j MASQUERADE 2>/dev/null || true
+if [[ -n "$OUT_IF" ]]; then
+    iptables -t nat -C POSTROUTING -s "$NET.0/24" -o "$OUT_IF" -j MASQUERADE 2>/dev/null || \
+      iptables -t nat -A POSTROUTING -s "$NET.0/24" -o "$OUT_IF" -j MASQUERADE 2>/dev/null || true
+fi
 echo "==> 宿主 veth $HOST_VETH 已配置 ($NET.1)"
 
 # 4. 宿主侧起 lite-server
@@ -120,11 +156,25 @@ cat > "$HERE/.build/lite_server.json" <<EOF
 }
 EOF
 "$HERE/.build/mirage-rs-server-bin/mirage-rs" lite-server -c "$HERE/.build/lite_server.json" > "$HERE/.build/server.log" 2>&1 &
-echo $! > "$HERE/.build/server.pid"
+SERVER_PID=$!
+echo "$SERVER_PID" > "$HERE/.build/server.pid"
 sleep 1
+if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    echo "[-] 宿主 lite-server 启动失败" >&2
+    cat "$HERE/.build/server.log" >&2 || true
+    exit 1
+fi
 echo "==> 宿主 lite-server 已启动 ($PORT)"
 
 # 5. 等容器跑完
-wait $NSPAWN_PID || true
+CONTAINER_RC=0
+wait "$NSPAWN_PID" || CONTAINER_RC=$?
 echo "==> 容器测试输出:"
 cat "$HERE/.build/nspawn-test.log"
+
+if [[ $CONTAINER_RC -ne 0 ]]; then
+    echo "[-] E2E 门禁测试失败 (容器退出码: $CONTAINER_RC)" >&2
+    exit "$CONTAINER_RC"
+fi
+
+echo "[✓] E2E 门禁测试通过 (全部端到端链路验证成功)"
