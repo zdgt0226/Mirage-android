@@ -37,6 +37,38 @@ static CURRENT_NODE_URI: Mutex<Option<String>> = Mutex::new(None);
 /// 故障切换看门狗的代次。每次 start() 递增, 旧实例据此自行退出 (防多实例并发)。
 static WATCHDOG_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// 最近一次看门狗判定「连接异常」的单调时刻 (毫秒)。0 = 当前没有未消解的异常。
+///
+/// **只服务于给外壳/界面读的 `isHealthy()`，看门狗自己的决策不读它。**
+///
+/// 为什么需要它: 节点不可用时看门狗会请求外壳重启整核, 而重启建的是新引擎、新池,
+/// `PoolStats::consecutive_failures` 随之归零, `Engine::is_healthy()` 立刻又变 true。
+/// 于是外壳每隔 30-50s 就看到一次「健康」, 持续不可用的节点在界面上表现为红绿跳动,
+/// 用户看到的仍然是「大部分时间一切正常」。
+/// 2026-11-09 真机实测: 生产节点暖池 100% 失败、内核连续请求 8 次重启, 而界面
+/// 全程显示「已连接 (加密隧道保护中)」。
+///
+/// **刻意不在 `stop()` 里清零**: 内核请求的整核重启走的就是 stop + start,
+/// 在 stop 里清零等于把这个机制自己废掉。用户主动断开的残留由时间窗兜底,
+/// 且断开期间外壳的 `stopTelemetry()` 会把 `upstreamHealthy` 复位, 界面看不到。
+static LAST_UNHEALTHY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 判定异常后，界面保持「上游不可用」的最短时长。
+///
+/// 取 40s: 看门狗默认 15s 一轮、连续 2 次才请求重启, 一个「判异常 → 重启 → 新池」
+/// 周期约 30-50s。窗口短于它就会在重启后的空窗期漏出一次「健康」。
+const UNHEALTHY_STICKY_MS: u64 = 40_000;
+
+/// 进程启动时刻。用单调时钟而非系统时钟: 系统时间回拨会让窗口判断失效。
+static PROCESS_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+fn monotonic_ms() -> u64 {
+    PROCESS_START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
+
 struct RunState {
     /// 唯一的引擎句柄来源是 `stack.engine()` —— 它读 `TunStack` 内部的 `ArcSwap`,
     /// 永远是当前引擎。这里**刻意不存** `Arc<Engine>` 快照: `setNode` 热切换节点时
@@ -461,7 +493,8 @@ fn spawn_failover_watchdog() {
         return;
     };
     let rt = state.rt.clone();
-    let rt_for_task = state.rt.clone();
+    // 任务内仅持有 Handle 而非 Arc<Runtime>: 避免旧看门狗退出时在自身 worker 线程中 drop 最后一个 Arc 触发 tokio panic。
+    let handle_for_task = state.rt.handle().clone();
 
     rt.spawn(async move {
         // 连续失败计数: 与外壳原实现一致, 两次才动手, 避免单次抖动触发切换。
@@ -485,11 +518,20 @@ fn spawn_failover_watchdog() {
             }
 
             // 取当前运行态; 引擎已停止则退出循环 (stop 会 drop RunState)。
-            let Some(state) = RUNTIME
+            //
+            // **只克隆 `Arc<TunStack>`, 绝不克隆整个 `Arc<RunState>`。**
+            // `RunState` 里带着 `rt: Arc<Runtime>`。克隆它就等于让本任务持有一份
+            // runtime 强引用, 而 `stop()` 与本轮并发时最后一个引用会落在这里,
+            // 在迭代结束时于 runtime 自己的 worker 线程上被 drop —— tokio 对此
+            // 直接 panic ("Cannot drop a runtime in a context where blocking is
+            // not allowed"), 且 panic 在 spawn 的任务里, `jni_boundary!` 捕不到。
+            // 2026-11-09 真机两次复现, 第一次只改掉任务捕获的那份 Arc 并未修净,
+            // 正是漏了这里的每轮克隆。`TunStack` 不持有 runtime, 丢在哪个线程都安全。
+            let Some(stack) = RUNTIME
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
-                .cloned()
+                .map(|s| s.stack.clone())
             else {
                 tracing::debug!("[failover] 运行态已释放, 看门狗退出");
                 return;
@@ -514,13 +556,23 @@ fn spawn_failover_watchdog() {
                 continue;
             }
 
-            if state.stack.engine().is_healthy() {
+            if stack.engine().is_healthy() {
                 consecutive_failures = 0;
                 dynamic_backoff_sec = 0;
+                // 清除「上游不可用」必须要有**成功的证据**, 而不只是失败计数为 0。
+                //
+                // 重启后的新池 consecutive_failures 本来就是 0, is_healthy() 当即为 true,
+                // 照它清除就等于每次重启都把故障证据抹掉 —— 那正是要修的毛病。
+                // latency_ms() 有值意味着池至少成功握手过一次 (样本只由 record_latency
+                // 写入, 而那是一次成功建连的唯一路径)。
+                if stack.engine().latency_ms().is_some() {
+                    LAST_UNHEALTHY_MS.store(0, Ordering::SeqCst);
+                }
                 continue;
             }
 
             consecutive_failures += 1;
+            LAST_UNHEALTHY_MS.store(monotonic_ms().max(1), Ordering::SeqCst);
             tracing::warn!("[failover] 内核判定连接异常 (第 {consecutive_failures} 次)");
             if consecutive_failures < 2 {
                 continue;
@@ -558,7 +610,7 @@ fn spawn_failover_watchdog() {
 
             // 选路: best = 并发测速取最低 RTT; 其余 = 按清单顺序取第一个候选。
             let chosen = if policy.mode == "best" {
-                match pick_best_node(&rt_for_task, &candidates).await {
+                match pick_best_node(&handle_for_task, &candidates).await {
                     Some(u) => u,
                     None => {
                         dynamic_backoff_sec = failover::escalate_backoff(dynamic_backoff_sec);
@@ -581,7 +633,7 @@ fn spawn_failover_watchdog() {
             };
 
             // 热切换: 与 setNode 同路径, 不需要新的 TUN fd。
-            match switch_engine_to(&state, &chosen) {
+            match switch_engine_to(&stack, &chosen) {
                 Ok(()) => {
                     dynamic_backoff_sec = 0;
                     tracing::info!("[failover] 内核已热切换: {}", redact_uri(&chosen));
@@ -602,7 +654,7 @@ fn spawn_failover_watchdog() {
 
 /// 并发测速取最低 RTT 的候选; 全部不可达时返回 `None`。
 async fn pick_best_node(
-    rt: &Arc<tokio::runtime::Runtime>,
+    rt: &tokio::runtime::Handle,
     candidates: &[mirage_core::failover::NodeEntry],
 ) -> Option<String> {
     let mut tasks = Vec::new();
@@ -653,7 +705,7 @@ async fn pick_best_node(
 }
 
 /// 把运行中的引擎热替换到指定节点 (与 `setNode` 同路径)。
-fn switch_engine_to(state: &Arc<RunState>, uri: &str) -> Result<(), String> {
+fn switch_engine_to(stack: &Arc<TunStack>, uri: &str) -> Result<(), String> {
     let node_uri = mirage_core::node_uri::NodeUri::parse(uri).map_err(|e| e.to_string())?;
     let mut node = NodeInfo::from_node_uri(&node_uri);
     node.pool_size = CURRENT_POOL_SIZE.load(Ordering::Relaxed);
@@ -662,7 +714,7 @@ fn switch_engine_to(state: &Arc<RunState>, uri: &str) -> Result<(), String> {
     // jni_boundary! 捕获不到, 表现为看门狗静默死亡。Engine::new 本身是同步的,
     // 它只要求处于 runtime 上下文中, 而这里已经满足。
     let new_engine = Engine::new(&node).map_err(|e| e.to_string())?;
-    state.stack.swap_engine(new_engine);
+    stack.swap_engine(new_engine);
     *CURRENT_NODE_URI.lock().unwrap_or_else(|e| e.into_inner()) = Some(uri.to_string());
     Ok(())
 }
@@ -704,10 +756,16 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_isHealthy(
 ) -> jboolean {
     jni_boundary!(0, {
         let guard = RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
-        match guard.as_ref() {
-            Some(s) => s.stack.engine().is_healthy() as jboolean,
-            None => 0,
-        }
+        let engine_ok = match guard.as_ref() {
+            Some(s) => s.stack.engine().is_healthy(),
+            None => return 0,
+        };
+        // 迟滞: 判过异常之后的 UNHEALTHY_STICKY_MS 内一律报不健康, 哪怕引擎此刻
+        // 说自己是好的 —— 重启会把池的失败计数清零, 不压住这段空窗, 界面会在
+        // 持续不可用的节点上红绿跳动 (见 LAST_UNHEALTHY_MS 的注释)。
+        let marked = LAST_UNHEALTHY_MS.load(Ordering::SeqCst);
+        let sticky = marked != 0 && monotonic_ms().saturating_sub(marked) < UNHEALTHY_STICKY_MS;
+        (engine_ok && !sticky) as jboolean
     })
 }
 

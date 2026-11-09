@@ -280,6 +280,57 @@ API 30 / API 34 的回退（下限机是 API 28）。两个必踩的坑：(1) �
 是显式的重算触发器，弹层回调里自增。删掉它的表现是：改完 MTU 回到设置页，
 副标题还是旧值。
 
+#### 看门狗任务**绝不能**持有 `Arc<Runtime>`，整个 `RunState` 也不行（2026-11-09 真机）
+
+症状：
+```
+PANIC: panicked at tokio-1.53.1/src/runtime/blocking/shutdown.rs:51:21:
+Cannot drop a runtime in a context where blocking is not allowed.
+```
+S24+ 上 8 次整核重启炸 2 次（竞态）。panic 发生在 spawn 的任务里，`jni_boundary!`
+捕不到，进程不死但旧 runtime 的 shutdown 中途断掉。
+
+根因：`RunState` 持 `rt: Arc<Runtime>`。重启路径是 `stop()` 取走并 drop 一份，
+`start()` 再建新的。谁手里是**最后一个** `Arc` 就由谁来 drop runtime —— 而如果那
+发生在该 runtime 自己的 worker 线程上，tokio 直接 panic。
+
+**本仓库踩到的是两处，修第一处不够：**
+1. 任务捕获的 `let rt_for_task = state.rt.clone()`（只为了传给 `pick_best_node`）。
+   改成 `state.rt.handle().clone()`，`pick_best_node` 参数改 `&tokio::runtime::Handle`
+   —— `Handle` 不保活 runtime。
+2. **看门狗每一轮循环里的 `RUNTIME...cloned()`**，克隆的是整个 `Arc<RunState>`，
+   里面就带着 `rt`。这份在迭代结束时于 worker 线程上释放。
+   改成只克隆 `Arc<TunStack>`（`.map(|s| s.stack.clone())`），
+   `switch_engine_to` 的参数一并从 `&Arc<RunState>` 改为 `&Arc<TunStack>`
+   —— 它本来就只用 `state.stack`。`TunStack` 不持有 runtime。
+
+只修第 1 处后真机仍复现（2026-11-09 05:32:08）。**改这块代码时的规则：
+看门狗任务可达的对象里不得出现任何 `Arc<Runtime>`，`Arc<RunState>` 也算。**
+
+修好之后有一个可观测的副作用可作验收标志：日志里**不再出现
+`[failover] 看门狗 gen=N 已被接替, 退出`**。因为 `stop()` 现在总是最后一个持有者，
+runtime 在 Kotlin 线程上干净关闭并带走它的所有任务，旧看门狗根本醒不过来。
+反过来说，这行日志若重新出现，说明又有谁在任务里攥着 runtime 不放。
+
+#### 重启循环会抹掉故障证据，给界面的健康位必须有迟滞（2026-11-09 真机）
+
+节点持续不可用时，看门狗请求整核重启，而重启建的是新引擎新池，
+`PoolStats::consecutive_failures` 随之归零，`Engine::is_healthy()` 立刻又是 true。
+于是界面每隔 30-50s 就被喂一次「健康」，持续坏掉的节点表现为红绿跳动。
+
+解法在 `mirage-jni`：`LAST_UNHEALTHY_MS`（单调时钟）+ `UNHEALTHY_STICKY_MS = 40s`。
+看门狗判异常时写入；**清零要求有成功的证据** —— `is_healthy()` 为真
+**且** `engine.latency_ms().is_some()`（延迟样本只由 `record_latency` 写入，
+而那是一次成功建连的唯一路径）。只看失败计数为 0 是不够的：重启后的新池本来就是 0。
+给外壳/界面读的 `isHealthy()` 套这层迟滞，**看门狗自己的决策不读它**。
+
+**刻意不在 `stop()` 里清零** —— 内核请求的重启走的就是 stop + start，在那里清零
+等于自废。用户主动断开的残留由时间窗兜底，且断开期间外壳 `stopTelemetry()` 会把
+`upstreamHealthy` 复位，界面看不到。
+
+真机验收（SO-02K，两台本地服务端全停）：5.5 分钟 21 次界面采样**全部**
+「隧道已建立，但上游不可用」，零次跳回绿色，同期内核确实在反复判异常并请求重启。
+
 #### 连接状态与诊断信号：三处「算出来却没用上」（2026-11-09 实测）
 
 用户报「软件自己测试总是提示连接成功，但节点其实不可用」。查下来不是一个 bug，
@@ -308,9 +359,16 @@ API 30 / API 34 的回退（下限机是 API 28）。两个必踩的坑：(1) �
 原子；该原子在 `outbound.rs:501` 初始化为 `u64::MAX`，而**裁剪树里没有任何一处写它**。
 上游唯一的写入方是 `src/startup.rs:493`，走 **eBPF**（socket cookie 读内核
 `srtt_us`）。Android 裁剪树没有 `startup.rs`，普通应用也拿不到 eBPF ——
-两条都断，所以这个值永远取不到。**未修**；修法是改读暖池已有的
+两条都断，所以这个值永远取不到。原记录的修法是改读暖池已有的
 `PoolStats::record_latency(elapsed)`（`pool.rs:939`、`:1406` 实际在调），
 而不是那个没人写的原子。
+**（2026-11-09 已修）** 实际改法比这里设想的更小：`OutboundNode::latency_http_ms()`
+本来就读 `PoolStats::latency_ms()`（池的握手中位数），而
+`OutboundNode::latency_ms("rtt")` 本来就是 `latency_rtt_ms().or_else(latency_http_ms)`。
+缺口只在 `Engine::latency_ms()` 绕过了这个 `or_else` —— 改成调 `n.latency_ms("rtt")`
+即可，不新增任何统计实现。真机实测：此前永远 `--`，改后显示「隧道 RTT: 22ms」。
+**不要再新增第二个中位数实现**（本轮一度写出过 `median_latency_ms`，与既有
+`PoolStats::latency_ms` 重复且决胜规则不同，已撤回）。
 
 #### `:core` 没 `start()` 过时，一切原生查询都返回默认值（2026-11-09 实测）
 
