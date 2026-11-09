@@ -49,11 +49,6 @@ impl TunDevice {
     pub fn pop_tx(&mut self) -> Option<PooledBuf> {
         self.tx.pop_front()
     }
-
-    /// tx 队列是否还有未取走的包 (决定 pump 是否要再写一轮)。
-    pub fn has_tx(&self) -> bool {
-        !self.tx.is_empty()
-    }
 }
 
 pub struct TunRxToken(pub PooledBuf);

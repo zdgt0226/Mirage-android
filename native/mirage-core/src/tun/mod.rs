@@ -102,7 +102,6 @@ pub struct TunStack {
     stopped: Arc<AtomicBool>,
     /// 泵的退出信号 (stop 时 notify)。
     pub stop_notify: Arc<Notify>,
-    cfg: TunConfig,
     /// 原始 TUN fd (stop 时原子关闭; 读线程持 dup 副本)。
     fd: std::sync::atomic::AtomicI32,
     /// UDP 直接数据报引擎 (按 (client,dst) 建流)。
@@ -191,7 +190,6 @@ impl TunStack {
             stopped: Arc::new(AtomicBool::new(false)),
             stop_notify: Arc::new(Notify::new()),
             engine: Arc::new(arc_swap::ArcSwap::from(Arc::clone(&engine))),
-            cfg,
             fd: std::sync::atomic::AtomicI32::new(fd),
             wake_pipe_write: std::sync::atomic::AtomicI32::new(wake_pipe_write),
         });
@@ -424,11 +422,6 @@ impl TunStack {
         } = &mut *g;
         device.push_rx(pkt);
         iface.poll(smol_now(Instant::now()), device, sockets);
-    }
-
-    /// DNS 地址 (std 类型, 供应答构包)。
-    pub fn dns_addr_std(&self) -> std::net::Ipv4Addr {
-        self.cfg.dns_addr
     }
 
     /// 直接把一个 IP 包写回 TUN fd (UDP 回程/DNS 应答用)。无锁内核直写 (带 EAGAIN 重试)。

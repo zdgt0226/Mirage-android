@@ -21,7 +21,7 @@ use tracing::{debug, warn};
 
 use crate::proxy::outbound::Address;
 use crate::proxy::tunnel::Tunnel;
-use crate::tun::{lock_inner, TunStack, SOCK_BUF};
+use crate::tun::{lock_inner, TunStack};
 
 /// 活跃 TCP 连接计数 (含隧道/直连, 流量监测用)。
 pub static TCP_ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -722,11 +722,6 @@ async fn relay_proxy(
         req_total,
         is_reused
     );
-}
-
-#[allow(dead_code)]
-fn _sock_buf_const() -> usize {
-    SOCK_BUF
 }
 
 /// Fake-IP 直连目标 IP 解析裁决结果

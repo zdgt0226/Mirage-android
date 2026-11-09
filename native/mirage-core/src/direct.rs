@@ -881,16 +881,6 @@ pub fn route_decision(
     route_decision_sourced(domain, ip, port, protocol).0
 }
 
-/// 域名决策 (DNS 阶段使用)
-pub fn decide_domain(domain: &str) -> RuleAction {
-    route_decision(Some(domain), None, None, None)
-}
-
-/// IP 决策 (TCP/UDP 阶段使用)
-pub fn decide_ip(ip: IpAddr) -> RuleAction {
-    route_decision(None, Some(ip), None, None)
-}
-
 /// 解析单端口或端口范围字符串 (如 "80,443,8000-8080")
 fn parse_ports(s: &str) -> (Vec<u16>, Vec<(u16, u16)>) {
     let mut singles = Vec::new();

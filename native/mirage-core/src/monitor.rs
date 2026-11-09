@@ -192,11 +192,6 @@ pub fn recent_logs() -> Vec<String> {
     global_logger().get_logs_capped(150)
 }
 
-/// 获取全量历史日志 (仅文件导出或离线诊断用)。
-pub fn all_logs() -> Vec<String> {
-    global_logger().get_logs()
-}
-
 /// 导出并清空待处理日志 (流式消费语义，规避 Binder 事务溢出)。
 pub fn drain_recent_logs() -> Vec<String> {
     global_logger().drain_logs()

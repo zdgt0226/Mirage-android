@@ -9,7 +9,6 @@ import android.content.SharedPreferences
 object TunConfigStore {
     private const val PREFS_NAME = "mirage_tun_prefs"
     private const val KEY_MTU = "tun_mtu"
-    private const val KEY_MSS_CLAMP = "tun_mss_clamp"
     private const val KEY_TCP_IDLE = "tun_tcp_idle_sec"
     private const val KEY_BATCH_SIZE = "tun_batch_size"
     private const val KEY_ENABLE_IPV6 = "tun_enable_ipv6"
@@ -46,14 +45,6 @@ object TunConfigStore {
 
     fun setMtu(context: Context, mtu: Int) {
         prefs(context).edit().putInt(KEY_MTU, mtu.coerceIn(1280, 1500)).apply()
-    }
-
-    fun isMssClampEnabled(context: Context): Boolean {
-        return prefs(context).getBoolean(KEY_MSS_CLAMP, true)
-    }
-
-    fun setMssClampEnabled(context: Context, enabled: Boolean) {
-        prefs(context).edit().putBoolean(KEY_MSS_CLAMP, enabled).apply()
     }
 
     fun getTcpIdleTimeoutSec(context: Context): Int {
