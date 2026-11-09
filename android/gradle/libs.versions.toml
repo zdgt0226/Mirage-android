@@ -12,6 +12,8 @@ recyclerview = "1.3.2"
 dynamicanimation = "1.0.0"
 viewpager2 = "1.1.0"
 lifecycle = "2.8.6"
+# activity-compose: BackHandler / PredictiveBackHandler / ComponentActivity.setContent
+activity = "1.9.3"
 fragmentKtx = "1.8.4"
 junit = "4.13.2"
 org-json = "20240303"
@@ -36,6 +38,10 @@ compose-ui = { group = "androidx.compose.ui", name = "ui" }
 compose-material3 = { group = "androidx.compose.material3", name = "material3" }
 compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
 compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+# foundation 显式声明: Pager 与 AnchoredDraggable 都在这里, 不靠 material3 的传递依赖
+compose-foundation = { group = "androidx.compose.foundation", name = "foundation" }
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activity" }
+androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycle" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

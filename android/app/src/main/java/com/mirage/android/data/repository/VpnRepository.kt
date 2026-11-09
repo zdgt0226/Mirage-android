@@ -53,6 +53,23 @@ class VpnRepository(private val context: Context) {
     val outboundMode: StateFlow<Int> = _outboundMode.asStateFlow()
 
     private val prefs = context.getSharedPreferences("mirage_vpn_prefs", Context.MODE_PRIVATE)
+    /**
+     * 上游是否可用。**与 [vpnState] 是两件事, 不要合并。**
+     *
+     * `vpnState == Connected` 只代表内核起来了、TUN 建好了 —— `isRunning()` 读的是
+     * 一个在 `start()` 成功时置位的 bool, 全链路没有任何一环检查过上游握手成功过。
+     * 2026-11-09 真机: 生产节点暖池 100% `Timeout before CCS`, 内核每 15s 请求一次
+     * 重启, 而界面全程显示「已连接 (加密隧道保护中)」。
+     *
+     * 本字段取内核的 `Engine::is_healthy()`（池连续失败 < 3 且隧道未卡死）。
+     * 这个信号一直存在并经 AIDL 暴露, 但在 P3 删掉外壳看门狗之后 Kotlin 侧就没有
+     * 任何消费者了 —— 算出来却不给用户看。
+     *
+     * 默认 true: 刚连上时池连续失败计数为 0, 不该先红一下再变绿。
+     */
+    private val _upstreamHealthy = MutableStateFlow(true)
+    val upstreamHealthy: StateFlow<Boolean> = _upstreamHealthy.asStateFlow()
+
     private val _isBypassLanEnabled = MutableStateFlow(com.mirage.android.core.TunConfigStore.isBypassLanEnabled(context))
     val isBypassLanEnabled: StateFlow<Boolean> = _isBypassLanEnabled.asStateFlow()
 
@@ -587,6 +604,9 @@ class VpnRepository(private val context: Context) {
                         }
                         val lat = CoreController.latencyMs()
                         _latencyMs.value = lat
+                        // 与延迟同节拍取健康位。只在确认 isRunning 的分支里取:
+                        // 未运行时内核返回 false, 照搬会在断开瞬间闪一下「上游不可用」。
+                        _upstreamHealthy.value = CoreController.isHealthy()
                     }
 
                     // 2. 日志与活跃连接/近期请求拉取:
@@ -665,6 +685,8 @@ class VpnRepository(private val context: Context) {
         com.mirage.android.core.CommandBusClient.stop()
         _trafficStats.value = TrafficStats()
         _latencyMs.value = -1L
+        // 归位。不复位的话下次连上会带着上一次会话的「上游不可用」先红一下。
+        _upstreamHealthy.value = true
     }
 
     fun destroy() {

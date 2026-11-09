@@ -201,6 +201,184 @@ cd native/mirage-core && cargo test --lib && cargo build --release
 复活用户刚停掉的 VPN，「已热切换」在非 Running 下放行会把下标回流落盘到 UI 的
 `selected_index`，表现为用户停掉 VPN 后选中的节点被悄悄换了。
 
+#### 导航换成全手势三页外壳（D 阶段 S1，2026-11-06）
+
+动手改 UI 前必须知道的六件事。方案与裁定依据见
+`UI_REDESIGN_PROPOSAL.md` §13。
+
+1. **页序即视觉顺序，方向按手指方向。** `ShellPage` 的 `ordinal` 直接当页下标：
+   `Nodes=0 ‹ Home=1 › Settings=2`。手指向右滑露出左边那页（节点），
+   向左滑露出右边那页（设置）。把枚举顺序改成 `[设置][首页][节点]` 会让两条
+   滑动手势的语义同时反过来，而**编译照样通过** —— `ShellContractTest`
+   的第一条测试就是钉这个的。
+
+2. **不要自己写动量投射或速度接力。** `AnchoredDraggableState` 的
+   `decayAnimationSpec` 与 `settle(velocity)` 已经是完整实现（foundation 1.7.8，
+   签名已在本地 aar 里逐个核过）；`HorizontalPager` 的 `PagerDefaults.flingBehavior`
+   同理。`ShellMotion.kt` 里**只有**参数换算，没有手势引擎 —— 这是
+   `UI_REDESIGN_PROPOSAL.md` §0.2 与 §12.5 第 5 条的明令，UI-3 已实测过框架能力够用。
+
+3. **弹簧参数走 `ShellMotion.stiffnessForResponse`，不要直接挑 `Spring.Stiffness*` 常量。**
+   Compose 弹簧质量恒为 1，`stiffness = (2π/response)²`。WWDC 的 0.4s（移动）与
+   0.3s（抽屉）对应 246.7 / 438.6，而 `StiffnessMedium` 是 1500、`StiffnessMediumLow`
+   是 400、`StiffnessLow` 是 200，**一个都不在点上**。套常量会让抽屉快一倍或慢一半。
+
+4. **页点与面板把手是无障碍路径，不是装饰。** TalkBack 发现不了滑动手势，
+   所以页点做成真正可点并带 `Role.Tab` + `contentDescription`，面板把手整条可点。
+   删掉它们等于让读屏用户只能停在首页。页点的触控热区刻意是 28dp 而非 48dp：
+   它浮在内容之上，48dp 的透明热区会吃掉底部内容的点击 —— 代价由语义动作补偿。
+
+5. **收起态偏移减的是「把手 56dp + 页点行 48dp」，两个都不能漏。**
+   只减把手的话，收起态的把手正好落在页点那一行上，两者抢同一片 48dp。
+   同理 Pager 的 `contentPadding` 必须是「窥视宽 + 页间隙」：页宽 = 视口宽 −
+   横向 contentPadding，相邻页右缘落在 `contentPadding.start − pageSpacing` 处，
+   只写窥视宽的话相邻页正好贴屏幕边缘，一点都露不出来。
+
+6. **返回键有两层，注册顺序决定优先级。** 外壳的 `PredictiveBackHandler`
+   （非首页 → 回首页，只按系统给的 progress 缩放当前页，**不驱动 pager 滚动**）
+   先注册；首页面板的 `BackHandler`（展开 → 收起）在 Pager 内容里组合，
+   因而后注册、优先级更高（`OnBackPressedDispatcher` 后注册者先得）。
+   漏掉面板那一层的表现是：用户上滑看详情，按返回直接退出应用。
+
+**两件过渡件，都写了何时删：**
+- `RulesHostActivity` —— 承载 `RulesFragment` 的薄宿主。刻意不用 `AndroidView`
+  把它嵌进 Pager 页：Pager 按需组合/销毁页面，Fragment 跟着反复重建，
+  拖拽状态与滚动位置都保不住。规则页 Compose 化（S3）时与 `RulesFragment` 一并删。
+- `SettingsActions` —— 从 `SettingsActivity` 抽出的弹层与摘要构建逻辑，
+  新设置页与旧 `SettingsActivity` 共用，避免备份/还原/版本弹层写两遍。S4 处置。
+
+**`MirageTheme` 必须覆盖 `surfaceContainer*` 系列。** Material3 1.3 起，菜单
+（`DropdownMenu`）、弹层、`Card` 取的是 `surfaceContainer*` 而**不是** `surface`。
+只定义 `surface` 的话这些容器会回落到 M3 自己的基线紫调色板 —— 2026-11-09 实测
+（SO-02K）首页节点下拉的底色就是淡紫。这与 C 阶段记过的「管理内核按钮显示 M3
+默认紫」同根，当时只修了按钮没修容器。`surfaceTint` 一并设为透明：M3 会按
+elevation 把 primary 叠到容器上，叠出来仍然偏紫，层级交给 `surfaceContainer`
+系列自身的明度差。**新增任何 M3 容器组件前先确认它取的是哪个角色。**
+
+**Compose 侧的触觉走 `ui.shell.ShellHaptics`，不要用 `LocalHapticFeedback`。**
+后者只有 `LongPress` 与 `TextHandleMove` 两档，而 `util/Haptic` 有六档且各自带
+API 30 / API 34 的回退（下限机是 API 28）。两个必踩的坑：(1) 用 `settledPage` /
+`settledValue` 而不是 `currentPage` / `currentValue`，后者在拖过阈值时就变，
+来回拖一次会连响两下；(2) 跳过首次组合，否则每次冷启动白震一下。
+另外 `performHapticFeedback` 尊重系统「触摸振动」开关，**不要**加
+`FLAG_IGNORE_GLOBAL_SETTING` 去覆盖用户设置 —— 测试机上该开关默认可能是关的，
+取证时临时置 1 并记得还原。
+
+**首页必须在 `onResume` 调 `checkCurrentState()`。** `VpnRepository` 把
+`bindService` 挂在 Activity 可见性上（见该类 `init` 的注释：最后一个 Activity
+不可见即解绑，否则 `BIND_AUTO_CREATE` 会把 `:core` 永久吊住）。于是每次回前台都有
+一段「已 bind 但状态未同步」的窗口，而从设置页的子界面（Geo / 分应用 / 规则）返回
+必然经过它。漏掉的表现是：在子界面停留期间内核停了，回到首页按钮还显示「断开」。
+真机实测（2026-11-06）确认这一处在改写成 Compose 外壳时漏掉过。
+
+**`Connecting` 态不要禁用主开关。** 建连可能卡在握手上，用户得能再点一下中止；
+被替换的 `HomeFragment` 就是这个取舍。只有 `Syncing`（还在查状态）与 `Stopping`
+（正在拆）该禁。
+
+**DNS / TUN 摘要不是 `StateFlow`。** 它们来自 `TunConfigStore` 与 `DnsRepository`
+的同步读取，弹层改完值不会自己推给 Compose。`MainActivity.settingsRevision`
+是显式的重算触发器，弹层回调里自增。删掉它的表现是：改完 MTU 回到设置页，
+副标题还是旧值。
+
+#### 连接状态与诊断信号：三处「算出来却没用上」（2026-11-09 实测）
+
+用户报「软件自己测试总是提示连接成功，但节点其实不可用」。查下来不是一个 bug，
+是同一类病的三处表现：**诊断信号在内核里算好了，到界面这一层断掉。**
+
+**1. 「已连接」只代表核心起来了。** 链路是
+`STARTED: AtomicBool`（`mirage-jni/src/lib.rs:32`，`start()` 成功即置位）→
+`isRunning()` → `VpnRepository` 的 7 处 `VpnState.Connected` 赋值 → 界面
+「已连接 (加密隧道保护中)」。**全链路没有任何一环检查过上游握手成功过。**
+`start()` 返回 0 只代表本地装配完成，暖池是异步填的。真机佐证：生产节点暖池
+100% 失败、内核每 15s 请求一次重启，界面全程绿色。
+修法已落地：`VpnRepository.upstreamHealthy` 取内核 `Engine::is_healthy()`，
+主开关环变警示色 + 状态行「隧道已建立，但上游不可用」。
+**这个信号一直存在且经 AIDL 暴露，但 P3 删掉外壳看门狗后 Kotlin 侧就没有消费者了。**
+
+**2. 测速默认 `tcp` 测不出协议故障。** `NodeRepository.doTest` 里只有
+`connect` 走内核完整握手，其余（含默认的 `tcp` 与名不副实的 `ping`）都是一次
+`Socket.connect()`。节点 TCP 可达而协议握手失败时照样报绿色 4ms。
+默认已改 `connect`，`ping` 选项移除（它和 `tcp` 落同一分支）。
+**改默认值时必须同时给批量测速加并发上限** —— 原先是对全表无上限 `async`，
+几十个节点会同时发起完整握手（上游 v0.16.1 CHANGELOG：两个错口令客户端几分钟
+让服务端记录 662 条 auth failed）。现为 `Semaphore(4)`。
+
+**3. 「隧道 RTT」在 Android 上结构性地永远是 `--`。** `latencyMs()` →
+`Engine::latency_ms()` → `OutboundNode::latency_rtt_ms()` 读 `Mirage { rtt_ms }`
+原子；该原子在 `outbound.rs:501` 初始化为 `u64::MAX`，而**裁剪树里没有任何一处写它**。
+上游唯一的写入方是 `src/startup.rs:493`，走 **eBPF**（socket cookie 读内核
+`srtt_us`）。Android 裁剪树没有 `startup.rs`，普通应用也拿不到 eBPF ——
+两条都断，所以这个值永远取不到。**未修**；修法是改读暖池已有的
+`PoolStats::record_latency(elapsed)`（`pool.rs:939`、`:1406` 实际在调），
+而不是那个没人写的原子。
+
+#### `:core` 没 `start()` 过时，一切原生查询都返回默认值（2026-11-09 实测）
+
+`CoreService` 的原生守卫 `native(default) { ... }` 以 `NativeLoader.isLoaded()`
+为闸门，而 **`NativeLoader.load()` 只在 `onStartCommand` 里调用一次**
+（`CoreService.kt:376`）。守卫原则第 3 条明写：「绝不在查询/设置等非启动路径隐式
+触发 `NativeLoader.load`（内核选择必须只发生在受控的启动流程中）」—— 这是为运行时
+换核与符号门禁定的规矩，**不要为了让某个查询能用而破例**。
+
+后果：`:core` 若只被 `bindService` 拉起（Activity 可见即绑定）而从未 `start()` 过，
+`isRunning` / `getStats` / `testNode` / `isHealthy` 等**全部返回安全默认值**。
+对 `testNode` 来说默认值是 `-1`，界面显示「不可用」。
+
+**这一条直接决定了节点测速的默认值不能简单改成 `connect`。**
+真机对照（SO-02K，Wi-Fi 同网段，本地 v0.16.2 服务端 ×2）：
+
+| VPN 状态 | `connect` 测速结果 | 服务端新增成功握手 |
+| :--- | :--- | :--- |
+| 未连接 | 两个节点全「不可用」 | **0** |
+| 已连接 | 94ms / 92ms | **17** |
+
+而未连接正是用户最常测速的时机（连之前挑节点）。
+
+**现行解法**：`NodeRepository.effectiveMethod(requested, coreRunning)` ——
+请求 `connect` 但内核未运行时降级为 `tcp`，并把降级事实记在
+`Node.latencyTcpOnly` 上；节点行显示成 `TCP 28ms` 且**刻意不走绿/黄/红分档**
+（分档是「节点好不好」的判断，而 TCP 数字回答不了这个问题，用中性色不让它冒充健康）。
+显式选 `tcp` 时不因连上而偷偷升级 —— 否则同一设置在不同时刻量出不同含义的数字。
+
+同一节点的实测对照很能说明问题：**TCP 28ms vs 完整握手 110ms**，差四倍，
+而且前者对「协议能不能通」零信息量。
+
+#### 排查盲区：断开状态下 `core.log` 不刷新（2026-11-09 踩到）
+
+`core.log` 由 `CoreService` 的 `logJob` 每 60s 落盘，而该 job 只在 VPN 运行时跑。
+VPN 断开时测速/建连的日志**一行都不会落盘**，表现为「操作明明执行了但日志空白」。
+本轮一度据此误判「测速没有发出连接」。断开态排查必须改用别的通道
+（`MirageNative.recentLogs()` 环形缓冲，或先连上再复现）。
+
+#### 协议兼容性：v0.15 代客户端与 v0.16 / v0.17 服务端互通（2026-11-09 实测）
+
+用户提出「上游已到 v0.17.x，v0.15 起与老协议切割」，疑为连不上的原因。**实测否定。**
+
+- **APK 的协议是 v0.15.0 代**，不是 vendor 目录写的 v0.17.3 —— `vendor/SYNC.md`
+  自己写明「vendor/ 不参与编译……那个 commit 号只代表参考副本的版本」。
+  最后一次协议同步是 2026-09-29 的 v0.15.0。
+- **实测 A**：同一客户端 × 本地 **v0.16.2** 服务端，多次握手成功并中继真实流量。
+- **实测 B**：现编上游 **v0.17.12** 起本地服务端（设备经 `adb reverse` 接入），
+  服务端日志 **846 次 `Successfully consumed 64 bytes tail`**，并中继
+  `mtalk.google.com:5228`、`android.apis.google.com:443`、`www.google.com:443`。
+- **文档佐证**：上游 v0.15.1 → v0.17.12 每一版 CHANGELOG 均注明「无协议变更」
+  「与 v0.15.x / v0.16.x / v0.17.x 两端互通」，多处点名 Android 老客户端兼容。
+
+**结论：断代发生在 v0.15.0，而本客户端在断代之后那一侧。** 若真有版本不兼容，
+方向只能是服务端停在 ≤ v0.14。归一化比对（去 rustfmt 换行噪音）也显示
+`time_sync.rs` / `crypto/{cipher,tls_raw,aead}.rs` 与 v0.17.3 的差异全是格式与
+import 顺序。
+
+#### `Timeout before CCS` 现在带 `sh/ccs/enc` 标志
+
+`pool.rs` 的超时与 `Incomplete header` 两个分支都会打出三个标志。
+`sh=false` = 服务端对我们的 ClientHello 一字节未回（链路/端口/进程问题）；
+`sh=true` = 走了一段真 TLS 才停（典型是认证前被回落到伪装站，方向是我们这端被拒）。
+两者排查方向相反，原先混成同一条日志。
+真机首用即定性：生产节点 **46 次 `(sh=false, ccs=false, enc=false)`**，
+而同机 TCP 连接 4ms 即通 —— TCP 握手完成后应用层零字节，指向中间盒黑洞 /
+前置转发无后端 / 服务进程未运行，**不是协议或版本问题**。
+
 #### `src/vendor/` 不参与编译（2026-11-03 实证）
 
 `native/vendor-sync.sh` 把上游 22 个模块复制到 `native/mirage-core/src/vendor/`，
@@ -620,6 +798,14 @@ JNI 门禁               protectFd 1 · resolveConnectionOwner 1 · dex 43 = .so
    `onFailoverEvent` 的 `nodeUri.take(24)` 都会漏出 `mirage://` 之后的十几到二十几个字符，
    而那一段正是口令。core.log 是用户可导出分享的文件。应改成只保留 scheme + host:port
    （内核侧的 `redact_uri` 已经是这个形状，外壳侧两处尚未对齐）。
+7. **全手势外壳只在一台真机上验过**（D 阶段 S1，2026-11-06）。SO-02K（API 28）全项通过，
+   **Galaxy S24+（API 36）未参与** —— 该机仍在 Qualcomm QDL 模式，§5.2 门禁二未满足。
+   高版本侧有两处没实测：预测式返回的系统动画（API 36 默认开启，S1 只按系统给的
+   progress 缩放当前页，没有真机确认过缩放与系统预览窗口叠在一起的观感），
+   以及**手势导航下 `navigationBars` inset 为 0 时**面板收起位与页点的几何
+   —— SO-02K 的 inset 是 96px，为 0 的那一侧只在代码上成立。
+8. **上滑面板的嵌套滚动契约未验**。S1 的面板里还没有可滚动内容。S2 加入连接信息
+   列表时必须一起验：面板展开后列表滚到顶继续下拉应当收面板，而不是两套滚动打架。
 
 ---
 

@@ -639,10 +639,31 @@ pub async fn read_server_handshake<R: tokio::io::AsyncRead + Unpin>(
                     Err(_) => return Err(anyhow::anyhow!("Timeout reading body")),
                 }
             }
-            Ok(Err(e)) => return Err(anyhow::anyhow!("Incomplete header: {}", e)),
+            // 两个失败分支都带上三个标志。缺了它们, "Timeout before CCS" 会把两种
+            // 完全不同的故障混成同一条日志:
+            //   sh=false — 服务端对我们的 ClientHello 一个字节都没回 (端口被封、
+            //              中间盒丢弃、服务端没在听)；
+            //   sh=true  — 服务端走了一段真 TLS 才停 (典型是认证前被回落到伪装站)。
+            // 前者是链路问题, 后者是我们这端的握手被对面拒了, 排查方向相反。
+            // 2026-11-09 真机: 生产节点刷屏 "Timeout before CCS", 正因为没有这三个
+            // 标志而无法判断是哪一种。
+            Ok(Err(e)) => {
+                return Err(anyhow::anyhow!(
+                    "Incomplete header: {} (sh={}, ccs={}, enc={})",
+                    e,
+                    saw_sh,
+                    saw_ccs,
+                    saw_enc
+                ))
+            }
             Err(_) => {
                 if !saw_ccs {
-                    return Err(anyhow::anyhow!("Timeout before CCS"));
+                    return Err(anyhow::anyhow!(
+                        "Timeout before CCS (sh={}, ccs={}, enc={})",
+                        saw_sh,
+                        saw_ccs,
+                        saw_enc
+                    ));
                 }
                 break; // normal exit after timeout if we saw CCS
             }

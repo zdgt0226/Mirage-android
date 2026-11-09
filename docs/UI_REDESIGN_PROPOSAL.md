@@ -1322,3 +1322,273 @@ adb -s <serial> shell wm size reset && adb -s <serial> shell wm density reset
 6. **在 View 体系内提前构建大屏 List-Detail 双栏**
    - **排除依据**：打乱 C → D → E 的演进依赖；在传统 View 体系下构建的双栏逻辑在切入 Compose 时将被全盘推翻。
    - **处理原则**：严格按阶段依赖推进，双栏布局推迟至 E 阶段实现。
+
+---
+
+## 13. D 阶段：全手势三页外壳（2026-11-06，用户裁定并执行）
+
+本节取代 §12.4 记录的 3-Tab 候选方案（方案 A / B）。用户给出的交互模型不是
+「少一个 Tab」，而是**取消 Tab 这一层**：参照 Nokia N9（MeeGo Harmattan）的全手势
+导航，首页只留开关与节点下拉，其余内容靠滑动调出。
+
+### 13.1 用户裁定的四项（本轮执行依据）
+
+| 议题 | 裁定 |
+| :--- | :--- |
+| 翻页方向语义 | **按手指方向**。手指向右滑露出左边那页 ⇒ 页序 `[节点] ‹ [首页] › [设置]` |
+| 可发现性兜底 | 页点 + 两侧 8dp 边缘窥视（否决「纯手势零指示」与「顶部标题行」） |
+| 技术栈 | Compose 写新外壳，旧 View 页面分批迁移（否决全量重写与继续 Views） |
+| 内容范围 | 外壳与内容一起重设计（非仅换外壳） |
+
+后两项合起来的执行解读：**分批落地、终点含内容重设计**。分段见 §13.5。
+
+### 13.2 与 §0.2 的冲突核查（动工前逐条过）
+
+用户的模型与本文档自己立下的禁令有两处相邻，必须分清哪条真的被触碰：
+
+1. **§0.2 拒绝 1「严禁自造左缘手势滑动返回」—— 未触碰，但有一条可用性代价。**
+   横向翻页不是返回手势，`HorizontalPager` 走的是框架的滚动管线，不拦截边缘。
+   代价在于：系统手势导航在两侧各保留约 24–48dp 的返回热区，**起手落在该带内的
+   横滑归系统**。这不是本次引入的新问题（现状 `ViewPager2` 同样如此），但
+   「从屏幕最边缘一划切页」的 N9 体感在 Android 上做不到，不要尝试用
+   `setSystemGestureExclusionRects` 去抢 —— 那个 API 对返回手势并不保证生效。
+   返回导航全部交给 `OnBackPressedDispatcher`：`PredictiveBackHandler` 只读系统给的
+   progress 去缩放当前页（§0.2 规定的「应用层仅提供缩放与平滑形变配合」），
+   **不去驱动 pager 的滚动**。
+2. **§0.2 拒绝 2「严禁换成 iOS 风格贴底细栏 TabBar」—— 不适用，但其论据的一半仍成立。**
+   本轮是把底栏整个删掉，不是换成细条，视觉穿插与误触的理由随之消失。
+   但该条的另一半论据（Android 用户的切换心智模型、可发现性）仍然成立，这正是
+   用户选「页点 + 边缘窥视」而非纯手势的原因。无障碍是硬性的一面：**TalkBack
+   发现不了滑动手势**，所以页点被做成真正可点、带 `Role.Tab` 与
+   `contentDescription`，而不是装饰性指示器；上滑面板的把手整条可点，同理。
+
+### 13.3 框架能力核查（照 §11.3 的教训先查再写）
+
+在 `compose-bom 2025.02.00`（foundation **1.7.8**）的本地 aar 里逐个核过签名，
+**不凭记忆断言**：
+
+| 需要的能力 | 框架既有实现 | 结论 |
+| :--- | :--- | :--- |
+| 横向分页 + 按速度吸附 | `HorizontalPager` / `PagerState` / `PagerDefaults.flingBehavior` | 直接用 |
+| 面板两档吸附 | `AnchoredDraggableState(initialValue, positionalThreshold, velocityThreshold, snapAnimationSpec, decayAnimationSpec, confirmValueChange)` + `updateAnchors` | 直接用 |
+| 动量投射（Apple 的 `project(velocity)`） | `AnchoredDraggableState` 的 `decayAnimationSpec` | **不自己写** |
+| 速度接力 | `settle(velocity)` / `animateToWithDecay` | **不自己写** |
+| 档位定义 | `DraggableAnchors { X at px }`（`positionOf` / `hasAnchorFor`） | 直接用 |
+| 预测式返回 | `androidx.activity.compose.PredictiveBackHandler` | 直接用 |
+
+因此 `ShellMotion.kt` 里**只有**参数换算，没有手势引擎。§12.5 第 5 条的禁令
+在本轮继续生效。
+
+**参数换算是必要的，不是讲究。** Apple 用 (damping, response) 两参，Compose 用
+(dampingRatio, stiffness)；Compose 弹簧质量恒为 1，故 `ω = sqrt(stiffness)`，
+而 `response = 2π/ω`，于是 `stiffness = (2π/response)²`。WWDC 的两个档位
+response 0.4s（移动）与 0.3s（抽屉）对应刚度 **246.7** 与 **438.6**，而
+`Spring.StiffnessMedium` 是 1500（≈0.16s）、`StiffnessMediumLow` 是 400、
+`StiffnessLow` 是 200 —— **一个都不在点上**。直接套常量会让抽屉快一倍或慢一半。
+换算函数 `ShellMotion.stiffnessForResponse` 带单测，并对非正入参钳死
+（负刚度弹簧不收敛，0 刚度弹簧不动）。
+
+### 13.4 新的信息架构
+
+```
+MainActivity (Compose 宿主)
+└── MirageShell   HorizontalPager, 3 页常驻 (beyondViewportPageCount = 1)
+    ├── 页 0  节点     NodesPage      选中热切换 / 单测 / 批量测速 / 自动选优 / 测速方式 / 预热池 / 剪贴板导入
+    ├── 页 1  首页     HomePage       开关 + 节点下拉；上滑 AnchoredDraggable 面板
+    │                                 面板: 上下行速率 / 隧道 RTT / 累计 / 连接数  (连接列表见 S2)
+    └── 页 2  设置     SettingsPage   手风琴分块, 一次只开一块
+        ├── 路由与分流  出站模式 · 分流规则 · Geo 规则集 · 分应用代理
+        ├── DNS 分流    DNS 配置
+        ├── 连接        预热池 · TUN 参数
+        ├── 内核        运行时换核 · 版本
+        └── 配置        备份 · 还原
+    页点 (可点, Role.Tab) + 两侧 8dp 窥视条
+```
+
+**首页搬走了什么**：原 `fragment_home.xml` 的出站模式三选按钮组下沉到设置页的
+「路由与分流」块；速率、图表、累计、连接数、今日用量全部移入上滑面板。
+首页静息态只剩开关与节点下拉两件东西 —— 这是本次重构的核心取舍，不是精简。
+
+**几处尺寸不是随手取的**：
+- 面板展开占视口 `0.86`，刻意不满屏也刻意不让内容决定高度。满屏会读成页面跳转，
+  而面板是覆盖；内容决定高度则 anchors 会随实时刷新的连接列表变动，
+  面板会在用户手上自己跳。
+- 收起态的偏移减掉的是**把手 56dp + 页点行 48dp**。只减把手的话，把手正好落在
+  页点那一行上，两者抢同一片 48dp。
+- Pager 的 `contentPadding` 必须是「窥视宽 + 页间隙」。页宽 = 视口宽 − 横向
+  contentPadding，相邻页右缘落在 `contentPadding.start − pageSpacing` 处；
+  只写窥视宽的话相邻页正好贴屏幕边缘，一点都露不出来。
+
+### 13.5 分段落地
+
+| 段 | 内容 | 状态 |
+| :-- | :--- | :--- |
+| **S1** | 外壳骨架 + 首页 + 节点页（Compose）+ 设置页分块；面板装速率/RTT/累计/连接数 | 本轮 |
+| S2 | 上滑面板补连接信息列表与流量图表（取代 `TrafficFragment`），并接嵌套滚动契约 | 待做 |
+| S3 | 分流规则页 Compose 化，删 `RulesHostActivity` 与 `RulesFragment` | 待做 |
+| S4 | `GeoAssetActivity` / `AppFilterActivity` 下沉为设置页子面板；吸收 `SettingsActivity` | 待做 |
+| S5 | 清理：`ViewPager2` 依赖、悬浮胶囊底栏、`activity_main.xml`、四个旧 Fragment 与其 Adapter/XML | 待做 |
+
+**S1 留下的两件过渡件**（都写了「何时删」）：
+- `RulesHostActivity`：承载 `RulesFragment` 的薄宿主。不把它用 `AndroidView`
+  嵌进 Pager 页，是因为 Pager 会按需组合/销毁页面，Fragment 跟着反复重建，
+  拖拽状态与滚动位置都保不住。S3 删。
+- `SettingsActions`：从 `SettingsActivity` 抽出的弹层与摘要构建逻辑，供新设置页
+  与旧 `SettingsActivity` 共用，避免同一套备份/还原/版本弹层写两遍。S4 随
+  `SettingsActivity` 一并处置。
+
+### 13.6 仍然不做
+
+§12.5 的六条全部继续有效。另补两条：
+
+7. **不抢系统边缘手势**。见 §13.2 第 1 条。
+8. **不给面板做实时高斯模糊**。`RenderEffect` 要 API 31，下限机 SO-02K 是 API 28
+   （`minSdk 26`）。面板用不透明卡面 + 1dp 描边，不引入第三方软解模糊。
+
+### 13.7 S1 真机实测（2026-11-06，Sony SO-02K）
+
+**设备与包**：Sony SO-02K，Android 9 / API 28，720×1280 @320dpi（360dp 宽），
+竖屏，无 `wm size` / `wm density` 覆盖；debug 包 `versionCode 234`。
+
+| 项 | 结果 |
+| :--- | :--- |
+| 冷启动落点 | 首页（中页），页点中点高亮 |
+| 手指向右滑 | → 节点页。页序裁定生效 |
+| 手指向左滑 | → 设置页 |
+| 返回键（节点/设置页） | → 回首页，**未退出应用** |
+| 返回键（面板展开） | → 收起面板，**未退出应用** |
+| 页点点击 | 节点 ↔ 设置 两向都通 |
+| 上滑面板 | 把手文案由「上滑查看详情」变「收起详情」，内容淡入 |
+| 面板与页点几何 | 收起态把手 `y 1024–1065`，页点 `y 1088–1184`，**不重叠** |
+| 连接 | `tun0` up（mtu 1420）；面板读到 ↓30 B/s、累计 ↑11.5 KB / ↓39.1 KB、连接 4 |
+| 节点下拉热切换 | A ↔ B 切换后下拉显示的节点随之更新 |
+| 断开 | `tun0` 消失，开关文案回「连接」 |
+| 设置手风琴 | 一次只开一块；DNS 行副标题显示实时值 |
+| 子界面往返 | 从 `GeoAssetActivity` 返回后**仍停在设置页**（Pager 页位保留），VPN 保持连接 |
+| 崩溃 | 全程 0 FATAL / 0 ANR |
+
+**门禁**：容器内 `:app:compileDebugKotlin` / `:app:testDebugUnitTest`（74 tests，0 failures）
+/ `:app:assembleDebug` / `:app:assembleRelease` 全绿；`scripts/check-no-real-endpoints.sh` 0 命中。
+
+**16KB 对齐门禁在本地 release 包上复核过**，因为新增的 Compose 依赖往 APK 里
+多带了一个 `libandroidx.graphics.path.so`（约 10 KB），而 CI 的那道门禁扫
+**所有** `.so`：
+
+```
+lib/arm64-v8a/libandroidx.graphics.path.so: compress_type=0, offset=1507328, rem_16k=0
+lib/arm64-v8a/libmirage_jni.so:             compress_type=0, offset=1523712, rem_16k=0
+```
+
+#### 真机抓出来的四处（代码评审没抓住）
+
+1. **页点压在面板把手上。** 收起位原先只减把手高 56dp，没减页点行。
+2. **收起位没算导航栏 inset。** 页点自带 `navigationBarsPadding()`，离窗口底边的
+   距离是「导航栏 inset + 页点行」。SO-02K 导航栏 96px/48dp，只补页点行仍然重叠。
+3. **面板展开时返回键直接退出应用。** 缺首页那一层 `BackHandler`。
+4. **`onResume` 的状态重同步漏了。** `VpnRepository` 把 `bindService` 挂在 Activity
+   可见性上，每次回前台都有一段「已 bind 但状态未同步」的窗口，而从设置页的子界面
+   （Geo / 分应用 / 规则）返回必然经过它。被替换的 `HomeFragment.onResume` 正是调
+   `checkCurrentState()`；漏掉的表现是：在子界面停留期间内核停了，回到首页按钮
+   还显示「断开」。
+
+另有一处代码评审抓出的回归：**`Connecting` 态不能禁用开关**。被替换的
+`HomeFragment` 在该态下 `connectBtn.isEnabled = true`，因为建连可能卡在握手上，
+用户得能再点一下中止。只有 `Syncing`（还在查状态）与 `Stopping`（正在拆）该禁。
+
+#### 已知取舍（不是缺陷，但要知道）
+
+- **页点浮在内容之上。** 热区刻意是 28dp 而非 48dp 规范值：48dp 的透明热区会吃掉
+  底部内容的点击。被遮的只有屏幕底部居中约 92dp × 28dp 这一片，列表可滚开，
+  且读屏路径走语义动作不受视觉尺寸限制。
+- **上滑面板的把手常驻，未连接时面板里是零值**，而不是断开即隐藏把手。
+  手势入口忽隐忽现比显示零值更难用。这一条与用户原话「开启开关之后向上滑动调出」
+  有偏差，已向用户说明。
+
+#### 未覆盖
+
+- **§5.2 门禁二（两台真机）未满足**：Galaxy S24+（API 36）未参与本轮，该机仍在
+  Qualcomm QDL 模式。API 31+ 的那一侧（预测式返回的系统动画、手势导航无导航栏时
+  `navigationBars` inset 为 0 的几何）**没有实测**，合并前需补。
+- 面板内容尚无可滚动内容，**嵌套滚动契约未验**。S2 加入连接列表时必须一起验：
+  面板展开后列表滚到顶继续下拉应当收面板，而不是两套滚动打架。
+
+### 13.8 S1b — 交互打磨（2026-11-09）
+
+S1 立住了骨架，这一段补的是「手感」。六项里有四项是**相对旧 UI 的回归**，
+不是新想法 —— 骨架重写时掉的东西。
+
+| 项 | 为什么改 |
+| :--- | :--- |
+| 触觉反馈全面接回 | 旧 UI 31 处 `Haptic.*`，`ui/shell/` 五个文件**全是 0** |
+| 首页任意位置上滑都能调出面板 | 此前 `anchoredDraggable` 只挂在面板上，收起态屏上只有 56dp 把手。用户给的模型是「向上滑动调出」 |
+| 节点行回到 `⋮` 溢出菜单 | 旧 `NodeAdapter:109` 就是 `⋮` + `PopupMenu`。S1 摊成四个并排文字按钮，热区不足且「删除」紧挨「复制链接」 |
+| 延迟徽章可点即测速 | 旧 `NodeAdapter:95` 的交互。显示值的地方就是刷新它的地方 |
+| 节点下拉显示延迟与选中标记 | 下拉是换节点的主路径，而决定换哪个的信息就是延迟，数据本来就在 `Node.latencyMs` |
+| `Connecting` 扫动环 | 此前三个进行中状态只靠换颜色表达，静止的环读不出「正在进行」 |
+| 设置分块展开后滚到可见 | 点开靠底部的分块，内容整段落在屏幕外 |
+
+#### 触觉在 Compose 侧怎么接
+
+走 `ShellHaptics`（`rememberShellHaptics()`）包装既有的 `util/Haptic`，
+**不用** Compose 的 `LocalHapticFeedback` —— 后者只暴露 `LongPress` 与
+`TextHandleMove` 两档，而 `Haptic` 有六档且各自带 API 30 / API 34 的回退
+（下限机是 API 28）。换过去等于把六种语义压成一种。
+
+两个容易写错的地方：
+
+1. **用 `settledPage` / `settledValue`，不要用 `currentPage` / `currentValue`。**
+   后者在拖过阈值的瞬间就变，一次来回拖动会连响两下，而用户并没有换页或换档。
+2. **跳过首次组合。** 冷启动时 VPN 可能本来就连着，那不是一次「连上了」；
+   面板的初始档位也不是一次「吸附」。不跳的话每次启动都白震一下。
+
+连接结果的震动挂在**状态类型**变化上（`state::class`），不是 `VpnState` 本身 ——
+`Connected(node)` 里的节点对象变化会让后者重复触发。
+
+#### 首页整页都是面板的拖拽源
+
+同一个 `AnchoredDraggableState` 挂两处（面板 + 静息层），这是支持的 ——
+Material 的 `BottomSheetScaffold` 对 sheet 与内容就是这么做的，两处都只是往同一个
+state 喂手势。方向锁死竖直，所以横滑仍归 Pager。
+
+**实测确认两者不打架**（SO-02K）：在同一片区域（y=600，距把手 400px）
+竖直上滑 → 面板展开；横滑 → 翻页，且面板保持收起。
+
+#### 撞上的一个配色缺陷：`surfaceContainer` 系列没覆盖
+
+节点下拉做出来之后，菜单底色是**淡紫**，与全应用的 Telegram 蓝完全脱节。
+
+根因：**Material3 1.3 起，菜单 / 弹层 / Card 取的是 `surfaceContainer*` 而不是
+`surface`。** `MirageTheme` 只定义了 `surface`，这几个角色没覆盖，M3 就回落到它
+自己那套基线紫调色板。这与 §11.2 C 阶段记过的「管理内核按钮显示 M3 默认紫」
+是同一个根因 —— 当时只修了按钮没修容器。
+
+已在 `MirageTheme` 的明暗两套 scheme 里补全
+`surfaceContainerLowest/Low/surfaceContainer/High/Highest`、
+`surfaceBright/surfaceDim`、`inverseSurface/inverseOnSurface`、`scrim`，
+并把 `surfaceTint` 设为透明 —— M3 会按 elevation 把 primary 叠到容器上，
+叠出来的仍然偏紫；层级由 `surfaceContainer` 系列自身的明度差表达。
+
+#### 实测（SO-02K，2026-11-09）
+
+| 项 | 结果 |
+| :--- | :--- |
+| 中部上滑（y=600，距把手 400px） | 面板展开 |
+| 同一区域横滑 | 翻页正常，面板保持收起 —— 方向锁定生效 |
+| 节点行 | 四个并排文字按钮已消失；延迟徽章热区 62×48dp，`⋮` 48×48dp |
+| 延迟徽章点击 | 触发单节点测速，`未测速 → 25ms` |
+| `⋮` 菜单 | 测试延迟 / 复制链接 / 编辑节点 / 删除节点，删除项单独标红并隔一条分隔线 |
+| 节点下拉 | 每项显示延迟；当前节点实心蓝点 + 蓝字，其余空心圈 |
+| 菜单底色 | 补全 `surfaceContainer*` 后由淡紫变为卡片白 |
+| 触觉 | `dumpsys vibrator` 历史出现 `opPkg: com.mirage.android` 条目（`usageHint: 13` 触摸用途） |
+| 连接 | `tun0` up，扫动环期间无异常，0 FATAL |
+
+**两条诚实说明：**
+
+1. **这台设备的系统「触摸振动」原本是关的**（`haptic_feedback_enabled=0`）。
+   `View.performHapticFeedback` 尊重该开关，而我们**不加**
+   `FLAG_IGNORE_GLOBAL_SETTING` 去覆盖用户的系统设置。为取证临时置 1，验完已还原为 0。
+   另外在 API 28 上六档语义大多映射到同一个 `Prebaked{mEffectId=0}`，
+   分档的收益要到 API 30（`CONFIRM`/`REJECT`）与 API 34（`SEGMENT_TICK`）才体现。
+2. **设置页的「展开后滚到可见」没能在本机构造出可区分的场景。** 当前只有 5 个
+   分块，一块收起另一块展开后整页正好放得下，`animateScrollToItem` 退化为 no-op。
+   代码路径正确且无害，但**不声称实测生效**。

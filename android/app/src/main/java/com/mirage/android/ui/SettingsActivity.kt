@@ -4,31 +4,14 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import com.mirage.android.R
-import com.mirage.android.core.ConfigBackup
-import com.mirage.android.core.CoreManager
-import com.mirage.android.core.MirageNative
-import com.mirage.android.core.TunConfigStore
-import com.mirage.android.data.repository.NodeRepository
-import com.mirage.android.data.repository.RuleRepository
-import com.mirage.android.data.repository.VpnRepository
-import com.mirage.android.databinding.ActivitySettingsBinding
-import com.mirage.android.ui.common.FluidSpring
-
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
-import com.mirage.android.ui.theme.MirageTheme
-import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.platform.ViewCompositionStrategy
-import androidx.lifecycle.setViewTreeLifecycleOwner
-import androidx.lifecycle.setViewTreeViewModelStoreOwner
-import androidx.savedstate.setViewTreeSavedStateRegistryOwner
-import com.google.android.material.bottomsheet.BottomSheetBehavior
-import com.google.android.material.bottomsheet.BottomSheetDialog
+import com.mirage.android.R
+import com.mirage.android.databinding.ActivitySettingsBinding
+import com.mirage.android.ui.common.FluidSpring
 
 
 /**
@@ -130,137 +113,23 @@ class SettingsActivity : AppCompatActivity() {
 
     /** DNS 与 TUN 两行的副标题要反映当前值, 否则得点进去才知道设的是什么。 */
     private fun refreshSummaries() {
-        val dnsRepo = com.mirage.android.data.repository.DnsRepository.getInstance(this)
-        binding.rowDns.tvRowSummary.text =
-            getString(R.string.home_dns_summary, dnsRepo.getDirectDns(), dnsRepo.getRemoteDns())
-        binding.rowTun.tvRowSummary.text = tunSummary()
+        binding.rowDns.tvRowSummary.text = SettingsActions.dnsSummary(this)
+        binding.rowTun.tvRowSummary.text = SettingsActions.tunSummary(this)
     }
 
-    private fun tunSummary(): String {
-        val mtu = TunConfigStore.getMtu(this)
-        val batch = TunConfigStore.getBatchSize(this)
-        val vpnRepo = VpnRepository.getInstance(this)
-        val ipv6 = getString(if (vpnRepo.isIpv6Enabled.value) R.string.tun_sum_ipv6_on else R.string.tun_sum_ipv6_off)
-        val quic = getString(if (vpnRepo.isBlockQuic.value) R.string.tun_sum_quic_block else R.string.tun_sum_quic_pass)
-        val mux = getString(if (vpnRepo.isUdpMux.value) R.string.tun_sum_mux_on else R.string.tun_sum_mux_off)
-        return getString(R.string.home_tun_summary, mtu.toString(), batch, ipv6, quic, mux)
-    }
+    private fun showDnsDialog() = SettingsActions.showDns(this) { refreshSummaries() }
 
-    private fun showDnsDialog() = DnsConfigDialog(this) { refreshSummaries() }.show()
-
-    private fun showTunDialog() = TunConfigDialog(this) { refreshSummaries() }.show()
+    private fun showTunDialog() = SettingsActions.showTun(this) { refreshSummaries() }
 
     private fun showCoreDialog() {
-        coreManagerDialog = CoreManagerDialog(
-            context = this,
-            onPickSoFile = { pickSoLauncher.launch("*/*") },
-            onCoreChanged = { }
-        )
-        coreManagerDialog?.show()
+        coreManagerDialog = SettingsActions.showCore(this) { pickSoLauncher.launch("*/*") }
     }
 
-    private fun showVersionDialog() {
-        val activeCore = CoreManager.getInstance(this).getActiveCore()
-        val nativeVer = runCatching { MirageNative.version() }.getOrDefault("")
+    private fun showVersionDialog() = SettingsActions.showVersion(this) { showCoreDialog() }
 
-        val dialog = BottomSheetDialog(this)
-        val composeView = ComposeView(this).apply {
-            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindowOrReleasedFromPool)
-            setContent {
-                MirageTheme {
-                    VersionSheetContent(
-                        versionName = com.mirage.android.BuildConfig.VERSION_NAME,
-                        versionCode = com.mirage.android.BuildConfig.VERSION_CODE,
-                        buildTag = com.mirage.android.BuildConfig.BUILD_TAG,
-                        buildTime = com.mirage.android.BuildConfig.BUILD_TIME,
-                        isBuiltinCore = activeCore.isBuiltin,
-                        customCoreName = activeCore.name,
-                        nativeVer = nativeVer,
-                        onManageCore = {
-                            dialog.dismiss()
-                            showCoreDialog()
-                        },
-                        onDismiss = {
-                            dialog.dismiss()
-                        }
-                    )
-                }
-            }
-        }
+    private fun showBackupDialog() = SettingsActions.showBackup(this)
 
-        dialog.setContentView(composeView)
-        dialog.dismissWithAnimation = true
-        dialog.behavior.apply {
-            isFitToContents = true
-            skipCollapsed = true
-            state = BottomSheetBehavior.STATE_EXPANDED
-        }
-
-        val decorView = dialog.window?.decorView ?: composeView
-        decorView.setViewTreeLifecycleOwner(this)
-        decorView.setViewTreeViewModelStoreOwner(this)
-        decorView.setViewTreeSavedStateRegistryOwner(this)
-
-        composeView.setViewTreeLifecycleOwner(this)
-        composeView.setViewTreeViewModelStoreOwner(this)
-        composeView.setViewTreeSavedStateRegistryOwner(this)
-
-        dialog.show()
-    }
-
-    private fun showBackupDialog() {
-        val json = ConfigBackup.export(this)
-        val input = android.widget.EditText(this).apply {
-            setText(json)
-            setTextSize(12f)
-            isSingleLine = false
-            minLines = 8
-        }
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle(R.string.backup_title)
-            .setView(input)
-            .setPositiveButton(R.string.copy) { _, _ ->
-                val cm = getSystemService(android.content.ClipboardManager::class.java)
-                cm.setPrimaryClip(android.content.ClipData.newPlainText("mirage-config", json))
-                Toast.makeText(this, R.string.backup_copied, Toast.LENGTH_SHORT).show()
-            }
-            .setNegativeButton(R.string.close, null)
-            .show()
-    }
-
-    private fun showRestoreDialog() {
-        val input = android.widget.EditText(this).apply {
-            hint = getString(R.string.restore_hint)
-            setTextSize(12f)
-            isSingleLine = false
-            minLines = 8
-        }
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle(R.string.restore_title)
-            .setView(input)
-            .setPositiveButton(R.string.restore_merge) { _, _ -> doRestore(input, overwrite = false) }
-            .setNeutralButton(R.string.restore_overwrite) { _, _ -> doRestore(input, overwrite = true) }
-            .setNegativeButton(R.string.cancel, null)
-            .show()
-    }
-
-    private fun doRestore(input: android.widget.EditText, overwrite: Boolean) {
-        val json = input.text.toString().trim()
-        if (json.isEmpty()) {
-            Toast.makeText(this, R.string.content_empty, Toast.LENGTH_SHORT).show()
-            return
-        }
-        runCatching {
-            val (nodes, rules) = ConfigBackup.import(this, json, overwrite = overwrite)
-            NodeRepository.getInstance(this).reload()
-            RuleRepository.getInstance(this).reload()
-            val msg = if (overwrite) R.string.restore_overwritten else R.string.restore_merged
-            Toast.makeText(this, getString(msg, nodes, rules), Toast.LENGTH_LONG).show()
-        }.onFailure { e ->
-            val msg = if (overwrite) R.string.restore_overwrite_failed else R.string.restore_failed
-            Toast.makeText(this, getString(msg, e.message ?: ""), Toast.LENGTH_LONG).show()
-        }
-    }
+    private fun showRestoreDialog() = SettingsActions.showRestore(this)
 
     companion object {
         fun start(ctx: Context) = ctx.startActivity(Intent(ctx, SettingsActivity::class.java))

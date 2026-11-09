@@ -5,6 +5,7 @@ import com.mirage.android.core.CoreController
 import com.mirage.android.data.model.Node
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -27,7 +28,16 @@ class NodeRepository(private val context: Context) {
     private val _selectedIndex = MutableStateFlow(-1)
     val selectedIndex: StateFlow<Int> = _selectedIndex.asStateFlow()
 
-    private val _testMethod = MutableStateFlow("tcp")
+    /**
+     * 测速方式。默认 `connect` —— **不要改回 `tcp`**。
+     *
+     * `tcp` 只做一次 `Socket.connect()`，即 TCP 三次握手，完全不碰 Mirage 协议。
+     * 节点 TCP 可达但协议握手失败时（2026-11-09 真机: 生产节点暖池全量
+     * `Timeout before CCS`），`tcp` 照样报出 4ms 的绿色健康值，把一个不可用的
+     * 节点显示成最优。测速的意义是回答「这个节点现在能不能用」，而 `tcp`
+     * 回答不了。`connect` 走 `CoreController.testNode`，和真实建连同一条路径。
+     */
+    private val _testMethod = MutableStateFlow("connect")
     val testMethod: StateFlow<String> = _testMethod.asStateFlow()
 
     private val _isAutoSelect = MutableStateFlow(false)
@@ -78,7 +88,7 @@ class NodeRepository(private val context: Context) {
         }
         _selectedIndex.value = targetIdx
         prefs.edit().putInt(KEY_SELECTED, targetIdx).apply()
-        _testMethod.value = prefs.getString(KEY_TEST_METHOD, "tcp") ?: "tcp"
+        _testMethod.value = normalizeTestMethod(prefs.getString(KEY_TEST_METHOD, DEFAULT_TEST_METHOD))
         _isAutoSelect.value = prefs.getBoolean(KEY_AUTO_SELECT, false)
         val pool = prefs.getInt(KEY_POOL, 16)
         _poolSize.value = pool
@@ -156,7 +166,7 @@ class NodeRepository(private val context: Context) {
     }
 
     fun setTestMethod(method: String) {
-        _testMethod.value = method
+        _testMethod.value = normalizeTestMethod(method)
         prefs.edit().putString(KEY_TEST_METHOD, method).apply()
     }
 
@@ -180,8 +190,9 @@ class NodeRepository(private val context: Context) {
         val node = current[index]
         updateNodeTesting(index, isTesting = true)
 
-        val rtt = doTest(node, _testMethod.value)
-        updateNodeLatency(index, rtt)
+        val method = effectiveMethod(_testMethod.value, CoreController.isRunning())
+        val rtt = doTest(node, method)
+        updateNodeLatency(index, rtt, method == METHOD_TCP)
         rtt
     }
 
@@ -196,11 +207,13 @@ class NodeRepository(private val context: Context) {
         // 全部标记为测试中
         _nodes.value = list.map { it.copy(isTesting = true, testError = null) }
 
-        val method = _testMethod.value
+        val method = effectiveMethod(_testMethod.value, CoreController.isRunning())
+        val tcpOnly = method == METHOD_TCP
+        val gate = kotlinx.coroutines.sync.Semaphore(MAX_PARALLEL_TESTS)
         val deferredList = list.mapIndexed { index, node ->
             async {
-                val rtt = doTest(node, method)
-                updateNodeLatency(index, rtt)
+                val rtt = gate.withPermit { doTest(node, method) }
+                updateNodeLatency(index, rtt, tcpOnly)
                 Pair(index, rtt)
             }
         }
@@ -220,11 +233,13 @@ class NodeRepository(private val context: Context) {
         if (list.isEmpty()) return@withContext emptyList()
         _isTestingAll.value = true
         _nodes.value = list.map { it.copy(isTesting = true, testError = null) }
-        val method = _testMethod.value
+        val method = effectiveMethod(_testMethod.value, CoreController.isRunning())
+        val tcpOnly = method == METHOD_TCP
+        val gate = kotlinx.coroutines.sync.Semaphore(MAX_PARALLEL_TESTS)
         val results = list.mapIndexed { index, node ->
             async {
-                val rtt = doTest(node, method)
-                updateNodeLatencySafe(index, rtt)
+                val rtt = gate.withPermit { doTest(node, method) }
+                updateNodeLatencySafe(index, rtt, tcpOnly)
                 Pair(index, rtt)
             }
         }.awaitAll()
@@ -238,9 +253,13 @@ class NodeRepository(private val context: Context) {
     private fun doTest(node: Node, method: String): Long {
         return try {
             when (method) {
-                "connect" -> {
+                // 真实路径: 走内核, 完整跑一遍伪装 TLS 握手 + 认证 + TIME_SYNC。
+                // 这是唯一能回答「这个节点现在能不能用」的测法。
+                METHOD_CONNECT -> {
                     CoreController.testNode(node.uri, 5000)
                 }
+                // 只做 TCP 三次握手。保留它是因为它快且不消耗服务端握手配额,
+                // 适合在几十个节点里先粗筛掉完全不可达的; 但它**测不出协议故障**。
                 else -> {
                     val sock = Socket()
                     val t0 = System.currentTimeMillis()
@@ -264,27 +283,29 @@ class NodeRepository(private val context: Context) {
         }
     }
 
-    private suspend fun updateNodeLatencySafe(index: Int, latency: Long) {
+    private suspend fun updateNodeLatencySafe(index: Int, latency: Long, tcpOnly: Boolean) {
         updateMutex.withLock {
             val list = _nodes.value.toMutableList()
             if (index in list.indices) {
                 list[index] = list[index].copy(
                     latencyMs = if (latency >= 0) latency else null,
                     isTesting = false,
-                    testError = if (latency < 0) context.getString(R.string.node_unreachable) else null
+                    testError = if (latency < 0) context.getString(R.string.node_unreachable) else null,
+                    latencyTcpOnly = latency >= 0 && tcpOnly
                 )
                 _nodes.value = list
             }
         }
     }
 
-    private fun updateNodeLatency(index: Int, latency: Long) {
+    private fun updateNodeLatency(index: Int, latency: Long, tcpOnly: Boolean) {
         val list = _nodes.value.toMutableList()
         if (index in list.indices) {
             list[index] = list[index].copy(
                 latencyMs = if (latency >= 0) latency else null,
                 isTesting = false,
-                testError = if (latency < 0) context.getString(R.string.node_unreachable) else null
+                testError = if (latency < 0) context.getString(R.string.node_unreachable) else null,
+                latencyTcpOnly = latency >= 0 && tcpOnly
             )
             _nodes.value = list
         }
@@ -308,6 +329,56 @@ class NodeRepository(private val context: Context) {
         private const val KEY_POOL = "pool_size"
         private const val KEY_AUTO_SELECT = "auto_select"
         private const val KEY_TEST_METHOD = "test_method"
+
+        /** 走内核完整握手。默认值。 */
+        const val METHOD_CONNECT = "connect"
+
+        /** 只做 TCP 三次握手。快, 但测不出协议故障。 */
+        const val METHOD_TCP = "tcp"
+
+        const val DEFAULT_TEST_METHOD = METHOD_CONNECT
+
+        /**
+         * 批量测速的并发上限。
+         *
+         * 默认测法从 `tcp` 改成 `connect` 之后, 每个节点都是一次完整的协议握手,
+         * 而批量测速原先是对全表无上限 `async`。几十个节点同时握手既打自己也打
+         * 服务端 (上游 v0.16.1 的 CHANGELOG 记过: 两个错口令客户端几分钟内让
+         * 服务端记录 662 条 auth failed)。4 是被删掉的外壳看门狗 `doFailover`
+         * 里用的同一个值。
+         */
+        private const val MAX_PARALLEL_TESTS = 4
+
+        /**
+         * 历史上存过的 `ping` 其实走的是 TCP 分支 —— 选项名与行为不符。
+         * 选项已从界面移除, 这里把旧值归一到它真正的行为上, 避免用户看到一个
+         * 界面里不存在的测法。
+         */
+        fun normalizeTestMethod(raw: String?): String = when (raw) {
+            METHOD_CONNECT -> METHOD_CONNECT
+            METHOD_TCP -> METHOD_TCP
+            else -> if (raw == null) DEFAULT_TEST_METHOD else METHOD_TCP
+        }
+
+        /**
+         * 本次实际能用的测法。
+         *
+         * `connect` 走 `CoreController.testNode` → `:core` 的 `MirageNative.testNode`，
+         * 而 `CoreService` 的原生守卫只在**启动路径**里调 `NativeLoader.load`
+         * （`CoreService.kt:376`，守卫原则第 3 条明令不得在查询路径隐式装载，
+         * 因为内核选择必须只发生在受控的启动流程中）。所以 `:core` 只被 bind 拉起、
+         * 从未 `start()` 过时，`testNode` 必然返回 -1，每个节点都显示「不可用」——
+         * 而未连接正是用户最常测速的时机。
+         *
+         * 真机实测（2026-11-09，SO-02K + 本地 v0.16.2 服务端）：
+         * 未连接时 `connect` 两个节点全「不可用」、服务端零握手；连接后同样操作
+         * 得到 94ms / 92ms 且服务端新增 17 次成功握手。
+         *
+         * 因此未运行时降级为 TCP，并把降级事实记在 [Node.latencyTcpOnly] 上，
+         * **不隐瞒**。
+         */
+        fun effectiveMethod(requested: String, coreRunning: Boolean): String =
+            if (requested == METHOD_CONNECT && !coreRunning) METHOD_TCP else requested
 
         @Volatile
         private var instance: NodeRepository? = null

@@ -7,42 +7,60 @@ import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
-import android.view.View
 import android.widget.Toast
+import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.view.ViewCompat
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
 import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.fragment.app.Fragment
-import androidx.viewpager2.adapter.FragmentStateAdapter
-import androidx.viewpager2.widget.ViewPager2
-import com.mirage.android.core.NativeLoader
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
+import com.mirage.android.core.GeoManager
 import com.mirage.android.data.model.Node
 import com.mirage.android.data.repository.NodeRepository
-import com.mirage.android.databinding.ActivityMainBinding
+import com.mirage.android.ui.AppFilterActivity
 import com.mirage.android.ui.CoreManagerDialog
-import com.mirage.android.ui.HomeFragment
-import com.mirage.android.ui.NodesFragment
-import com.mirage.android.ui.RulesFragment
-import com.mirage.android.ui.TrafficFragment
-import com.mirage.android.ui.common.FluidSpring
+import com.mirage.android.ui.GeoAssetActivity
+import com.mirage.android.ui.RulesHostActivity
+import com.mirage.android.ui.SettingsActions
+import com.mirage.android.ui.shell.HomePage
+import com.mirage.android.ui.shell.MirageShell
+import com.mirage.android.ui.shell.NodesPage
+import com.mirage.android.ui.shell.SettingsPage
+import com.mirage.android.ui.shell.outboundModeTitleRes
+import com.mirage.android.ui.theme.MirageTheme
 import com.mirage.android.ui.viewmodel.HomeViewModel
-import androidx.lifecycle.lifecycleScope
+import com.mirage.android.ui.viewmodel.NodesViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import com.mirage.android.core.GeoManager
 
 /**
- * 主容器: ViewPager2 + 底部导航 (状态保持, 消除切换卡顿)。
+ * 主容器: 三页手势外壳（节点 ‹ 首页 › 设置）。
+ *
+ * 导航模型在 2026-11-06 由「ViewPager2 + 悬浮胶囊底栏 + 4 Tab」换成横向翻页，
+ * 方向按手指方向定义（见 `ShellPage` 的注释）。本 Activity 只做四件事：
+ * 窗口与权限、深链、把 ViewModel 喂给 Compose、以及代表 Compose 拉起平台弹层
+ * 与外挂 Activity —— 后者需要 `ActivityResultLauncher`，而那只能挂在 Activity 上。
  */
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var binding: ActivityMainBinding
     private val homeViewModel: HomeViewModel by viewModels()
+    private val nodesViewModel: NodesViewModel by viewModels()
 
     private var coreManagerDialog: CoreManagerDialog? = null
+
+    /**
+     * 设置页摘要的重算触发器。
+     *
+     * DNS / TUN 的摘要来自 `TunConfigStore` 与 `DnsRepository` 的同步读取，不是
+     * `StateFlow`，所以弹层改完值不会自己推给 Compose。弹层回调里自增这个计数，
+     * 摘要行就跟着重组。不这么做的表现是：改完 MTU 回到设置页，副标题还是旧值。
+     */
+    private var settingsRevision = mutableIntStateOf(0)
 
     private val notifPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -69,7 +87,9 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 开启现代 Edge-to-Edge: 状态栏与导航栏完全透明
+        // Edge-to-edge: 状态栏与导航栏全透明。Insets 由各 Compose 页面用
+        // statusBarsPadding / navigationBarsPadding 自行消费, 不在这里写死边距
+        // (§0.2 拒绝 3: Android 的 insets 分类远多于 iOS 的 safe area)。
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.statusBarColor = android.graphics.Color.TRANSPARENT
         window.navigationBarColor = android.graphics.Color.TRANSPARENT
@@ -80,52 +100,127 @@ class MainActivity : AppCompatActivity() {
         controller.isAppearanceLightStatusBars = true
         controller.isAppearanceLightNavigationBars = true
 
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
         com.mirage.android.core.ConnectionOwnerResolver.init(applicationContext)
 
-        // 统一处理 Window Insets: 顶部状态栏沉浸, 底部避让系统导航栏与悬浮底栏
-        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
-            val statusBars = insets.getInsets(
-                androidx.core.view.WindowInsetsCompat.Type.statusBars() or
-                    androidx.core.view.WindowInsetsCompat.Type.displayCutout()
-            )
-            val navBars = insets.getInsets(
-                androidx.core.view.WindowInsetsCompat.Type.navigationBars() or
-                    androidx.core.view.WindowInsetsCompat.Type.displayCutout()
-            )
-            
-            val density = resources.displayMetrics.density
-            val floatingNavHeightWithMargin = (84 * density).toInt()
-            binding.viewPager.setPadding(statusBars.left, statusBars.top, statusBars.right, floatingNavHeightWithMargin + navBars.bottom)
-
-            val lp = binding.cardFloatingNav.layoutParams as? androidx.coordinatorlayout.widget.CoordinatorLayout.LayoutParams
-            if (lp != null) {
-                val sideMargin = (20 * density).toInt() + maxOf(navBars.left, navBars.right)
-                val bottomMargin = (12 * density).toInt() + navBars.bottom
-                lp.setMargins(sideMargin, 0, sideMargin, bottomMargin)
-                binding.cardFloatingNav.layoutParams = lp
+        setContent {
+            MirageTheme {
+                MirageShell(
+                    nodesPage = { NodesPage(viewModel = nodesViewModel) },
+                    homePage = { HomeHost() },
+                    settingsPage = { SettingsHost() },
+                )
             }
-            insets
-        }
-
-        // 禁止 BottomNavigationView 内部自动追加导航栏高度内边距 (防止图标向上偏移/文字被裁剪)
-        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(binding.bottomNav) { view, insets ->
-            view.setPadding(0, 0, 0, 0)
-            insets
         }
 
         checkNotificationPermission()
         handleIncomingUri(intent)
-
-        setupViewPager()
         checkGeoInitialization()
 
-        if (intent?.getBooleanExtra("auto_connect", false) == true) {
+        if (intent?.getBooleanExtra(EXTRA_AUTO_CONNECT, false) == true) {
             requestVpnPermissionAndConnect()
-        } else if (intent?.getBooleanExtra("auto_disconnect", false) == true) {
+        } else if (intent?.getBooleanExtra(EXTRA_AUTO_DISCONNECT, false) == true) {
             homeViewModel.disconnect()
         }
+    }
+
+    @Composable
+    private fun HomeHost() {
+        val state by homeViewModel.vpnState.collectAsStateWithLifecycle()
+        val stats by homeViewModel.trafficStats.collectAsStateWithLifecycle()
+        val latency by homeViewModel.latencyMs.collectAsStateWithLifecycle()
+        val healthy by homeViewModel.upstreamHealthy.collectAsStateWithLifecycle()
+        val nodes by nodesViewModel.nodes.collectAsStateWithLifecycle()
+        val selected by homeViewModel.selectedNode.collectAsStateWithLifecycle()
+
+        HomePage(
+            state = state,
+            stats = stats,
+            latencyMs = latency,
+            upstreamHealthy = healthy,
+            nodes = nodes,
+            selectedNode = selected,
+            onToggle = {
+                homeViewModel.toggleConnection(
+                    onRequirePermission = { requestVpnPermissionAndConnect() },
+                    onProceedConnect = { requestVpnPermissionAndConnect() },
+                )
+            },
+            onSelectNode = { index -> nodesViewModel.selectNode(index) },
+        )
+    }
+
+    @Composable
+    private fun SettingsHost() {
+        val outbound by homeViewModel.outboundMode.collectAsStateWithLifecycle()
+        val poolSize by nodesViewModel.poolSize.collectAsStateWithLifecycle()
+        val revision = settingsRevision.intValue
+        // key(revision): 摘要是同步读取, 必须随 revision 重算 (见字段注释)。
+        val dnsSummary = remember(revision) { SettingsActions.dnsSummary(this) }
+        val tunSummary = remember(revision) { SettingsActions.tunSummary(this) }
+
+        SettingsPage(
+            outboundMode = outbound,
+            dnsSummary = dnsSummary,
+            tunSummary = tunSummary,
+            poolSize = poolSize,
+            onOpenRules = { startActivity(Intent(this, RulesHostActivity::class.java)) },
+            onOpenGeo = { startActivity(Intent(this, GeoAssetActivity::class.java)) },
+            onOpenPerApp = { startActivity(Intent(this, AppFilterActivity::class.java)) },
+            onPickOutboundMode = { pickOutboundMode() },
+            onOpenDns = { SettingsActions.showDns(this) { bumpSettings() } },
+            onOpenPool = { pickPoolSize() },
+            onOpenTun = { SettingsActions.showTun(this) { bumpSettings() } },
+            onOpenCore = { showCoreManager() },
+            onOpenVersion = { SettingsActions.showVersion(this) { showCoreManager() } },
+            onBackup = { SettingsActions.showBackup(this) },
+            onRestore = { SettingsActions.showRestore(this) },
+        )
+    }
+
+    private fun bumpSettings() {
+        settingsRevision.intValue += 1
+    }
+
+    private fun showCoreManager() {
+        coreManagerDialog = SettingsActions.showCore(this) { pickSoLauncher.launch("*/*") }
+    }
+
+    /** 出站模式三选一。下标语义与 `outboundModeTitleRes` 一致: 0 规则 / 1 全局 / 2 直连。 */
+    private fun pickOutboundMode() {
+        val modes = intArrayOf(0, 1, 2)
+        val items = modes.map { getString(outboundModeTitleRes(it)) }.toTypedArray()
+        val current = modes.indexOf(homeViewModel.outboundMode.value).coerceAtLeast(0)
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(R.string.settings_row_outbound)
+            .setSingleChoiceItems(items, current) { dialog, which ->
+                homeViewModel.setOutboundMode(modes[which])
+                dialog.dismiss()
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    /** 预热池大小。与节点页的选择器同一组档位, 改一处要改两处 —— 档位表在 [POOL_SIZES]。 */
+    private fun pickPoolSize() {
+        val items = arrayOf(
+            getString(R.string.pool_1),
+            getString(R.string.pool_4),
+            getString(R.string.pool_8),
+            getString(R.string.pool_16),
+            getString(R.string.pool_32),
+            getString(R.string.pool_64),
+        )
+        val current = POOL_SIZES.indexOf(nodesViewModel.poolSize.value).coerceAtLeast(2)
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(R.string.nodes_pool_title)
+            .setSingleChoiceItems(items, current) { dialog, which ->
+                val size = POOL_SIZES[which]
+                nodesViewModel.setPoolSize(size)
+                Toast.makeText(this, getString(R.string.nodes_pool_set, size), Toast.LENGTH_SHORT).show()
+                dialog.dismiss()
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
     }
 
     private fun checkGeoInitialization() {
@@ -144,73 +239,37 @@ class MainActivity : AppCompatActivity() {
 
     private fun checkNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
                 notifPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
             }
         }
     }
 
+    /**
+     * 回前台时重新同步 VPN 状态。
+     *
+     * `VpnRepository` 把 `bindService` 挂在 Activity 的 onStart/onStop 上
+     * （见该类 `init` 里的注释：绑定跟随可见性，最后一个 Activity 不可见即解绑，
+     * 否则 `BIND_AUTO_CREATE` 会把 `:core` 永久吊住）。所以每次回前台都有一段
+     * 「已 bind 但状态未同步」的窗口，而从设置页的子界面（Geo / 分应用 / 规则）
+     * 返回必然经过它。被替换的 `HomeFragment.onResume` 正是调这一下；
+     * 漏掉的表现是：在子界面停留期间内核停了，回到首页按钮还显示「断开」。
+     */
+    override fun onResume() {
+        super.onResume()
+        homeViewModel.checkCurrentState()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleIncomingUri(intent)
-        if (intent.getBooleanExtra("auto_connect", false)) {
+        if (intent.getBooleanExtra(EXTRA_AUTO_CONNECT, false)) {
             requestVpnPermissionAndConnect()
-        } else if (intent.getBooleanExtra("auto_disconnect", false)) {
+        } else if (intent.getBooleanExtra(EXTRA_AUTO_DISCONNECT, false)) {
             homeViewModel.disconnect()
         }
-    }
-
-    private fun setupViewPager() {
-        binding.viewPager.adapter = object : FragmentStateAdapter(this) {
-            override fun getItemCount(): Int = 4
-            override fun createFragment(position: Int): Fragment = when (position) {
-                0 -> HomeFragment()
-                1 -> NodesFragment()
-                2 -> RulesFragment()
-                3 -> TrafficFragment()
-                else -> throw IllegalStateException("Invalid position $position")
-            }
-        }
-        binding.viewPager.isUserInputEnabled = false // 禁用滑动切换，依靠底部导航
-        binding.viewPager.offscreenPageLimit = 3
-
-        binding.bottomNav.setOnItemSelectedListener { item ->
-            when (item.itemId) {
-                R.id.nav_home -> { binding.viewPager.setCurrentItem(0, false); true }
-                R.id.nav_nodes -> { binding.viewPager.setCurrentItem(1, false); true }
-                R.id.nav_rules -> { binding.viewPager.setCurrentItem(2, false); true }
-                R.id.nav_traffic -> { binding.viewPager.setCurrentItem(3, false); true }
-                else -> false
-            }
-        }
-
-        binding.bottomNav.post {
-            val navItemIds = intArrayOf(
-                R.id.nav_home,
-                R.id.nav_nodes,
-                R.id.nav_rules,
-                R.id.nav_traffic
-            )
-            for (id in navItemIds) {
-                binding.bottomNav.findViewById<View>(id)?.let { itemView ->
-                    FluidSpring.attachPressScale(itemView)
-                }
-            }
-        }
-
-        val backCallback = object : androidx.activity.OnBackPressedCallback(false) {
-            override fun handleOnBackPressed() {
-                binding.viewPager.setCurrentItem(0, false)
-            }
-        }
-        onBackPressedDispatcher.addCallback(this, backCallback)
-
-        binding.viewPager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
-            override fun onPageSelected(position: Int) {
-                binding.bottomNav.menu.getItem(position).isChecked = true
-                backCallback.isEnabled = position != 0
-            }
-        })
     }
 
     fun requestVpnPermissionAndConnect() {
@@ -220,25 +279,6 @@ class MainActivity : AppCompatActivity() {
         } else {
             homeViewModel.startVpn()
         }
-    }
-
-    fun navigateToTab(tabIndex: Int) {
-        if (tabIndex in 0..3) {
-            binding.viewPager.setCurrentItem(tabIndex, false)
-        }
-    }
-
-    fun showCoreManagerDialog() {
-        coreManagerDialog = CoreManagerDialog(
-            context = this,
-            onPickSoFile = {
-                // 打开文件选择器选择 .so 文件或任意二进制
-                pickSoLauncher.launch("*/*")
-            },
-            // 版本/内核信息现在只在设置页显示, 首页没有要刷新的东西
-            onCoreChanged = { }
-        )
-        coreManagerDialog?.show()
     }
 
     /**
@@ -291,5 +331,11 @@ class MainActivity : AppCompatActivity() {
     private companion object {
         /** 外部链接长度上限, 防止超长 URI 撑爆解析与对话框。 */
         const val MAX_NODE_URI_LEN = 2048
+
+        const val EXTRA_AUTO_CONNECT = "auto_connect"
+        const val EXTRA_AUTO_DISCONNECT = "auto_disconnect"
+
+        /** 预热池档位。与 `pool_1`..`pool_64` 的文案一一对应, 顺序不可错。 */
+        val POOL_SIZES = intArrayOf(1, 4, 8, 16, 32, 64)
     }
 }

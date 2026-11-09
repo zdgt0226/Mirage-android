@@ -9,6 +9,14 @@ data class Node(
     val latencyMs: Long? = null,
     val isTesting: Boolean = false,
     val testError: String? = null,
+    /**
+     * 本次 [latencyMs] 是否只量了 TCP 连通性（没做 Mirage 协议握手）。
+     *
+     * 必须跟着延迟值一起存：TCP 测法量不出协议故障，节点 TCP 可达而握手失败时
+     * 它照样给出一个漂亮的小数字。界面必须能把这种数字和完整握手测出来的数字
+     * 区分开，否则又回到「显示绿色但其实不可用」。
+     */
+    val latencyTcpOnly: Boolean = false,
 ) {
     val server: String get() {
         val hp = uri.substringAfter("mirage://").substringAfterLast("@").substringBefore("?")

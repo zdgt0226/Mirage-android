@@ -448,4 +448,18 @@
     <string name="rule_logic_or_sep">OR</string>
     <string name="action_block">Block</string>
     <string name="node_unreachable">Unreachable</string>
+    <!-- Gesture shell (three-page horizontal pager) and the blocked settings page -->
+    <string name="settings_section_routing">Routing &amp; Split</string>
+    <string name="settings_section_dns">DNS Split</string>
+    <string name="settings_section_conn">Connection</string>
+    <string name="settings_row_outbound">Outbound Mode</string>
+    <string name="settings_row_pool">Warm Pool</string>
+    <string name="action_edit">Edit</string>
+    <string name="home_panel_handle">Swipe up for details</string>
+    <string name="home_panel_collapse">Collapse details</string>
+    <string name="home_latency_none">Tunnel RTT: --</string>
+    <string name="node_menu_more">More actions</string>
+    <string name="status_upstream_down">Tunnel up, upstream unreachable</string>
+    <string name="status_upstream_down_hint">Handshake with the node is failing, so traffic cannot be forwarded. Switch nodes or check the server.</string>
+    <string name="node_latency_tcp_fmt">TCP %1$dms</string>
 </resources>
