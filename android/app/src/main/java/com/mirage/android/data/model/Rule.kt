@@ -15,7 +15,7 @@ data class RuleCondition(
 ) {
     /**
      * 返回资源 id 而不是字符串: 这个类没有 Context, 拿不到 getString。
-     * 调用方 (RuleAdapter) 负责解析。
+     * 调用方负责解析。
      */
     @get:StringRes
     val typeDisplayNameRes: Int get() = when (type.lowercase()) {

@@ -90,6 +90,15 @@ fun MirageShell(
     homePage: @Composable () -> Unit,
     settingsPage: @Composable () -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * 外壳级导航是否可用。某一页打开了全屏子界面 (如设置页里的分流规则) 时传 false。
+     *
+     * 为什么要锁: 子界面有返回箭头、暗示的是栈式导航, 而横滑能把它从脚下划走 ——
+     * 2026-11-09 真机实测: 规则页打开时横滑直接跳到首页。页点同理, 子界面上留着
+     * 三个点等于给用户两套互相矛盾的导航模型。锁住期间返回键仍然可用 (子界面自己的
+     * BackHandler 注册在后, 优先级高于外壳的回首页)。
+     */
+    shellNavEnabled: Boolean = true,
 ) {
     val pagerState = rememberPagerState(initialPage = ShellPage.Home.ordinal) { ShellPage.COUNT }
     val scope = rememberCoroutineScope()
@@ -113,7 +122,7 @@ fun MirageShell(
     // 缩放当前页。自己驱动翻页会和系统手势抢同一条输入。
     val backScale = remember { Animatable(1f) }
     val notHome = pagerState.currentPage != ShellPage.Home.ordinal
-    PredictiveBackHandler(enabled = notHome) { progress ->
+    PredictiveBackHandler(enabled = notHome && shellNavEnabled) { progress ->
         try {
             progress.collect { event ->
                 // 0..1 映射到 1.0..0.92: 幅度刻意小, 这是「要走了」的暗示而非一次转场。
@@ -146,6 +155,7 @@ fun MirageShell(
             // 三页常驻。左右页是真实业务页（节点列表的测速中状态、设置页的展开分块），
             // 被回收重建会丢掉这些瞬时状态, 而三页的驻留成本是确定且有限的。
             beyondViewportPageCount = 1,
+            userScrollEnabled = shellNavEnabled,
             key = { it },
         ) { index ->
             Box(Modifier.fillMaxSize()) {
@@ -157,7 +167,7 @@ fun MirageShell(
             }
         }
 
-        PageDots(
+        if (shellNavEnabled) PageDots(
             pagerState = pagerState,
             onSelect = { page ->
                 haptics.tap()
