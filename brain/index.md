@@ -1,10 +1,11 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-11-09T22:54:21.698Z._
+_Auto-generated. Last updated 2026-11-10T15:54:09.267Z._
 
 - [connection-state-truthfulness](pages/connection-state-truthfulness.md) — category: decision | tags: [diagnostics] | **问题**：软件自测总报「连接成功」，而生产节点实际不可用。
 - [container-only-build](pages/container-only-build.md) — category: decision | tags: [build, env] | **宿主机没有 gradle、没有 wrapper、`ANDROID_HOME` 为空。
 - [core-separate-process](pages/core-separate-process.md) — category: decision | tags: [arch, ipc] | **决定**：VPN 内核跑在独立进程 `:core`（`CoreService : VpnService` + JNI），UI 主进程只通过 AIDL（`IMirageCore` / `IMirageCallback`）控制它，并带 Binder 死亡代理与自动重连。
+- [dead-code-reference-nature](pages/dead-code-reference-nature.md) — category: decision | tags: [dead-code, kotlin, android] | 判一个符号是不是死代码，**grep 出来的引用数不作数，必须逐行打开看引用的性质**。
 - [device-first-verification](pages/device-first-verification.md) — category: decision | tags: [process, testing] | **采信规则一：结论以真机实测为准。
 - [endpoint-leak-gate](pages/endpoint-leak-gate.md) — category: decision | tags: [security, ci] | **硬规范（AGENTS.md §4，不可弱化）**：
 - [fake-ip-dns-anti-leak](pages/fake-ip-dns-anti-leak.md) — category: decision | tags: [dns, security] | **决定**：DNS 不走「加密上游」路线，走 **Fake-IP**：代理域名在本地 0ms 返回虚拟地址，App 连该地址时引擎反查域名，**域名随隧道上行由服务端在干净网络远程解析**。
