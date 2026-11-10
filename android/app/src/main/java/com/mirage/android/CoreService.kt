@@ -1146,8 +1146,6 @@ class CoreService : VpnService() {
         val nativeLogs = native(emptyArray()) { MirageNative.recentLogs() }
         return (LogStore.all() + nativeLogs.toList()).takeLast(150).toTypedArray()
     }
-    fun getBuiltinDomainsInternal(): Array<String> = native(emptyArray()) { MirageNative.getBuiltinDomains() }
-    fun getBuiltinIpCountInternal(): Long = native(0L) { MirageNative.getBuiltinIpCount() }
     fun testNodeInternal(uri: String, timeoutMs: Int): Long = native(-1L) { MirageNative.testNode(uri, timeoutMs) }
 
     fun registerCallbackInternal(cb: ICoreCallback?) {
@@ -1320,13 +1318,6 @@ class CoreService : VpnService() {
 
     /** AIDL binder: App 跨进程控制的入口。 */
     private val binder = object : ICoreService.Stub() {
-        override fun start(): Int {
-            if (!NativeLoader.isLoaded()) {
-                log("[core] binder.start 拒绝: 原生内核尚未成功加载")
-                return -1
-            }
-            return startInternal()
-        }
         override fun stop() = stopInternal()
         override fun setNode(uri: String): Boolean = setNodeInternal(uri)
         override fun setPoolSize(poolSize: Int): Boolean = setPoolSizeInternal(poolSize)
@@ -1351,15 +1342,11 @@ class CoreService : VpnService() {
         override fun getStats(): DoubleArray = getStatsInternal()
         override fun getConnectionsJson(): String = getConnectionsJsonInternal()
         override fun recentLogs(): Array<String> = recentLogsInternal()
-        override fun getBuiltinDomains(): Array<String> = getBuiltinDomainsInternal()
-        override fun getBuiltinIpCount(): Long = getBuiltinIpCountInternal()
         override fun testNode(uri: String, timeoutMs: Int): Long = testNodeInternal(uri, timeoutMs)
         override fun loadGeoFiles(geositePath: String?, geoipPath: String?): String =
             native("{\"status\":\"error\"}") {
                 GeoManager.loadGeoFilesToNative(this@CoreService, geositePath, geoipPath)
             }
-        override fun getGeoTags(): String =
-            native("{}") { MirageNative.getGeoTags() }
         override fun getGeoTagsDetail(): String =
             native("{}") { MirageNative.getGeoTagsDetail() }
         override fun getDiagnosticSnapshotJson(): String =
@@ -1369,8 +1356,6 @@ class CoreService : VpnService() {
             runCatching { java.io.File(this@CoreService.filesDir, "core.log").delete() }
             return native(false) { MirageNative.clearNativeLogs() }
         }
-        override fun getLogs(): String =
-            native("") { MirageNative.getLogs() }
         override fun closeConnection(id: Long): Boolean =
             native(false) { MirageNative.closeConnection(id) }
         override fun closeAllConnections(): Int =
@@ -1378,13 +1363,6 @@ class CoreService : VpnService() {
         override fun setOutboundMode(mode: Int): Boolean {
             updateConfig { it.copy(outboundMode = mode) }
             return if (isRunningInternal()) native(false) { MirageNative.setOutboundMode(mode) } else true
-        }
-        override fun getOutboundMode(): Int {
-            return if (isRunningInternal()) {
-                native(serviceConfig.outboundMode) { MirageNative.getOutboundMode() }
-            } else {
-                serviceConfig.outboundMode
-            }
         }
         override fun getRecentRequestsJson(): String =
             native("[]") { MirageNative.getRecentRequestsJson() }
@@ -1402,7 +1380,6 @@ class CoreService : VpnService() {
             pushFailoverPolicy()
             return true
         }
-        override fun getCheckInterval(): Int = serviceConfig.checkIntervalSec
         override fun setFailoverMode(mode: String?): Boolean {
             updateConfig { it.copy(failoverMode = mode ?: "best") }
             pushFailoverPolicy()

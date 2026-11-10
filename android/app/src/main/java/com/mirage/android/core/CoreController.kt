@@ -166,7 +166,6 @@ object CoreController {
     }
 
     // ── 控制 ──
-    fun start(): Int = call { it.start() } ?: -100
     fun stop(context: Context? = null, stopSeq: Long = 0L): Boolean {
         if (context != null) {
             ctx = context.applicationContext
@@ -227,17 +226,11 @@ object CoreController {
     fun getStats(): DoubleArray? = call { it.stats }
     fun getConnectionsJson(): String = call { it.connectionsJson } ?: "[]"
     fun recentLogs(): Array<String> = call { it.recentLogs() } ?: emptyArray()
-    fun getBuiltinDomains(): Array<String> = call { it.builtinDomains } ?: emptyArray()
-    fun getBuiltinIpCount(): Long = call { it.builtinIpCount } ?: 0
     fun testNode(uri: String, timeoutMs: Int): Long = call { it.testNode(uri, timeoutMs) } ?: -1
     fun loadGeoFiles(geositePath: String = "", geoipPath: String = ""): String =
         call { it.loadGeoFiles(geositePath, geoipPath) } ?: runCatching {
             MirageNative.loadGeoFiles(geositePath, geoipPath)
         }.getOrDefault("{\"status\":\"error\"}")
-    fun getGeoTags(): String =
-        call { it.geoTags } ?: runCatching {
-            MirageNative.getGeoTags()
-        }.getOrDefault("{}")
     fun getGeoTagsDetail(): String =
         call { it.geoTagsDetail } ?: runCatching {
             MirageNative.getGeoTagsDetail()
@@ -250,12 +243,10 @@ object CoreController {
      * 原实现是 `?: true`: :core 崩了、还没就绪、或 Binder 抛异常时一律报成功,
      * 调用方 (VpnRepository.clearLogs) 以为已清空, 跨进程中断被彻底掩盖。
      * 本文件其余 call 包装的默认值都偏向失败侧 (isHealthy ?: false、testNode ?: -1、
-     * start ?: -100), 只有这一个反着来。
+     * closeAllConnections ?: 0), 只有这一个反着来。
      */
     fun clearNativeLogs(): Boolean =
         call { it.clearNativeLogs() } ?: false
-    fun getLogs(): String =
-        call { it.logs } ?: ""
     fun closeConnection(id: Long): Boolean {
         if (CommandBusClient.isConnected.value) {
             CommandBusClient.sendCloseConnection(id)
@@ -267,14 +258,11 @@ object CoreController {
         call { it.closeAllConnections() } ?: 0
     fun setOutboundMode(mode: Int): Boolean =
         call { it.setOutboundMode(mode) } ?: false
-    fun getOutboundMode(): Int =
-        call { it.outboundMode } ?: 0
     fun getRecentRequestsJson(): String =
         call { it.recentRequestsJson } ?: "[]"
     fun setAutoReconnect(enabled: Boolean): Boolean = call { it.setAutoReconnect(enabled) } ?: false
     fun isAutoReconnect(): Boolean = call { it.isAutoReconnect } ?: true
     fun setCheckInterval(interval: Int): Boolean = call { it.setCheckInterval(interval) } ?: false
-    fun getCheckInterval(): Int = call { it.checkInterval } ?: 15
     fun setFailoverMode(mode: String): Boolean = call { it.setFailoverMode(mode) } ?: false
     fun getFailoverMode(): String = call { it.failoverMode } ?: "best"
     fun updateNodes(nodesJson: String): Boolean = call { it.updateNodes(nodesJson) } ?: false
