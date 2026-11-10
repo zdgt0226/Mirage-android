@@ -16,3 +16,10 @@ android/.gradle/
 android/keystore.properties
 *.jks
 *.keystore
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+
+# 本地联调产物：测试服务端配置与 pid 文件，可能含真实口令，永不入库。
+config_server_*.json
+*.pid
