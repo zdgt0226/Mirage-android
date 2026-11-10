@@ -39,6 +39,7 @@ import com.mirage.android.ui.theme.MirageTheme
 import com.mirage.android.ui.viewmodel.HomeViewModel
 import com.mirage.android.ui.viewmodel.NodesViewModel
 import com.mirage.android.ui.viewmodel.RulesViewModel
+import com.mirage.android.ui.viewmodel.TrafficViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
@@ -55,6 +56,7 @@ class MainActivity : AppCompatActivity() {
     private val homeViewModel: HomeViewModel by viewModels()
     private val nodesViewModel: NodesViewModel by viewModels()
     private val rulesViewModel: RulesViewModel by viewModels()
+    private val trafficViewModel: TrafficViewModel by viewModels()
 
     private var coreManagerDialog: CoreManagerDialog? = null
 
@@ -160,6 +162,7 @@ class MainActivity : AppCompatActivity() {
                 )
             },
             onSelectNode = { index -> nodesViewModel.selectNode(index) },
+            trafficViewModel = trafficViewModel,
         )
     }
 

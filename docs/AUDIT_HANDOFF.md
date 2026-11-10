@@ -888,8 +888,13 @@ JNI 门禁               protectFd 1 · resolveConnectionOwner 1 · dex 43 = .so
    progress 缩放当前页，没有真机确认过缩放与系统预览窗口叠在一起的观感），
    以及**手势导航下 `navigationBars` inset 为 0 时**面板收起位与页点的几何
    —— SO-02K 的 inset 是 96px，为 0 的那一侧只在代码上成立。
-8. **上滑面板的嵌套滚动契约未验**。S1 的面板里还没有可滚动内容。S2 加入连接信息
-   列表时必须一起验：面板展开后列表滚到顶继续下拉应当收面板，而不是两套滚动打架。
+8. ~~**上滑面板的嵌套滚动契约未验**~~ **（S2，2026-11-09 已验）**。面板里现在有
+   `LazyColumn`（请求流列表），与 `anchoredDraggable` 共用同一个竖直手势方向，
+   靠 `rememberPanelNestedScrollConnection` 协调：`onPreScroll` 在面板未完全展开时
+   吃掉向上的增量，`onPostScroll` 在列表触顶后把向下的增量喂给面板收起，
+   `onPreFling` / `onPostFling` 把速度交给 `panelState.settle`。
+   真机实测（SO-02K）：面板展开后在列表区内上滑 → 列表滚动、面板不动；
+   滚到顶继续下拉 → 面板收起。两套滚动不打架。
 
 ---
 

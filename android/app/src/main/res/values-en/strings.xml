@@ -152,6 +152,8 @@
     <string name="traffic_requests_title">Recent requests</string>
     <string name="traffic_logs_title">Logs</string>
     <string name="filter_all">All</string>
+    <string name="traffic_filter_tcp">TCP</string>
+    <string name="traffic_filter_udp">UDP</string>
     <string name="traffic_requests_empty">No requests yet — this updates live once traffic flows.</string>
     <string name="traffic_search_hint">🔍 Search domain or IP…</string>
     <string name="traffic_export_diag">Export diagnostics</string>
