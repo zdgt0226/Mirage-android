@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [process, testing]
 created: "2026-11-10T01:09:47"
-updated: "2026-11-10T01:13:01"
+updated: "2026-11-10T06:54:21"
 ---
 
 ## compiled_truth
@@ -39,3 +39,9 @@ assertTrue(validHttps.startsWith("https://", ignoreCase = true))
   summary: "固化真机优先与测试有效性两条采信规则"
   source: "AGENTS.md §2 / docs/AUDIT_HANDOFF.md §5.1"
   affects: [device-first-verification]
+
+- time: 2026-11-10T06:54:21
+  kind: evidence
+  summary: "实机回归: S2 面板与 S3 规则页全部真流量验证通过; 热生效 (应用按钮) 用'加拦截规则 + curl + 规则命中计数'三重取证, 不靠截图"
+  source: "设备 BH905W2A9G, 2026-11-10"
+  affects: [ui/s2-detail-panel, ui/s3-rules-compose]
