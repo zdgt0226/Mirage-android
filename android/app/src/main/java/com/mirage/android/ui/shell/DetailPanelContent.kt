@@ -83,6 +83,14 @@ private const val USAGE_REFRESH_MS = 10_000L
  *    把剩余向下的增量喂给 panelState.dispatchRawDelta，驱动面板折叠收起。
  * 3. onPreFling：若面板处于中间未完全展开状态，甩动手势速度直接交给 panelState.settle() 决出停靠档位并消费。
  * 4. onPostFling：列表到顶后剩余的向下甩动速度，交由 panelState.settle() 触发面板折叠吸附。
+ *
+ * **第 1、2 条只认手指拖动 (NestedScrollSource.UserInput), 不认惯性。**
+ * 原先两条不分来源: 松手时列表离顶还差一截, 惯性把它带到顶之后, 剩下的惯性位移
+ * 照样经 onPostScroll 推着面板走。而面板把这些位移全吃了, 列表的惯性动画察觉
+ * 不到「撞到头」, 一直跑到速度自然衰减为零 —— 于是 onPostFling 拿到的剩余速度
+ * 是 0, 没人调 settle, 面板就停在两个档位之间 (实测偏离展开位约 9dp, 要收起再
+ * 展开才恢复)。只认手指拖动之后, 惯性撞顶的剩余速度原样落到 onPostFling, 由
+ * 第 4 条决定收起还是留在展开位。
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -95,7 +103,9 @@ fun rememberPanelNestedScrollConnection(
                 val delta = available.y
                 val currentOffset = panelState.offset
                 val notFullyExpanded = !currentOffset.isNaN() && currentOffset > 0f
-                return if (delta < 0f && notFullyExpanded) {
+                return if (
+                    source == NestedScrollSource.UserInput && delta < 0f && notFullyExpanded
+                ) {
                     val consumed = panelState.dispatchRawDelta(delta)
                     Offset(0f, consumed)
                 } else {
@@ -109,7 +119,7 @@ fun rememberPanelNestedScrollConnection(
                 source: NestedScrollSource,
             ): Offset {
                 val delta = available.y
-                return if (delta > 0f) {
+                return if (source == NestedScrollSource.UserInput && delta > 0f) {
                     val consumedY = panelState.dispatchRawDelta(delta)
                     Offset(0f, consumedY)
                 } else {
@@ -130,7 +140,11 @@ fun rememberPanelNestedScrollConnection(
 
             override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
                 val vy = available.y
-                return if (vy > 0f) {
+                // 兜底: 无论剩余速度是多少, 只要面板不在展开位就必须归档。
+                // 面板停在两个档位之间不是任何手势的合法终态。
+                val currentOffset = panelState.offset
+                val displaced = !currentOffset.isNaN() && currentOffset > 0f
+                return if (vy > 0f || displaced) {
                     panelState.settle(vy)
                     Velocity(0f, vy)
                 } else {
