@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-11-11T01:01:43.483Z._
+_Auto-generated. Last updated 2026-11-11T01:56:28.191Z._
 
 - [connection-state-truthfulness](pages/connection-state-truthfulness.md) — category: decision | tags: [diagnostics] | **问题**：软件自测总报「连接成功」，而生产节点实际不可用。
 - [container-only-build](pages/container-only-build.md) — category: decision | tags: [build, env] | **宿主机没有 gradle、没有 wrapper、`ANDROID_HOME` 为空。
@@ -19,4 +19,5 @@ _Auto-generated. Last updated 2026-11-11T01:01:43.483Z._
 - [protocol-break-v015](pages/protocol-break-v015.md) — category: decision | tags: [protocol, compat] | **事实**：本仓编译进 APK 的协议与上游 mirage-rs **v0.15** 同版。
 - [stacked-pr-merge-protocol](pages/stacked-pr-merge-protocol.md) — category: decision | tags: [process, ci] | **规程一：栈式 PR 必须用合并提交，不能 squash。
 - [tokio-runtime-drop-panic](pages/tokio-runtime-drop-panic.md) — category: concept | tags: [rust, concurrency, gotcha] | **机制**：在某个 tokio runtime **自己的工作线程**上 drop 掉该 runtime 的最后一个 `Arc<Runtime>`，会 panic（`shutdown.rs:51:21`）。
+- [tun-closing-socket-reaping](pages/tun-closing-socket-reaping.md) — category: decision | tags: [tun, smoltcp, tcp] | TUN 栈 (`native/mirage-core/src/tun/mod.rs`) 的 sweeper 回收 smoltcp socket 时, **收尾状态 (FinWait1 / FinWait2 / Closing) 的孤儿时限必须从「最近一次进展」起算, 不能从 so
 - [vendor-not-compiled](pages/vendor-not-compiled.md) — category: concept | tags: [protocol, gotcha] | `native/mirage-core/src/vendor/` 是**上游源码的参考副本**，用于比对，**不参与编译**。
