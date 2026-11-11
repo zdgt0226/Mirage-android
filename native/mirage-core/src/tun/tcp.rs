@@ -126,6 +126,15 @@ impl TunTcpStream {
         s
     }
 
+    /// 取一个强制切断句柄, 见 [`TunTcpAbortHandle`]。
+    pub fn abort_handle(&self) -> TunTcpAbortHandle {
+        TunTcpAbortHandle {
+            stack: self.stack.clone(),
+            handle: self.handle,
+            alive: self.alive.clone(),
+        }
+    }
+
     /// 关闭连接并触发优雅半关闭 (由 sweep 延迟深度回收，杜绝向客户端回送 TCP RST)。
     pub fn close(&self) {
         if !self.alive.swap(false, Ordering::Relaxed) {
@@ -144,6 +153,36 @@ impl TunTcpStream {
 impl Drop for TunTcpStream {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+/// 强制切断一条连接用的句柄 (用户在连接列表里点「断开」)。
+///
+/// 与 [`TunTcpStream::close`] 的优雅半关闭相反: 向客户端回 RST, 并丢弃发送缓冲里
+/// 尚未发出的数据。优雅关闭会把缓冲排空后才发 FIN, 读得慢的客户端因此还要再收
+/// 一阵数据才知道连接没了 —— 那不是「断开」该有的语义 (RFC 9293 §3.10.5 ABORT)。
+///
+/// 流在转发循环里被 `tokio::io::split` 拆进两个 future 之后就拿不到了, 所以在
+/// 拆分之前先取一个句柄留在外面。它与流共享 `alive`: 这里先置位, 流随后 drop
+/// 时的 `close()` 即成空操作, 不会在 RST 之后再补一个 FIN。
+pub struct TunTcpAbortHandle {
+    stack: Arc<TunStack>,
+    handle: SocketHandle,
+    alive: Arc<AtomicBool>,
+}
+
+impl TunTcpAbortHandle {
+    pub fn abort(&self) {
+        if !self.alive.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        {
+            let mut g = lock_inner(&self.stack.inner);
+            if g.sockets.iter().any(|(h, _)| h == self.handle) {
+                g.sockets.get_mut::<tcp::Socket>(self.handle).abort();
+            }
+        }
+        self.stack.poll_now();
     }
 }
 
@@ -509,6 +548,7 @@ async fn relay_proxy(
         );
     }
 
+    let local_abort = stream.abort_handle();
     let (mut local_rd, mut local_wr) = tokio::io::split(stream);
 
     let start_time = std::time::Instant::now();
@@ -662,6 +702,7 @@ async fn relay_proxy(
     tokio::select! {
         _ = conn_abort.notified() => {
             tracing::info!("[TUN-TCP] 连接 #{} 被主动切断 (DELETE /connections/{})", cid, cid);
+            local_abort.abort();
             close_reason = crate::tun::adaptive_idle::CloseReason::ClientClosed;
         }
         (u, u_timeout) = &mut upload => {
@@ -1075,6 +1116,7 @@ async fn relay_direct(
 
     // 双向转发 (smoltcp 侧 TunTcpStream ↔ 真实 socket)
     let mut local = stream;
+    let local_abort = local.abort_handle();
     let (mut lr, mut lw) = tokio::io::split(&mut local);
     let (mut rr, mut rw) = remote.split();
     let start_time = std::time::Instant::now();
@@ -1209,6 +1251,7 @@ async fn relay_direct(
     tokio::select! {
         _ = conn_abort.notified() => {
             tracing::info!("[TUN-TCP/direct] 直连 #{} 被主动切断", cid);
+            local_abort.abort();
             close_reason = crate::tun::adaptive_idle::CloseReason::ClientClosed;
         }
         (u, u_timeout) = &mut to_tunnel => {

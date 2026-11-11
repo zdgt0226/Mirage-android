@@ -61,6 +61,17 @@ pub const TUN_MTU: usize = 1400;
 pub const SOCK_BUF: usize = 256 * 1024;
 /// 无 4 元组的 catcher socket (SYN 来了没人连) 的存活上限, 到点由 sweeper 回收。
 const CATCHER_TTL: Duration = Duration::from_secs(15);
+/// Closed / TimeWait 残骸自 socket 创建起至少留存的时长。
+const DEAD_SOCKET_GRACE: Duration = Duration::from_secs(2);
+/// 处于收尾状态 (FinWait1 / FinWait2 / Closing) 的 socket **连续多久毫无进展**
+/// 才当作孤儿回收。
+///
+/// 计时起点是「最近一次进展」, 不是 socket 的创建时刻。原实现拿创建时刻去比,
+/// 于是任何存活超过 15 秒的连接一旦进入收尾状态就在下一轮 sweep 被立刻摘掉 ——
+/// 发送缓冲里还没发出去的数据 (至多 [`SOCK_BUF`]) 连同 FIN 一起丢失, 对端随后
+/// 的 ACK 撞上不存在的 socket 而收到 RST。服务端先关、且客户端读得比对端发得慢
+/// 时必现 (实测: 限速读取的 10MB 下载少收 164KB 并以连接重置告终)。
+const CLOSING_ORPHAN_TTL: Duration = Duration::from_secs(15);
 /// 泵的定时 tick (驱动 smoltcp 计时器: 重传/窗口/超时)。
 const PUMP_TICK: Duration = Duration::from_millis(25);
 
@@ -90,6 +101,38 @@ struct TunInner {
     sockets: SocketSet<'static>,
     /// catcher/bound socket 的创建时刻 (sweeper 判断 stale 用)。
     created_at: HashMap<SocketHandle, Instant>,
+    /// 收尾状态 socket 的进展记录: (最近一次进展的时刻, 当时的发送队列长度)。
+    /// 发送队列变短 = 对端仍在收数据并回 ACK, 视为进展。见 [`CLOSING_ORPHAN_TTL`]。
+    closing: HashMap<SocketHandle, (Instant, usize)>,
+}
+
+/// socket 是否处于「本端已关闭、等对端收尾」的状态。
+fn is_closing(state: stcp::State) -> bool {
+    matches!(
+        state,
+        stcp::State::FinWait1 | stcp::State::FinWait2 | stcp::State::Closing
+    )
+}
+
+/// sweeper 的回收裁决。纯函数, 便于单测。
+///
+/// - `age`: 距 socket 创建的时长。
+/// - `closing_idle`: 收尾状态下距最近一次进展的时长; 非收尾状态为 `None`。
+fn should_reap(
+    state: stcp::State,
+    has_remote: bool,
+    age: Duration,
+    closing_idle: Option<Duration>,
+) -> bool {
+    match state {
+        // 1. 超时未等到握手的空闲 catcher (无 4 元组)
+        stcp::State::Listen => !has_remote && age >= CATCHER_TTL,
+        // 2. Closed / TimeWait 残骸
+        stcp::State::Closed | stcp::State::TimeWait => age >= DEAD_SOCKET_GRACE,
+        // 3. 收尾状态下对端长时间无响应的孤儿。只看「多久没进展」, 不看连接多老。
+        _ if is_closing(state) => closing_idle.is_some_and(|idle| idle >= CLOSING_ORPHAN_TTL),
+        _ => false,
+    }
 }
 
 /// TUN 引擎。`start` 后持有读线程 JoinHandle 与泵任务句柄。
@@ -172,6 +215,7 @@ impl TunStack {
             device,
             sockets: SocketSet::new(Vec::new()),
             created_at: HashMap::new(),
+            closing: HashMap::new(),
         }));
 
         let mtu = cfg.mtu;
@@ -482,38 +526,41 @@ impl TunStack {
         }
     }
 
-    /// 回收过期的无 4 元组 catcher socket (未完成 TCP 握手的孤儿监听)。
+    /// 回收过期 socket: 无人认领的 catcher、已死的残骸、以及收尾时对端无响应的孤儿。
+    /// 裁决规则见 [`should_reap`]。
     fn sweep(&self) {
-        let mut g = lock_inner(&self.inner);
+        let mut guard = lock_inner(&self.inner);
+        let g = &mut *guard;
         let now = Instant::now();
-        let stale: Vec<SocketHandle> = g
-            .sockets
-            .iter()
-            .filter(|(h, s)| {
-                let age = g.created_at.get(h).copied().unwrap_or(now);
-                match s {
-                    smoltcp::socket::Socket::Tcp(t) => {
-                        // 1. 回收超时未收到 SYN/ACK 的空闲 catcher (无 4 元组)
-                        (t.state() == stcp::State::Listen
-                            && t.remote_endpoint().is_none()
-                            && now.duration_since(age) >= CATCHER_TTL)
-                        // 2. 深度回收残留的 Closed / TimeWait 僵尸 socket
-                        || ((t.state() == stcp::State::Closed || t.state() == stcp::State::TimeWait)
-                            && now.duration_since(age) >= std::time::Duration::from_secs(2))
-                        // 3. 兜底回收孤儿 FinWait (对端无响应)
-                        || ((t.state() == stcp::State::FinWait1 || t.state() == stcp::State::FinWait2 || t.state() == stcp::State::Closing)
-                            && now.duration_since(age) >= std::time::Duration::from_secs(15))
-                    }
-                    _ => false,
+        let mut stale: Vec<SocketHandle> = Vec::new();
+        for (h, s) in g.sockets.iter() {
+            let smoltcp::socket::Socket::Tcp(t) = s else {
+                continue;
+            };
+            let state = t.state();
+            let closing_idle = if is_closing(state) {
+                // 发送队列每变一次就把计时归零: 对端只要还在收数据, 就不是孤儿。
+                let queued = t.send_queue();
+                let entry = g.closing.entry(h).or_insert((now, queued));
+                if entry.1 != queued {
+                    *entry = (now, queued);
                 }
-            })
-            .map(|(h, _)| h)
-            .collect();
+                Some(now.duration_since(entry.0))
+            } else {
+                g.closing.remove(&h);
+                None
+            };
+            let age = now.duration_since(g.created_at.get(&h).copied().unwrap_or(now));
+            if should_reap(state, t.remote_endpoint().is_some(), age, closing_idle) {
+                stale.push(h);
+            }
+        }
         if !stale.is_empty() {
             debug!("[TUN] 回收 {} 个过期 / 僵尸 smoltcp socket", stale.len());
         }
         for h in stale {
             g.created_at.remove(&h);
+            g.closing.remove(&h);
             g.sockets.remove(h);
         }
     }
@@ -708,4 +755,87 @@ fn handle_fake_ip_icmp_echo(stack: &TunStack, pkt: &[u8]) -> Option<PooledBuf> {
         std::net::Ipv4Addr::from(src_bytes)
     );
     Some(reply)
+}
+
+#[cfg(test)]
+mod sweep_tests {
+    use super::*;
+
+    const LONG_LIVED: Duration = Duration::from_secs(3600);
+
+    /// 回归: 连接再老, 只要收尾状态下刚有过进展就不得回收。
+    ///
+    /// 原实现拿 socket 创建时刻判「收尾超过 15 秒」, 一条存活一小时的连接进入
+    /// FinWait1 的瞬间就满足条件, 发送缓冲里未发出的数据随 socket 一起被丢。
+    #[test]
+    fn closing_socket_with_recent_progress_survives_regardless_of_age() {
+        for state in [
+            stcp::State::FinWait1,
+            stcp::State::FinWait2,
+            stcp::State::Closing,
+        ] {
+            assert!(
+                !should_reap(state, true, LONG_LIVED, Some(Duration::ZERO)),
+                "{state:?}: 刚进入收尾状态就被回收"
+            );
+            assert!(
+                !should_reap(
+                    state,
+                    true,
+                    LONG_LIVED,
+                    Some(CLOSING_ORPHAN_TTL - Duration::from_millis(1))
+                ),
+                "{state:?}: 未满孤儿时限就被回收"
+            );
+        }
+    }
+
+    /// 收尾状态下对端持续无响应满时限, 才当孤儿回收 —— 与连接年龄无关。
+    #[test]
+    fn closing_socket_is_reaped_only_after_idle_ttl() {
+        for state in [
+            stcp::State::FinWait1,
+            stcp::State::FinWait2,
+            stcp::State::Closing,
+        ] {
+            assert!(should_reap(
+                state,
+                true,
+                Duration::ZERO,
+                Some(CLOSING_ORPHAN_TTL)
+            ));
+            // 没有进展记录 (不应出现, sweep 总会先登记) 时按不回收处理, 宁留勿错杀。
+            assert!(!should_reap(state, true, LONG_LIVED, None));
+        }
+    }
+
+    /// 另外两条既有规则保持原样。
+    #[test]
+    fn catcher_and_dead_socket_rules_unchanged() {
+        // 无 4 元组的 catcher: 到 CATCHER_TTL 回收, 有 4 元组 (握手中) 不回收。
+        assert!(!should_reap(
+            stcp::State::Listen,
+            false,
+            CATCHER_TTL - Duration::from_millis(1),
+            None
+        ));
+        assert!(should_reap(stcp::State::Listen, false, CATCHER_TTL, None));
+        assert!(!should_reap(stcp::State::Listen, true, LONG_LIVED, None));
+
+        // Closed / TimeWait 残骸。
+        for state in [stcp::State::Closed, stcp::State::TimeWait] {
+            assert!(!should_reap(state, true, Duration::from_secs(1), None));
+            assert!(should_reap(state, true, DEAD_SOCKET_GRACE, None));
+        }
+
+        // 活跃连接永不回收。
+        for state in [
+            stcp::State::SynReceived,
+            stcp::State::Established,
+            stcp::State::CloseWait,
+            stcp::State::LastAck,
+        ] {
+            assert!(!should_reap(state, true, LONG_LIVED, None));
+        }
+    }
 }
