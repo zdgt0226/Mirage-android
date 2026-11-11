@@ -1,6 +1,6 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-11-11T01:56:28.191Z._
+_Auto-generated. Last updated 2026-11-11T10:45:47.981Z._
 
 - [connection-state-truthfulness](pages/connection-state-truthfulness.md) — category: decision | tags: [diagnostics] | **问题**：软件自测总报「连接成功」，而生产节点实际不可用。
 - [container-only-build](pages/container-only-build.md) — category: decision | tags: [build, env] | **宿主机没有 gradle、没有 wrapper、`ANDROID_HOME` 为空。

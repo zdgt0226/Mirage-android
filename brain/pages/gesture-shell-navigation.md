@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [ui]
 created: "2026-11-10T01:09:35"
-updated: "2026-11-10T01:11:07"
+updated: "2026-11-11T18:45:47"
 ---
 
 ## compiled_truth
@@ -40,3 +40,9 @@ M3 1.3 的菜单读 `surfaceContainer*` 而非 `surface`，主题里这批 token
   summary: "固化全手势外壳与 Compose 迁移策略"
   source: docs/UI_REDESIGN_PROPOSAL.md / git log
   affects: [gesture-shell-navigation]
+
+- time: 2026-11-11T18:45:47
+  kind: decision
+  summary: "面板与列表的嵌套滚动只把手指拖动 (NestedScrollSource.UserInput) 的位移转交给面板, 惯性位移不转交; onPostFling 对不在档位上的面板一律 settle。否则惯性撞顶后面板会停在两个档位之间"
+  source: "fix/panel-nested-scroll-settle, 设备 BH905W2A9G 手势回归"
+  affects: [ui/shell/DetailPanelContent.kt]
