@@ -1148,6 +1148,21 @@ class CoreService : VpnService() {
     }
     fun testNodeInternal(uri: String, timeoutMs: Int): Long = native(-1L) { MirageNative.testNode(uri, timeoutMs) }
 
+    /**
+     * 今日 / 本月用量, 读自本进程的 [TrafficStatsStore]。
+     *
+     * 只返回已落盘的部分, 因此比实时累计滞后至多一个落盘周期 (见 trafficJob)。
+     * 刻意不在这里补「未落盘增量」: 那需要调 MirageNative.getStats, 而它内部的
+     * monitor::sample 带副作用 —— 距上一个样本不足 800ms 的调用方会拿到速率 0。
+     * 面板每隔几秒来读一次用量, 若因此挤掉速率推送的采样窗口, 首页速率会周期性
+     * 闪零。用量是粗粒度聚合, 不值得拿实时速率去换。
+     */
+    fun usageTotalsInternal(): LongArray {
+        val (dayUp, dayDown) = TrafficStatsStore.getToday(this)
+        val (monthUp, monthDown) = TrafficStatsStore.getThisMonth(this)
+        return longArrayOf(dayUp, dayDown, monthUp, monthDown)
+    }
+
     fun registerCallbackInternal(cb: ICoreCallback?) {
         if (cb == null) return
         // register() 按 binder 身份去重, 重连后重复注册不会累积
@@ -1340,6 +1355,7 @@ class CoreService : VpnService() {
         override fun isHealthy(): Boolean = isHealthyInternal()
         override fun latencyMs(): Long = latencyMsInternal()
         override fun getStats(): DoubleArray = getStatsInternal()
+        override fun getUsageTotals(): LongArray = usageTotalsInternal()
         override fun getConnectionsJson(): String = getConnectionsJsonInternal()
         override fun recentLogs(): Array<String> = recentLogsInternal()
         override fun testNode(uri: String, timeoutMs: Int): Long = testNodeInternal(uri, timeoutMs)

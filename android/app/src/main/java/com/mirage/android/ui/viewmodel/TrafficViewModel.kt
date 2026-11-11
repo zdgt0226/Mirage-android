@@ -5,7 +5,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.mirage.android.data.model.LogLevel
 import com.mirage.android.data.model.TrafficStats
+import com.mirage.android.data.model.UsageTotals
 import com.mirage.android.data.repository.VpnRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
@@ -18,6 +20,11 @@ class TrafficViewModel(application: Application) : AndroidViewModel(application)
     val connections: StateFlow<List<com.mirage.android.data.model.ConnectionInfo>> = vpnRepo.connections
     val recentRequests: StateFlow<List<com.mirage.android.data.model.RecentRequestInfo>> = vpnRepo.recentRequests
     val rawLogs: StateFlow<List<String>> = vpnRepo.logs
+    val usage: StateFlow<UsageTotals?> = vpnRepo.usageTotals
+
+    /** 面板列表区当前显示的是活跃连接 (true) 还是请求流 (false)。 */
+    private val _showConnections = MutableStateFlow(false)
+    val showConnections: StateFlow<Boolean> = _showConnections.asStateFlow()
 
     private val _selectedLogLevel = MutableStateFlow(LogLevel.ALL)
     val selectedLogLevel: StateFlow<LogLevel> = _selectedLogLevel.asStateFlow()
@@ -76,8 +83,22 @@ class TrafficViewModel(application: Application) : AndroidViewModel(application)
         _searchQuery.value = query
     }
 
+    /** 选协议过滤即回到请求流视图: 协议过滤只作用于请求流, 不作用于连接列表。 */
     fun setProtocolFilter(proto: String) {
         _protocolFilter.value = proto
+        _showConnections.value = false
+    }
+
+    fun selectConnections() {
+        _showConnections.value = true
+    }
+
+    fun refreshUsage() {
+        viewModelScope.launch(Dispatchers.IO) { vpnRepo.refreshUsageTotals() }
+    }
+
+    fun closeConnection(id: Long) {
+        viewModelScope.launch(Dispatchers.IO) { vpnRepo.closeConnection(id) }
     }
 
     fun setOutboundFilter(outbound: String) {

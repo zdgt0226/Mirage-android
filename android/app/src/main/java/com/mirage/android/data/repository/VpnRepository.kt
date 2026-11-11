@@ -45,6 +45,10 @@ class VpnRepository(private val context: Context) {
     private val _connections = MutableStateFlow<List<com.mirage.android.data.model.ConnectionInfo>>(emptyList())
     val connections: StateFlow<List<com.mirage.android.data.model.ConnectionInfo>> = _connections.asStateFlow()
 
+    /** 今日 / 本月用量。null = 还没从 :core 读到过 (未绑定或首次读取尚未返回)。 */
+    private val _usageTotals = MutableStateFlow<com.mirage.android.data.model.UsageTotals?>(null)
+    val usageTotals: StateFlow<com.mirage.android.data.model.UsageTotals?> = _usageTotals.asStateFlow()
+
     private val _recentRequests = MutableStateFlow<List<com.mirage.android.data.model.RecentRequestInfo>>(emptyList())
     val recentRequests: StateFlow<List<com.mirage.android.data.model.RecentRequestInfo>> = _recentRequests.asStateFlow()
 
@@ -138,8 +142,8 @@ class VpnRepository(private val context: Context) {
     }
 
     /**
-     * 标记当前用户是否正在观察【监控/日志】页面。
-     * 当用户离开监控 Tab 或 App 退到后台时挂起重型 JSON 轮询；切入时即时唤醒更新。
+     * 标记首页详情面板是否展开。
+     * 面板收起或 App 退到后台时挂起连接列表 / 请求流的 JSON 轮询；展开时即时唤醒更新。
      */
     fun setMonitorActive(active: Boolean) {
         val prev = isMonitorActive.getAndSet(active)
@@ -512,6 +516,30 @@ class VpnRepository(private val context: Context) {
         return success
     }
 
+    /**
+     * 拉一次今日 / 本月用量。**Binder 调用, 调用方须在 IO 线程。**
+     *
+     * 读不到 (未绑定 / Binder 异常) 时保留上一次读数: 把它覆盖成 0 会让用户以为
+     * 用量被清空了。
+     */
+    fun refreshUsageTotals() {
+        com.mirage.android.data.model.UsageTotals.fromArray(CoreController.getUsageTotals())
+            ?.let { _usageTotals.value = it }
+    }
+
+    /**
+     * 断开一条活跃连接。**Binder 调用, 调用方须在 IO 线程。**
+     *
+     * 成功后先就地摘掉这一行, 不等下一轮轮询 —— 否则用户点了「断开」, 那一行
+     * 还要在列表里再挂最多两秒, 看起来像没点上。内核若因故没断成, 下一轮快照
+     * 会把它重新带回来。
+     */
+    fun closeConnection(id: Long): Boolean {
+        val ok = CoreController.closeConnection(id)
+        if (ok) _connections.update { list -> list.filterNot { it.id == id } }
+        return ok
+    }
+
     fun clearLogs() {
         _logs.value = emptyList()
         com.mirage.android.core.LogStore.clear()
@@ -609,15 +637,14 @@ class VpnRepository(private val context: Context) {
                         _upstreamHealthy.value = CoreController.isHealthy()
                     }
 
-                    // 2. 日志与活跃连接/近期请求拉取:
-                    // 仅当处于前台且用户正停留在【监控】Tab (isMonitorActive = true) 时才拉取与解析 JSON
+                    // 2. 活跃连接 / 近期请求拉取:
+                    // 仅当处于前台且详情面板展开 (isMonitorActive = true) 时才拉取与解析 JSON。
+                    //
+                    // 这里原先还有一次 recentLogs() 拉取。Compose 外壳里没有日志页, _logs
+                    // 没有任何读者, 面板一展开就每两秒白做一次 Binder 往返 —— 已去掉。
+                    // _logs 仍由 onLog 回调增量维护, 将来补日志页时数据是现成的。
                     if (foreground && monitorActive) {
                         if (tick % 2 == 0L) {
-                            val remoteLogs = CoreController.recentLogs().toList()
-                            if (remoteLogs.isNotEmpty()) {
-                                _logs.value = remoteLogs.takeLast(150)
-                            }
-
                             val connJson = CoreController.getConnectionsJson()
                             if (connJson != lastConnJson) {
                                 lastConnJson = connJson

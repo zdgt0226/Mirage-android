@@ -369,7 +369,11 @@
     <string name="tun_sum_mux_off">单流UDP</string>
     <string name="home_total_fmt">累计: ↑%1$s / ↓%2$s</string>
     <string name="home_conns_fmt">连接: %1$s</string>
-    <string name="home_usage_fmt">今日用量: ↑%1$s / ↓%2$s · 本月: ↑%3$s / ↓%4$s</string>
+    <string name="home_usage_today_fmt">今日: ↑%1$s / ↓%2$s</string>
+    <string name="home_usage_month_fmt">本月: ↑%1$s / ↓%2$s</string>
+    <string name="panel_view_connections">连接</string>
+    <string name="connections_empty">暂无活跃连接</string>
+    <string name="conn_close">断开</string>
     <string name="nav_home_title">首页</string>
     <string name="nav_nodes_title">节点</string>
     <string name="nav_rules_title">规则</string>

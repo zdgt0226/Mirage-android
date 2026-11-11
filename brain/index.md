@@ -1,9 +1,10 @@
 # Brain Index
 
-_Auto-generated. Last updated 2026-11-10T15:54:09.267Z._
+_Auto-generated. Last updated 2026-11-11T01:01:43.483Z._
 
 - [connection-state-truthfulness](pages/connection-state-truthfulness.md) — category: decision | tags: [diagnostics] | **问题**：软件自测总报「连接成功」，而生产节点实际不可用。
 - [container-only-build](pages/container-only-build.md) — category: decision | tags: [build, env] | **宿主机没有 gradle、没有 wrapper、`ANDROID_HOME` 为空。
+- [core-owned-state-via-aidl](pages/core-owned-state-via-aidl.md) — category: decision | tags: [aidl, process, sharedpreferences] | `:core` 进程写入的持久化状态，UI 进程**不得**直接打开同名 SharedPreferences 去读，必须经 `ICoreService` 由 `:core` 自己读出来返回。
 - [core-separate-process](pages/core-separate-process.md) — category: decision | tags: [arch, ipc] | **决定**：VPN 内核跑在独立进程 `:core`（`CoreService : VpnService` + JNI），UI 主进程只通过 AIDL（`IMirageCore` / `IMirageCallback`）控制它，并带 Binder 死亡代理与自动重连。
 - [dead-code-reference-nature](pages/dead-code-reference-nature.md) — category: decision | tags: [dead-code, kotlin, android] | 判一个符号是不是死代码，**grep 出来的引用数不作数，必须逐行打开看引用的性质**。
 - [device-first-verification](pages/device-first-verification.md) — category: decision | tags: [process, testing] | **采信规则一：结论以真机实测为准。
