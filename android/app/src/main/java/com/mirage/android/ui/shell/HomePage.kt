@@ -69,9 +69,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mirage.android.R
 import com.mirage.android.data.model.Node
 import com.mirage.android.data.model.TrafficStats
+import com.mirage.android.data.model.UsageTotals
 import com.mirage.android.data.model.VpnState
 import com.mirage.android.ui.theme.mirage
 import com.mirage.android.ui.viewmodel.TrafficViewModel
@@ -134,6 +136,7 @@ fun HomePage(
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
     val haptics = rememberShellHaptics()
+    val usage by trafficViewModel.usage.collectAsStateWithLifecycle()
     // 导航栏 inset: 面板收起位与静息层的底部留白都要把它算进去 (见 DOTS_RESERVE)。
     val navBottomPx = WindowInsets.navigationBars.getBottom(density)
     val snapSpec = motionAware(ShellMotion.drawer<Float>())
@@ -295,6 +298,7 @@ fun HomePage(
                     stats = stats,
                     latencyMs = latencyMs,
                     upstreamHealthy = upstreamHealthy,
+                    usage = usage,
                 )
                 Spacer(Modifier.height(10.dp))
                 DetailPanelContent(
@@ -390,13 +394,20 @@ private fun DetailPanelSurface(
     }
 }
 
-/** 面板里的速率 / 延迟 / 累计摘要。连接信息列表留给 S2。 */
+/**
+ * 面板里的速率 / 延迟 / 累计 / 今日与本月用量摘要。
+ *
+ * [usage] 为 null 表示还没从 :core 读到过。此时两行用量照常占位、数值显示「--」,
+ * **不能整行隐藏**: 面板高度由内容测量决定 (见 DetailPanelSurface), 是 anchors
+ * 的来源, 读数到达时多出两行会让展开位当场跳一下。
+ */
 @Composable
 private fun PanelSummary(
     state: VpnState,
     stats: TrafficStats,
     latencyMs: Long,
     upstreamHealthy: Boolean,
+    usage: UsageTotals?,
 ) {
     val colors = MaterialTheme.mirage
     Column {
@@ -424,15 +435,26 @@ private fun PanelSummary(
             )
         }
         Spacer(Modifier.height(16.dp))
-        Text(
-            text = if (state.isRunning && latencyMs > 0) {
-                stringResource(R.string.home_rtt, latencyMs.toString())
-            } else {
-                stringResource(R.string.home_latency_none)
-            },
-            style = MaterialTheme.typography.bodyMedium,
-            color = colors.inkSecondary,
-        )
+        // RTT 与连接数并成一行: 给下面新增的两行用量腾高度。面板摘要每多一行,
+        // 小屏上列表区就少一行可见内容。
+        Row(Modifier.fillMaxWidth()) {
+            Text(
+                text = if (state.isRunning && latencyMs > 0) {
+                    stringResource(R.string.home_rtt, latencyMs.toString())
+                } else {
+                    stringResource(R.string.home_latency_none)
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.inkSecondary,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = stringResource(R.string.home_conns_fmt, stats.tcpConns + stats.udpFlows),
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.inkSecondary,
+                modifier = Modifier.weight(1f),
+            )
+        }
         Spacer(Modifier.height(4.dp))
         Text(
             text = stringResource(
@@ -445,12 +467,30 @@ private fun PanelSummary(
         )
         Spacer(Modifier.height(4.dp))
         Text(
-            text = stringResource(R.string.home_conns_fmt, stats.tcpConns + stats.udpFlows),
+            text = stringResource(
+                R.string.home_usage_today_fmt,
+                usage.fmt { it.todayUp },
+                usage.fmt { it.todayDown },
+            ),
+            style = MaterialTheme.typography.bodyMedium,
+            color = colors.inkSecondary,
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = stringResource(
+                R.string.home_usage_month_fmt,
+                usage.fmt { it.monthUp },
+                usage.fmt { it.monthDown },
+            ),
             style = MaterialTheme.typography.bodyMedium,
             color = colors.inkSecondary,
         )
     }
 }
+
+/** 用量读数的展示串; 尚未读到时为「--」。与累计行共用同一个格式化器, 单位进位一致。 */
+private fun UsageTotals?.fmt(pick: (UsageTotals) -> Long): String =
+    if (this == null) "--" else TrafficStats.fmtBytes(pick(this).toDouble())
 
 @Composable
 private fun RateCell(

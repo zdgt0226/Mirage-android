@@ -26,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -49,11 +50,22 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import android.text.format.DateUtils
 import com.mirage.android.R
+import com.mirage.android.data.model.ConnectionInfo
 import com.mirage.android.data.model.RecentRequestInfo
 import com.mirage.android.data.repository.VpnRepository
 import com.mirage.android.ui.theme.mirage
 import com.mirage.android.ui.viewmodel.TrafficViewModel
+import kotlinx.coroutines.delay
+
+/**
+ * 面板展开期间重读今日 / 本月用量的间隔。
+ *
+ * 账本每 30 秒才落盘一次 (CoreService 的 trafficJob), 读得比这更勤拿到的也是
+ * 同一个数, 只是白做 Binder 往返。10 秒是「落盘后最多再等 10 秒就能看到」。
+ */
+private const val USAGE_REFRESH_MS = 10_000L
 
 /**
  * 面板与列表之间的嵌套滚动协调器。
@@ -261,16 +273,22 @@ private enum class ProtocolOption(val filterValue: String, val labelRes: Int) {
 }
 
 /**
- * 协议过滤按钮行 (ALL / TCP / UDP)。
+ * 列表区的视图选择行: 请求流的协议过滤 (ALL / TCP / UDP) + 活跃连接。
+ *
+ * 四个胶囊是**同一组单选**, 不是「页签 + 过滤」两层: 小屏上列表区只有一百多 dp
+ * 高, 再叠一行页签就只剩一行半内容。中间那条竖线是唯一的分组提示 —— 左边三个
+ * 过滤请求流, 右边一个换成连接列表; 协议过滤不作用于连接列表, 所以选中「连接」
+ * 时左边三个一律不高亮。
  */
 @Composable
-fun ProtocolFilterRow(
+fun PanelViewRow(
     selectedProtocol: String,
+    connectionsSelected: Boolean,
     onSelectProtocol: (String) -> Unit,
+    onSelectConnections: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = MaterialTheme.mirage
-    val haptics = rememberShellHaptics()
 
     Row(
         modifier = modifier.fillMaxWidth(),
@@ -278,44 +296,165 @@ fun ProtocolFilterRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         ProtocolOption.entries.forEach { option ->
-            val isSelected = selectedProtocol.equals(option.filterValue, ignoreCase = true)
-            val interaction = remember { MutableInteractionSource() }
-            val pressed by interaction.collectIsPressedAsState()
-            val scale by animateFloatAsState(
-                targetValue = if (pressed) 0.95f else 1f,
-                animationSpec = motionAware(ShellMotion.press()),
-                label = "protocolFilterScale",
+            PanelChip(
+                label = stringResource(option.labelRes),
+                selected = !connectionsSelected &&
+                    selectedProtocol.equals(option.filterValue, ignoreCase = true),
+                onClick = { onSelectProtocol(option.filterValue) },
             )
+        }
+        Box(
+            Modifier
+                .width(1.dp)
+                .height(16.dp)
+                .background(colors.outline),
+        )
+        PanelChip(
+            label = stringResource(R.string.panel_view_connections),
+            selected = connectionsSelected,
+            onClick = onSelectConnections,
+        )
+    }
+}
 
-            Box(
-                modifier = Modifier
-                    .graphicsLayer {
-                        scaleX = scale
-                        scaleY = scale
-                    }
-                    .clip(RoundedCornerShape(50))
-                    .background(if (isSelected) colors.blue else colors.pillBg)
-                    .border(
-                        width = 1.dp,
-                        color = if (isSelected) colors.blue else colors.pillStroke,
-                        shape = RoundedCornerShape(50),
-                    )
-                    .clickable(
-                        interactionSource = interaction,
-                        indication = null,
-                    ) {
-                        haptics.segmentTick()
-                        onSelectProtocol(option.filterValue)
-                    }
-                    .padding(horizontal = 14.dp, vertical = 6.dp),
-                contentAlignment = Alignment.Center,
+@Composable
+private fun PanelChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val colors = MaterialTheme.mirage
+    val haptics = rememberShellHaptics()
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.95f else 1f,
+        animationSpec = motionAware(ShellMotion.press()),
+        label = "panelChipScale",
+    )
+
+    Box(
+        modifier = Modifier
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .clip(RoundedCornerShape(50))
+            .background(if (selected) colors.blue else colors.pillBg)
+            .border(
+                width = 1.dp,
+                color = if (selected) colors.blue else colors.pillStroke,
+                shape = RoundedCornerShape(50),
+            )
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+            ) {
+                haptics.segmentTick()
+                onClick()
+            }
+            .padding(horizontal = 14.dp, vertical = 6.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = if (selected) Color.White else colors.inkSecondary,
+        )
+    }
+}
+
+/**
+ * 活跃连接单项卡片: 目标、协议、已传字节、存活时长, 右侧一个「断开」。
+ *
+ * 断开不二次确认: 它只掐掉这一条连接, 应用会自行重连, 不改任何配置 ——
+ * 弹确认框的成本高于误触的成本。
+ */
+@Composable
+private fun ConnectionItem(
+    item: ConnectionInfo,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = MaterialTheme.mirage
+    val haptics = rememberShellHaptics()
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(colors.card)
+            .border(1.dp, colors.outline.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+            .padding(start = 12.dp, top = 8.dp, bottom = 8.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = stringResource(option.labelRes),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (isSelected) Color.White else colors.inkSecondary,
+                    text = item.target.ifBlank { "-" },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.ink,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                Spacer(Modifier.width(8.dp))
+                OutboundBadge(outbound = item.outbound)
+            }
+
+            Spacer(Modifier.height(4.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ProtocolBadge(protocol = item.protocol)
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = "·",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.inkSecondary,
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = "↑${item.upFormatted} ↓${item.downFormatted}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.inkSecondary,
+                    maxLines = 1,
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = "·",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.inkSecondary,
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = DateUtils.formatElapsedTime(item.durationSecs),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.inkSecondary,
+                    maxLines = 1,
                 )
             }
+        }
+
+        Spacer(Modifier.width(8.dp))
+
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(50))
+                .background(colors.error.copy(alpha = 0.12f))
+                .clickable {
+                    haptics.tap()
+                    onClose()
+                }
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = stringResource(R.string.conn_close),
+                style = MaterialTheme.typography.labelMedium,
+                color = colors.error,
+            )
         }
     }
 }
@@ -445,9 +584,21 @@ fun DetailPanelContent(
     val historyDown by vm.historyDown.collectAsStateWithLifecycle()
     val requests by vm.filteredRecentRequests.collectAsStateWithLifecycle()
     val protocolFilter by vm.protocolFilter.collectAsStateWithLifecycle()
+    val showConnections by vm.showConnections.collectAsStateWithLifecycle()
+    val connections by vm.connections.collectAsStateWithLifecycle()
 
     // 监控活动激活：当面板处于展开状态时，唤醒后台 telemetry 轮询连接与请求流
     val isExpanded = panelState.targetValue == PanelAnchor.Expanded
+    // 今日 / 本月用量只在面板展开期间重读。摘要行本身在 HomePage 的 PanelSummary 里,
+    // 刷新节拍放这儿是因为「展开与否」的判定在这儿。
+    LaunchedEffect(isExpanded) {
+        if (isExpanded) {
+            while (true) {
+                vm.refreshUsage()
+                delay(USAGE_REFRESH_MS)
+            }
+        }
+    }
     DisposableEffect(isExpanded) {
         if (isExpanded) {
             VpnRepository.getInstance(context).setMonitorActive(true)
@@ -473,15 +624,17 @@ fun DetailPanelContent(
 
         Spacer(Modifier.height(10.dp))
 
-        // 2. 协议过滤标签行 (ALL / TCP / UDP)
-        ProtocolFilterRow(
+        // 2. 视图选择行: 请求流协议过滤 (ALL / TCP / UDP) | 活跃连接
+        PanelViewRow(
             selectedProtocol = protocolFilter,
+            connectionsSelected = showConnections,
             onSelectProtocol = { proto -> vm.setProtocolFilter(proto) },
+            onSelectConnections = { vm.selectConnections() },
         )
 
         Spacer(Modifier.height(8.dp))
 
-        // 3. 近期请求流列表 (LazyColumn)
+        // 3. 列表区: 活跃连接 或 近期请求流, 由上面那行单选决定
         LazyColumn(
             modifier = Modifier
                 .fillMaxWidth()
@@ -490,7 +643,37 @@ fun DetailPanelContent(
             verticalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PaddingValues(vertical = 4.dp),
         ) {
-            if (requests.isEmpty()) {
+            if (showConnections) {
+                if (connections.isEmpty()) {
+                    item(key = "connections_empty") {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 24.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = stringResource(R.string.connections_empty),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = colors.inkSecondary,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+                    }
+                } else {
+                    items(
+                        items = connections,
+                        // 前缀避免与请求流的 key 空间相撞: 两种列表共用一个 LazyColumn,
+                        // 切换瞬间新旧项会同时存在于一次组合里。
+                        key = { "conn_${it.id}" },
+                    ) { conn ->
+                        ConnectionItem(
+                            item = conn,
+                            onClose = { vm.closeConnection(conn.id) },
+                        )
+                    }
+                }
+            } else if (requests.isEmpty()) {
                 item(key = "empty_state") {
                     Box(
                         modifier = Modifier

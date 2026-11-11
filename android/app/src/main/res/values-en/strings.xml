@@ -368,7 +368,11 @@
     <string name="tun_sum_mux_off">single UDP</string>
     <string name="home_total_fmt">Total: ↑%1$s / ↓%2$s</string>
     <string name="home_conns_fmt">Connections: %1$s</string>
-    <string name="home_usage_fmt">Today: ↑%1$s / ↓%2$s · This month: ↑%3$s / ↓%4$s</string>
+    <string name="home_usage_today_fmt">Today: ↑%1$s / ↓%2$s</string>
+    <string name="home_usage_month_fmt">This month: ↑%1$s / ↓%2$s</string>
+    <string name="panel_view_connections">Conns</string>
+    <string name="connections_empty">No active connections.</string>
+    <string name="conn_close">Close</string>
     <string name="nav_home_title">Home</string>
     <string name="nav_nodes_title">Nodes</string>
     <string name="nav_rules_title">Rules</string>

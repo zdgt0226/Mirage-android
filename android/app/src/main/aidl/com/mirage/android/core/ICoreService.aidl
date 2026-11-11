@@ -32,6 +32,12 @@ interface ICoreService {
     long latencyMs();
     /** [up,down,upRate,downRate,tcp,udp,dns] */
     double[] getStats();
+    /**
+     * 历史用量 [todayUp, todayDown, monthUp, monthDown], 单位字节。
+     * 账本由 :core 进程写, 也只能由 :core 进程读: UI 进程直接打开同名
+     * SharedPreferences 拿到的是它自己进程内的陈旧缓存。
+     */
+    long[] getUsageTotals();
     String getConnectionsJson();
     String[] recentLogs();
     /** 完整握手测活, RTT ms 或 -1。 */

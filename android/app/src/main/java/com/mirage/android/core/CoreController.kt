@@ -224,6 +224,8 @@ object CoreController {
     fun isHealthy(): Boolean = call { it.isHealthy() } ?: false
     fun latencyMs(): Long = call { it.latencyMs() } ?: -1
     fun getStats(): DoubleArray? = call { it.stats }
+    /** 未绑定或 Binder 异常时返回 null —— 调用方据此保留上一次读数, 而不是显示成 0。 */
+    fun getUsageTotals(): LongArray? = call { it.usageTotals }
     fun getConnectionsJson(): String = call { it.connectionsJson } ?: "[]"
     fun recentLogs(): Array<String> = call { it.recentLogs() } ?: emptyArray()
     fun testNode(uri: String, timeoutMs: Int): Long = call { it.testNode(uri, timeoutMs) } ?: -1
