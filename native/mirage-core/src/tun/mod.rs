@@ -61,9 +61,9 @@ pub const TUN_MTU: usize = 1400;
 pub const SOCK_BUF: usize = 256 * 1024;
 /// 无 4 元组的 catcher socket (SYN 来了没人连) 的存活上限, 到点由 sweeper 回收。
 const CATCHER_TTL: Duration = Duration::from_secs(15);
-/// Closed / TimeWait 残骸自 socket 创建起至少留存的时长。
+/// Closed / TimeWait 残骸自进入该状态起至少留存的时长。
 const DEAD_SOCKET_GRACE: Duration = Duration::from_secs(2);
-/// 处于收尾状态 (FinWait1 / FinWait2 / Closing) 的 socket **连续多久毫无进展**
+/// 处于收尾状态 (FinWait1 / FinWait2 / Closing / LastAck) 的 socket **连续多久毫无进展**
 /// 才当作孤儿回收。
 ///
 /// 计时起点是「最近一次进展」, 不是 socket 的创建时刻。原实现拿创建时刻去比,
@@ -104,13 +104,15 @@ struct TunInner {
     /// 收尾状态 socket 的进展记录: (最近一次进展的时刻, 当时的发送队列长度)。
     /// 发送队列变短 = 对端仍在收数据并回 ACK, 视为进展。见 [`CLOSING_ORPHAN_TTL`]。
     closing: HashMap<SocketHandle, (Instant, usize)>,
+    /// Closed / TimeWait 状态首次进入的时刻 (见 [`DEAD_SOCKET_GRACE`])。
+    dead_at: HashMap<SocketHandle, Instant>,
 }
 
 /// socket 是否处于「本端已关闭、等对端收尾」的状态。
 fn is_closing(state: stcp::State) -> bool {
     matches!(
         state,
-        stcp::State::FinWait1 | stcp::State::FinWait2 | stcp::State::Closing
+        stcp::State::FinWait1 | stcp::State::FinWait2 | stcp::State::Closing | stcp::State::LastAck
     )
 }
 
@@ -118,17 +120,21 @@ fn is_closing(state: stcp::State) -> bool {
 ///
 /// - `age`: 距 socket 创建的时长。
 /// - `closing_idle`: 收尾状态下距最近一次进展的时长; 非收尾状态为 `None`。
+/// - `dead_age`: `Closed` / `TimeWait` 状态下距首次进入该状态的时长; 其余状态为 `None`。
 fn should_reap(
     state: stcp::State,
     has_remote: bool,
     age: Duration,
     closing_idle: Option<Duration>,
+    dead_age: Option<Duration>,
 ) -> bool {
     match state {
         // 1. 超时未等到握手的空闲 catcher (无 4 元组)
         stcp::State::Listen => !has_remote && age >= CATCHER_TTL,
-        // 2. Closed / TimeWait 残骸
-        stcp::State::Closed | stcp::State::TimeWait => age >= DEAD_SOCKET_GRACE,
+        // 2. Closed / TimeWait 残骸: 按进入死态的时长而非创建时长裁决, 确保长连接也有完整宽限期
+        stcp::State::Closed | stcp::State::TimeWait => {
+            dead_age.is_some_and(|d| d >= DEAD_SOCKET_GRACE)
+        }
         // 3. 收尾状态下对端长时间无响应的孤儿。只看「多久没进展」, 不看连接多老。
         _ if is_closing(state) => closing_idle.is_some_and(|idle| idle >= CLOSING_ORPHAN_TTL),
         _ => false,
@@ -216,6 +222,7 @@ impl TunStack {
             sockets: SocketSet::new(Vec::new()),
             created_at: HashMap::new(),
             closing: HashMap::new(),
+            dead_at: HashMap::new(),
         }));
 
         let mtu = cfg.mtu;
@@ -550,8 +557,21 @@ impl TunStack {
                 g.closing.remove(&h);
                 None
             };
+            let dead_age = if matches!(state, stcp::State::Closed | stcp::State::TimeWait) {
+                let entered = *g.dead_at.entry(h).or_insert(now);
+                Some(now.duration_since(entered))
+            } else {
+                g.dead_at.remove(&h);
+                None
+            };
             let age = now.duration_since(g.created_at.get(&h).copied().unwrap_or(now));
-            if should_reap(state, t.remote_endpoint().is_some(), age, closing_idle) {
+            if should_reap(
+                state,
+                t.remote_endpoint().is_some(),
+                age,
+                closing_idle,
+                dead_age,
+            ) {
                 stale.push(h);
             }
         }
@@ -561,6 +581,7 @@ impl TunStack {
         for h in stale {
             g.created_at.remove(&h);
             g.closing.remove(&h);
+            g.dead_at.remove(&h);
             g.sockets.remove(h);
         }
     }
@@ -773,9 +794,10 @@ mod sweep_tests {
             stcp::State::FinWait1,
             stcp::State::FinWait2,
             stcp::State::Closing,
+            stcp::State::LastAck,
         ] {
             assert!(
-                !should_reap(state, true, LONG_LIVED, Some(Duration::ZERO)),
+                !should_reap(state, true, LONG_LIVED, Some(Duration::ZERO), None),
                 "{state:?}: 刚进入收尾状态就被回收"
             );
             assert!(
@@ -783,7 +805,8 @@ mod sweep_tests {
                     state,
                     true,
                     LONG_LIVED,
-                    Some(CLOSING_ORPHAN_TTL - Duration::from_millis(1))
+                    Some(CLOSING_ORPHAN_TTL - Duration::from_millis(1)),
+                    None,
                 ),
                 "{state:?}: 未满孤儿时限就被回收"
             );
@@ -797,19 +820,21 @@ mod sweep_tests {
             stcp::State::FinWait1,
             stcp::State::FinWait2,
             stcp::State::Closing,
+            stcp::State::LastAck,
         ] {
             assert!(should_reap(
                 state,
                 true,
                 Duration::ZERO,
-                Some(CLOSING_ORPHAN_TTL)
+                Some(CLOSING_ORPHAN_TTL),
+                None,
             ));
             // 没有进展记录 (不应出现, sweep 总会先登记) 时按不回收处理, 宁留勿错杀。
-            assert!(!should_reap(state, true, LONG_LIVED, None));
+            assert!(!should_reap(state, true, LONG_LIVED, None, None));
         }
     }
 
-    /// 另外两条既有规则保持原样。
+    /// 另外两条既有规则保持原样, 且长连接进入 Closed / TimeWait 后同样享有完整 DEAD_SOCKET_GRACE。
     #[test]
     fn catcher_and_dead_socket_rules_unchanged() {
         // 无 4 元组的 catcher: 到 CATCHER_TTL 回收, 有 4 元组 (握手中) 不回收。
@@ -817,25 +842,64 @@ mod sweep_tests {
             stcp::State::Listen,
             false,
             CATCHER_TTL - Duration::from_millis(1),
+            None,
+            None,
+        ));
+        assert!(should_reap(
+            stcp::State::Listen,
+            false,
+            CATCHER_TTL,
+            None,
             None
         ));
-        assert!(should_reap(stcp::State::Listen, false, CATCHER_TTL, None));
-        assert!(!should_reap(stcp::State::Listen, true, LONG_LIVED, None));
+        assert!(!should_reap(
+            stcp::State::Listen,
+            true,
+            LONG_LIVED,
+            None,
+            None
+        ));
 
-        // Closed / TimeWait 残骸。
+        // Closed / TimeWait 残骸: 无论连接自身存活多久 (LONG_LIVED), 都必须自进入死态起满 DEAD_SOCKET_GRACE 才回收。
         for state in [stcp::State::Closed, stcp::State::TimeWait] {
-            assert!(!should_reap(state, true, Duration::from_secs(1), None));
-            assert!(should_reap(state, true, DEAD_SOCKET_GRACE, None));
+            assert!(!should_reap(state, true, LONG_LIVED, None, None));
+            assert!(!should_reap(
+                state,
+                true,
+                LONG_LIVED,
+                None,
+                Some(Duration::ZERO)
+            ));
+            assert!(!should_reap(
+                state,
+                true,
+                LONG_LIVED,
+                None,
+                Some(DEAD_SOCKET_GRACE - Duration::from_millis(1))
+            ));
+            assert!(should_reap(
+                state,
+                true,
+                Duration::ZERO,
+                None,
+                Some(DEAD_SOCKET_GRACE)
+            ));
+            assert!(should_reap(
+                state,
+                true,
+                LONG_LIVED,
+                None,
+                Some(DEAD_SOCKET_GRACE)
+            ));
         }
 
-        // 活跃连接永不回收。
+        // 活跃连接永不回收 (LastAck 已归入 closing 状态, 由孤儿超时规则裁决)。
         for state in [
             stcp::State::SynReceived,
             stcp::State::Established,
             stcp::State::CloseWait,
-            stcp::State::LastAck,
         ] {
-            assert!(!should_reap(state, true, LONG_LIVED, None));
+            assert!(!should_reap(state, true, LONG_LIVED, None, None));
         }
     }
 }

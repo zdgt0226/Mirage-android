@@ -670,13 +670,17 @@ async fn pick_best_node(
     rt: &tokio::runtime::Handle,
     candidates: &[mirage_core::failover::NodeEntry],
 ) -> Option<String> {
+    // 限制并发握手上限为 4 (对齐 Kotlin 侧 NodeRepository 批量测活, 防大节点列表并发打爆 FD 或触发服务端限流)
+    let sem = Arc::new(tokio::sync::Semaphore::new(4));
     let mut tasks = Vec::new();
     for c in candidates.iter().cloned() {
         let rt2 = rt.clone();
+        let sem2 = Arc::clone(&sem);
         tasks.push(rt2.spawn(async move {
             let Ok(node_uri) = mirage_core::node_uri::NodeUri::parse(&c.uri) else {
                 return (c.uri, i64::MAX);
             };
+            let _permit = sem2.acquire().await;
             let node = NodeInfo::from_node_uri(&node_uri);
             // 与 testNode 同路径: 取默认出站的 Mirage 池, 计一次 get() 的往返。
             let rtt = match Engine::new(&node) {
