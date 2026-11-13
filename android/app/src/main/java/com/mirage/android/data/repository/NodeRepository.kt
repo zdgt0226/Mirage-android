@@ -103,7 +103,9 @@ class NodeRepository(private val context: Context) {
         for (n in list) {
             arr.put(JSONObject().put("uri", n.uri).put("name", n.name))
         }
-        prefs.edit().putString(KEY_NODES, arr.toString()).apply()
+        val json = arr.toString()
+        prefs.edit().putString(KEY_NODES, json).apply()
+        CoreController.updateNodes(json)
     }
 
     fun getSelectedNode(): Node? {
@@ -126,6 +128,17 @@ class NodeRepository(private val context: Context) {
 
     fun addNode(node: Node): Int {
         val current = _nodes.value.toMutableList()
+        val existingIdx = current.indexOfFirst { it.uri == node.uri }
+        if (existingIdx >= 0) {
+            val updatedName = node.name.ifBlank { current[existingIdx].name }
+            current[existingIdx] = current[existingIdx].copy(name = updatedName)
+            _nodes.value = current
+            saveNodes(current)
+            if (_selectedIndex.value == -1) {
+                setSelected(existingIdx)
+            }
+            return existingIdx
+        }
         current.add(node)
         _nodes.value = current
         saveNodes(current)
@@ -166,8 +179,9 @@ class NodeRepository(private val context: Context) {
     }
 
     fun setTestMethod(method: String) {
-        _testMethod.value = normalizeTestMethod(method)
-        prefs.edit().putString(KEY_TEST_METHOD, method).apply()
+        val norm = normalizeTestMethod(method)
+        _testMethod.value = norm
+        prefs.edit().putString(KEY_TEST_METHOD, norm).apply()
     }
 
     fun getPoolSize(): Int = _poolSize.value
@@ -188,11 +202,11 @@ class NodeRepository(private val context: Context) {
         if (index !in current.indices) return@withContext -1L
 
         val node = current[index]
-        updateNodeTesting(index, isTesting = true)
+        updateNodeTestingSafe(index, isTesting = true)
 
         val method = effectiveMethod(_testMethod.value, CoreController.isRunning())
         val rtt = doTest(node, method)
-        updateNodeLatency(index, rtt, method == METHOD_TCP)
+        updateNodeLatencySafe(index, rtt, method == METHOD_TCP)
         rtt
     }
 
@@ -204,25 +218,30 @@ class NodeRepository(private val context: Context) {
         if (list.isEmpty()) return@withContext null
 
         _isTestingAll.value = true
-        // 全部标记为测试中
-        _nodes.value = list.map { it.copy(isTesting = true, testError = null) }
-
-        val method = effectiveMethod(_testMethod.value, CoreController.isRunning())
-        val tcpOnly = method == METHOD_TCP
-        val gate = kotlinx.coroutines.sync.Semaphore(MAX_PARALLEL_TESTS)
-        val deferredList = list.mapIndexed { index, node ->
-            async {
-                val rtt = gate.withPermit { doTest(node, method) }
-                updateNodeLatency(index, rtt, tcpOnly)
-                Pair(index, rtt)
+        try {
+            // 全部标记为测试中
+            updateMutex.withLock {
+                _nodes.value = _nodes.value.map { it.copy(isTesting = true, testError = null) }
             }
+
+            val method = effectiveMethod(_testMethod.value, CoreController.isRunning())
+            val tcpOnly = method == METHOD_TCP
+            val gate = kotlinx.coroutines.sync.Semaphore(MAX_PARALLEL_TESTS)
+            val deferredList = list.mapIndexed { index, node ->
+                async {
+                    val rtt = gate.withPermit { doTest(node, method) }
+                    updateNodeLatencySafe(index, rtt, tcpOnly)
+                    Pair(index, rtt)
+                }
+            }
+
+            val results = deferredList.awaitAll()
+
+            // 选出最低延迟的可用节点下标
+            results.filter { it.second >= 0 }.minByOrNull { it.second }?.first
+        } finally {
+            _isTestingAll.value = false
         }
-
-        val results = deferredList.awaitAll()
-        _isTestingAll.value = false
-
-        // 选出最低延迟的可用节点下标
-        results.filter { it.second >= 0 }.minByOrNull { it.second }?.first
     }
 
     private val updateMutex = kotlinx.coroutines.sync.Mutex()
@@ -232,19 +251,23 @@ class NodeRepository(private val context: Context) {
         val list = _nodes.value
         if (list.isEmpty()) return@withContext emptyList()
         _isTestingAll.value = true
-        _nodes.value = list.map { it.copy(isTesting = true, testError = null) }
-        val method = effectiveMethod(_testMethod.value, CoreController.isRunning())
-        val tcpOnly = method == METHOD_TCP
-        val gate = kotlinx.coroutines.sync.Semaphore(MAX_PARALLEL_TESTS)
-        val results = list.mapIndexed { index, node ->
-            async {
-                val rtt = gate.withPermit { doTest(node, method) }
-                updateNodeLatencySafe(index, rtt, tcpOnly)
-                Pair(index, rtt)
+        try {
+            updateMutex.withLock {
+                _nodes.value = _nodes.value.map { it.copy(isTesting = true, testError = null) }
             }
-        }.awaitAll()
-        _isTestingAll.value = false
-        results
+            val method = effectiveMethod(_testMethod.value, CoreController.isRunning())
+            val tcpOnly = method == METHOD_TCP
+            val gate = kotlinx.coroutines.sync.Semaphore(MAX_PARALLEL_TESTS)
+            list.mapIndexed { index, node ->
+                async {
+                    val rtt = gate.withPermit { doTest(node, method) }
+                    updateNodeLatencySafe(index, rtt, tcpOnly)
+                    Pair(index, rtt)
+                }
+            }.awaitAll()
+        } finally {
+            _isTestingAll.value = false
+        }
     }
 
     /**
@@ -261,13 +284,12 @@ class NodeRepository(private val context: Context) {
                 // 只做 TCP 三次握手。保留它是因为它快且不消耗服务端握手配额,
                 // 适合在几十个节点里先粗筛掉完全不可达的; 但它**测不出协议故障**。
                 else -> {
-                    val sock = Socket()
-                    val t0 = System.currentTimeMillis()
-                    val port = node.port.toIntOrNull() ?: 443
-                    sock.connect(InetSocketAddress(node.server, port), 4000)
-                    val rtt = System.currentTimeMillis() - t0
-                    sock.close()
-                    rtt
+                    Socket().use { sock ->
+                        val t0 = System.currentTimeMillis()
+                        val port = node.port.toIntOrNull() ?: 443
+                        sock.connect(InetSocketAddress(node.server, port), 4000)
+                        System.currentTimeMillis() - t0
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -275,11 +297,13 @@ class NodeRepository(private val context: Context) {
         }
     }
 
-    private fun updateNodeTesting(index: Int, isTesting: Boolean) {
-        val list = _nodes.value.toMutableList()
-        if (index in list.indices) {
-            list[index] = list[index].copy(isTesting = isTesting)
-            _nodes.value = list
+    private suspend fun updateNodeTestingSafe(index: Int, isTesting: Boolean) {
+        updateMutex.withLock {
+            val list = _nodes.value.toMutableList()
+            if (index in list.indices) {
+                list[index] = list[index].copy(isTesting = isTesting)
+                _nodes.value = list
+            }
         }
     }
 
@@ -295,19 +319,6 @@ class NodeRepository(private val context: Context) {
                 )
                 _nodes.value = list
             }
-        }
-    }
-
-    private fun updateNodeLatency(index: Int, latency: Long, tcpOnly: Boolean) {
-        val list = _nodes.value.toMutableList()
-        if (index in list.indices) {
-            list[index] = list[index].copy(
-                latencyMs = if (latency >= 0) latency else null,
-                isTesting = false,
-                testError = if (latency < 0) context.getString(R.string.node_unreachable) else null,
-                latencyTcpOnly = latency >= 0 && tcpOnly
-            )
-            _nodes.value = list
         }
     }
 

@@ -198,21 +198,22 @@ class CoreService : VpnService() {
         NativeGuard.runGuarded(NativeLoader.isLoaded(), default, block)
 
     data class ServiceConfig(
-        var uri: String = "",
-        var poolSize: Int = -1,
-        var bypassLan: Boolean = false,
-        var ipv6Enabled: Boolean = false,
-        var mtu: Int = 1500,
-        var appFilterConfig: com.mirage.android.data.model.AppFilterConfig? = null,
-        var directDns: String = "223.5.5.5",
-        var remoteDns: String = "1.1.1.1",
-        var blockQuic: Boolean = true,
-        var udpMux: Boolean = true,
-        var autoReconnect: Boolean = true,
-        var checkIntervalSec: Int = 15,
-        var failoverMode: String = "best",
-        var nodes: List<NodeStore.Node> = emptyList(),
-        var outboundMode: Int = 0,
+        val uri: String = "",
+        val poolSize: Int = -1,
+        val bypassLan: Boolean = false,
+        val ipv6Enabled: Boolean = false,
+        val mtu: Int = 1500,
+        val appFilterConfig: com.mirage.android.data.model.AppFilterConfig? = null,
+        val directDns: String = "223.5.5.5",
+        val remoteDns: String = "1.1.1.1",
+        val blockQuic: Boolean = true,
+        val udpMux: Boolean = true,
+        val autoReconnect: Boolean = true,
+        val checkIntervalSec: Int = 15,
+        val failoverMode: String = "best",
+        val nodes: List<NodeStore.Node> = emptyList(),
+        val outboundMode: Int = 0,
+        val rulesJson: String = "",
     )
     /**
      * 当前生效的服务配置。
@@ -241,6 +242,7 @@ class CoreService : VpnService() {
     private var serviceState = ServiceState.Stopped
     @Volatile
     private var activeSessionSeq: Long = 0L
+    @Volatile
     private var tunFd: ParcelFileDescriptor? = null
     private var scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
@@ -328,6 +330,7 @@ class CoreService : VpnService() {
     }
 
     private fun flushLogsAndStats() {
+        if (!NativeLoader.isLoaded()) return
         runCatching {
             val logs = (LogStore.all() + MirageNative.recentLogs().toList()).joinToString("\n")
             java.io.File(filesDir, "core.log").writeText(logs.takeLast(30000))
@@ -427,51 +430,58 @@ class CoreService : VpnService() {
             return START_NOT_STICKY
         }
 
-        // 多字段连读先取一次快照: 逐个读 volatile 字段时, 中途被 Binder 线程写入
-        // 就会读到半旧半新的组合。
-        val cfg = serviceConfig
-        val uri = intent.getStringExtra("uri") ?: cfg.uri
-        val poolSize = intent.getIntExtra("pool_size", serviceConfig.poolSize)
-        val bypassLan = if (intent.hasExtra("bypass_lan")) intent.getBooleanExtra("bypass_lan", false) else cfg.bypassLan
-        val ipv6 = if (intent.hasExtra("enable_ipv6")) intent.getBooleanExtra("enable_ipv6", false) else cfg.ipv6Enabled
-        val mtu = if (intent.hasExtra("mtu")) intent.getIntExtra("mtu", 1500) else cfg.mtu
-        val blockQuic = if (intent.hasExtra("block_quic")) intent.getBooleanExtra("block_quic", true) else cfg.blockQuic
-        val udpMux = if (intent.hasExtra("udp_mux")) intent.getBooleanExtra("udp_mux", true) else cfg.udpMux
-        val autoReconnect = if (intent.hasExtra("auto_reconnect")) intent.getBooleanExtra("auto_reconnect", true) else cfg.autoReconnect
-        val checkInterval = if (intent.hasExtra("check_interval")) intent.getIntExtra("check_interval", 15) else cfg.checkIntervalSec
-        val failoverMode = intent.getStringExtra("failover_mode") ?: cfg.failoverMode
-        val directDns = intent.getStringExtra("direct_dns") ?: cfg.directDns
-        val remoteDns = intent.getStringExtra("remote_dns") ?: cfg.remoteDns
-        val outboundMode = if (intent.hasExtra("outbound_mode")) intent.getIntExtra("outbound_mode", 0) else cfg.outboundMode
-        val appFilterJson = intent.getStringExtra("app_filter_json")
-        val appFilterConfig = if (!appFilterJson.isNullOrBlank()) com.mirage.android.core.AppFilterStore.fromJson(appFilterJson) else cfg.appFilterConfig
-        val nodesJson = intent.getStringExtra("nodes_json")
-        val nodes = if (!nodesJson.isNullOrBlank()) NodeStore.parseNodesJson(nodesJson) else cfg.nodes
+        // 在 stateLock 下读取旧快照并原子替换，避免与 Binder 线程并发的 updateNodes 产生丢更新竞态
+        updateConfig { cfg ->
+            val uri = intent.getStringExtra("uri") ?: cfg.uri
+            val poolSize = intent.getIntExtra("pool_size", cfg.poolSize)
+            val bypassLan = if (intent.hasExtra("bypass_lan")) intent.getBooleanExtra("bypass_lan", false) else cfg.bypassLan
+            val ipv6 = if (intent.hasExtra("enable_ipv6")) intent.getBooleanExtra("enable_ipv6", false) else cfg.ipv6Enabled
+            val mtu = if (intent.hasExtra("mtu")) intent.getIntExtra("mtu", 1500) else cfg.mtu
+            val blockQuic = if (intent.hasExtra("block_quic")) intent.getBooleanExtra("block_quic", true) else cfg.blockQuic
+            val udpMux = if (intent.hasExtra("udp_mux")) intent.getBooleanExtra("udp_mux", true) else cfg.udpMux
+            val autoReconnect = if (intent.hasExtra("auto_reconnect")) intent.getBooleanExtra("auto_reconnect", true) else cfg.autoReconnect
+            val checkInterval = if (intent.hasExtra("check_interval")) intent.getIntExtra("check_interval", 15) else cfg.checkIntervalSec
+            val failoverMode = intent.getStringExtra("failover_mode") ?: cfg.failoverMode
+            val directDns = intent.getStringExtra("direct_dns") ?: cfg.directDns
+            val remoteDns = intent.getStringExtra("remote_dns") ?: cfg.remoteDns
+            val outboundMode = if (intent.hasExtra("outbound_mode")) intent.getIntExtra("outbound_mode", 0) else cfg.outboundMode
+            val appFilterJson = intent.getStringExtra("app_filter_json")
+            val appFilterConfig = if (!appFilterJson.isNullOrBlank()) com.mirage.android.core.AppFilterStore.fromJson(appFilterJson) else cfg.appFilterConfig
+            val nodesJson = intent.getStringExtra("nodes_json")
+            val nodes = if (!nodesJson.isNullOrBlank()) NodeStore.parseNodesJson(nodesJson) else cfg.nodes
+            val rulesJson = intent.getStringExtra("rules_json")?.takeIf { it.isNotBlank() } ?: cfg.rulesJson
 
-        serviceConfig = ServiceConfig(
-            uri = uri,
-            poolSize = poolSize,
-            bypassLan = bypassLan,
-            ipv6Enabled = ipv6,
-            mtu = mtu,
-            appFilterConfig = appFilterConfig,
-            directDns = directDns,
-            remoteDns = remoteDns,
-            blockQuic = blockQuic,
-            udpMux = udpMux,
-            autoReconnect = autoReconnect,
-            checkIntervalSec = checkInterval,
-            failoverMode = failoverMode,
-            nodes = nodes,
-            outboundMode = outboundMode
-        )
+            ServiceConfig(
+                uri = uri,
+                poolSize = poolSize,
+                bypassLan = bypassLan,
+                ipv6Enabled = ipv6,
+                mtu = mtu,
+                appFilterConfig = appFilterConfig,
+                directDns = directDns,
+                remoteDns = remoteDns,
+                blockQuic = blockQuic,
+                udpMux = udpMux,
+                autoReconnect = autoReconnect,
+                checkIntervalSec = checkInterval,
+                failoverMode = failoverMode,
+                nodes = nodes,
+                outboundMode = outboundMode,
+                rulesJson = rulesJson,
+            )
+        }
+        val startCfg = serviceConfig
 
         // 下沉方案 P3: 把切换策略下发内核。外壳已无看门狗, 这一次下发就是
         // 故障切换的全部开关 —— 失败即整条链路失效, 故日志必须留痕。
         pushFailoverPolicy()
 
         // 直接驱动启动 (建 TUN + 内核), 不依赖 UI 后续 AIDL 调用
-        val rc = startInternal(uri, poolSize)
+        val rc = startInternal(startCfg.uri, startCfg.poolSize)
+        if (rc == RC_REJECTED_WHILE_STOPPING) {
+            log("[core] 启动请求因正在停止被拒绝 rc=$rc")
+            return START_NOT_STICKY
+        }
         if (rc != 0) {
             log("[core] 启动失败 rc=$rc, 停止服务")
             failAndStop(startId)
@@ -484,6 +494,11 @@ class CoreService : VpnService() {
 
     /** 启动失败的统一收尾: 撤掉前台通知并终止服务, 不留「已连接」假象。 */
     private fun failAndStop(startId: Int) {
+        synchronized(stateLock) {
+            if (serviceState != ServiceState.Stopping) {
+                serviceState = ServiceState.Stopped
+            }
+        }
         notifyState()
         runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -494,7 +509,6 @@ class CoreService : VpnService() {
             }
         }
         runCatching { getSystemService(NotificationManager::class.java)?.cancel(1) }
-        serviceState = ServiceState.Stopped
         stopSelf(startId)
     }
 
@@ -731,7 +745,10 @@ class CoreService : VpnService() {
 
         // 注入规则、Geo 文件与 DNS 配置 (修复 M5: 自主完成全量注入，杜绝冷启动 AIDL 竞态)
         runCatching { GeoManager.loadGeoFilesToNative(this) }
-        runCatching { MirageNative.setRules(RuleStore.toJson(this)) }
+        runCatching {
+            val rulesJson = serviceConfig.rulesJson.ifBlank { RuleStore.toJson(this) }
+            MirageNative.setRules(rulesJson)
+        }
         runCatching { MirageNative.setOutboundMode(serviceConfig.outboundMode) }
         runCatching { MirageNative.setDnsServers(serviceConfig.directDns, serviceConfig.remoteDns) }
         runCatching { MirageNative.setBlockQuic(serviceConfig.blockQuic) }
@@ -739,10 +756,17 @@ class CoreService : VpnService() {
         // 下沉方案 P1: 节点全表必须在这里补发一次。
         // AIDL updateNodes 可能在任何 start 之前到达, 那时原生库尚未装载而被守卫短路,
         // 若不在此补发, 内核会一直拿不到候选节点, 看门狗将永远「无可切换节点」。
+        // 若 serviceConfig.nodes 已由 UI 进程推送，则优先使用最新内存快照，避免被 :core 陈旧的 SharedPreferences 覆盖。
         runCatching {
-            val nodesJson = NodeStore.getNodesJson(this)
+            val currentNodes = serviceConfig.nodes
+            val nodesJson = if (currentNodes.isNotEmpty()) {
+                NodeStore.toJson(currentNodes)
+            } else {
+                val fallbackJson = NodeStore.getNodesJson(this)
+                updateConfig { it.copy(nodes = NodeStore.parseNodesJson(fallbackJson)) }
+                fallbackJson
+            }
             val ok = MirageNative.setNodeList(nodesJson)
-            updateConfig { it.copy(nodes = NodeStore.parseNodesJson(nodesJson)) }
             LogStore.append("[core] 启动前补发节点全表: ok=$ok count=${serviceConfig.nodes.size}")
         }.onFailure { e ->
             LogStore.append("[core] 启动前补发节点全表异常: ${e::class.java.simpleName}: ${e.message}")
@@ -756,6 +780,7 @@ class CoreService : VpnService() {
             NodeStore.getPoolSize(this)
         }
         log("[core] 开始启动内核 (uri=${Node.redact(uri)}, poolSize=$poolSize, mtu=$mtu)")
+        runCatching { MirageNative.stop() }
         val rc = MirageNative.start(rawFd, uri, poolSize, mtu)
         if (rc != 0) {
             log("[core] 内核启动失败 rc=$rc")
@@ -791,7 +816,7 @@ class CoreService : VpnService() {
                             screenJob?.cancel()
                             screenJob = scope.launch {
                                 delay(15000)
-                                val base = com.mirage.android.core.NodeStore.getPoolSize(this@CoreService)
+                                val base = if (serviceConfig.poolSize > 0) serviceConfig.poolSize else com.mirage.android.core.NodeStore.getPoolSize(this@CoreService)
                                 val target = com.mirage.android.data.repository.AppFilterManager.calculateAdaptivePoolSize(
                                     screenOn = false,
                                     hasActiveHighTraffic = false,
@@ -804,7 +829,7 @@ class CoreService : VpnService() {
                         Intent.ACTION_SCREEN_ON -> {
                             screenJob?.cancel()
                             screenJob = null
-                            val base = com.mirage.android.core.NodeStore.getPoolSize(this@CoreService)
+                            val base = if (serviceConfig.poolSize > 0) serviceConfig.poolSize else com.mirage.android.core.NodeStore.getPoolSize(this@CoreService)
                             val target = com.mirage.android.data.repository.AppFilterManager.calculateAdaptivePoolSize(
                                 screenOn = true,
                                 hasActiveHighTraffic = false,
@@ -822,98 +847,104 @@ class CoreService : VpnService() {
 
         // 注册底层物理网络监听 (Wi-Fi <-> 蜂窝移动网络切换时即时冲刷暖池坏死连接，并绑定底层物理网络)
         val cm = getSystemService(ConnectivityManager::class.java)
-        if (cm != null && networkCallback == null) {
-            val cb = object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
-                    if (isPhysicalInternet(cm, network, null)) {
-                        switchTo(network)
+        if (cm != null) {
+            if (networkCallback == null) {
+                val cb = object : ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: Network) {
+                        if (isPhysicalInternet(cm, network, null)) {
+                            switchTo(network)
+                        }
                     }
-                }
 
-                override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
-                    if (isPhysicalInternet(cm, network, networkCapabilities)) {
-                        switchTo(network)
-                    } else {
+                    override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                        if (isPhysicalInternet(cm, network, networkCapabilities)) {
+                            switchTo(network)
+                        } else {
+                            synchronized(netLock) {
+                                physicalNetworks.remove(network)
+                                if (currentPhysicalNetwork == network) {
+                                    switchTo(physicalNetworks.lastOrNull { it != network })
+                                }
+                            }
+                        }
+                    }
+
+                    override fun onLost(network: Network) {
                         synchronized(netLock) {
                             if (currentPhysicalNetwork == network) {
-                                switchTo(null)
+                                // 不直接置 null: 可能还有别的物理网在线 (关 Wi-Fi 落到蜂窝)。
+                                switchTo(physicalNetworks.lastOrNull { it != network })
                             }
                         }
                     }
                 }
-
-                override fun onLost(network: Network) {
-                    synchronized(netLock) {
-                        if (currentPhysicalNetwork == network) {
-                            // 不直接置 null: 可能还有别的物理网在线 (关 Wi-Fi 落到蜂窝)。
-                            switchTo(physicalNetworks.lastOrNull { it != network })
-                        }
-                    }
+                networkCallback = cb
+                runCatching {
+                    cm.registerDefaultNetworkCallback(cb)
+                }.onFailure {
+                    networkCallback = null
+                    LogStore.append("[core] registerDefaultNetworkCallback 异常: ${it.message}")
                 }
             }
-            networkCallback = cb
-            runCatching {
-                cm.registerDefaultNetworkCallback(cb)
-            }.onFailure {
-                LogStore.append("[core] registerDefaultNetworkCallback 异常: ${it.message}")
-            }
 
-            // 第二个回调: 只管「物理网还在不在」。理由见 physicalNetworkCallback 的注释 ——
-            // 默认网络回调在隧道起来之后可能再也收不到物理网的 onLost。
-            val physCb = object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
-                    if (!isPhysicalInternet(cm, network, null)) return
-                    synchronized(netLock) {
-                        physicalNetworks.remove(network)
-                        physicalNetworks.add(network)
-                        // 只在当前无网时顶上。有网时不抢 —— 选哪一条是默认网络回调的职责,
-                        // 这里擅自切换会在 Wi-Fi 与蜂窝同时在线时把流量绑到蜂窝上。
-                        if (currentPhysicalNetwork == null) switchTo(network)
-                    }
-                }
-
-                override fun onCapabilitiesChanged(
-                    network: Network,
-                    networkCapabilities: NetworkCapabilities,
-                ) {
-                    val ok = isPhysicalInternet(cm, network, networkCapabilities)
-                    synchronized(netLock) {
-                        if (ok) {
+            if (physicalNetworkCallback == null) {
+                // 第二个回调: 只管「物理网还在不在」。理由见 physicalNetworkCallback 的注释 ——
+                // 默认网络回调在隧道起来之后可能再也收不到物理网的 onLost。
+                val physCb = object : ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: Network) {
+                        if (!isPhysicalInternet(cm, network, null)) return
+                        synchronized(netLock) {
                             physicalNetworks.remove(network)
                             physicalNetworks.add(network)
+                            // 只在当前无网时顶上。有网时不抢 —— 选哪一条是默认网络回调的职责,
+                            // 这里擅自切换会在 Wi-Fi 与蜂窝同时在线时把流量绑到蜂窝上。
                             if (currentPhysicalNetwork == null) switchTo(network)
-                        } else {
-                            // 失去上网能力等同于消失 (受限 APN、认证门户未过等)。
+                        }
+                    }
+
+                    override fun onCapabilitiesChanged(
+                        network: Network,
+                        networkCapabilities: NetworkCapabilities,
+                    ) {
+                        val ok = isPhysicalInternet(cm, network, networkCapabilities)
+                        synchronized(netLock) {
+                            if (ok) {
+                                physicalNetworks.remove(network)
+                                physicalNetworks.add(network)
+                                if (currentPhysicalNetwork == null) switchTo(network)
+                            } else {
+                                // 失去上网能力等同于消失 (受限 APN、认证门户未过等)。
+                                physicalNetworks.remove(network)
+                                if (currentPhysicalNetwork == network) {
+                                    switchTo(physicalNetworks.lastOrNull())
+                                }
+                            }
+                        }
+                    }
+
+                    override fun onLost(network: Network) {
+                        synchronized(netLock) {
                             physicalNetworks.remove(network)
                             if (currentPhysicalNetwork == network) {
+                                // 退到还活着的那条; 一条都不剩才是真正的全网不可达。
                                 switchTo(physicalNetworks.lastOrNull())
                             }
                         }
                     }
                 }
-
-                override fun onLost(network: Network) {
-                    synchronized(netLock) {
-                        physicalNetworks.remove(network)
-                        if (currentPhysicalNetwork == network) {
-                            // 退到还活着的那条; 一条都不剩才是真正的全网不可达。
-                            switchTo(physicalNetworks.lastOrNull())
-                        }
-                    }
+                physicalNetworkCallback = physCb
+                runCatching {
+                    val req = NetworkRequest.Builder()
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        // 必须显式排除 VPN: 否则我们自己的 tun0 也会匹配进来, 隧道一起
+                        // 就把自己当成物理网, 闸门永远判「有网」。
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                        .build()
+                    cm.registerNetworkCallback(req, physCb)
+                }.onFailure {
+                    physicalNetworkCallback = null
+                    LogStore.append("[core] registerNetworkCallback(物理网) 异常: ${it.message}")
                 }
-            }
-            physicalNetworkCallback = physCb
-            runCatching {
-                val req = NetworkRequest.Builder()
-                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    // 必须显式排除 VPN: 否则我们自己的 tun0 也会匹配进来, 隧道一起
-                    // 就把自己当成物理网, 闸门永远判「有网」。
-                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                    .build()
-                cm.registerNetworkCallback(req, physCb)
-            }.onFailure {
-                physicalNetworkCallback = null
-                LogStore.append("[core] registerNetworkCallback(物理网) 异常: ${it.message}")
             }
         }
 
@@ -970,10 +1001,11 @@ class CoreService : VpnService() {
             LogStore.append("[core] 原生库未装载, 切换策略改由启动时下发")
             return
         }
+        val cfg = serviceConfig
         val policy = FailoverControl.policyJson(
-            mode = serviceConfig.failoverMode,
-            intervalSec = serviceConfig.checkIntervalSec,
-            autoReconnect = serviceConfig.autoReconnect
+            mode = cfg.failoverMode,
+            intervalSec = cfg.checkIntervalSec,
+            autoReconnect = cfg.autoReconnect
         )
         runCatching { MirageNative.setFailoverPolicy(policy) }
             .onSuccess { ok -> LogStore.append("[core] 切换策略下发内核: ok=$ok policy=$policy") }
@@ -1038,11 +1070,23 @@ class CoreService : VpnService() {
     private fun onKernelRestartRequested() {
         // 内核在 emit 之前已经等过 policy.restart_delay_ms, 这里不再叠加延迟。
         // 刻意不关 tunFd: 重启窗口里撤掉 TUN, 流量会立刻改走物理网卡明文外发。
+        // MirageNative.stop() 移入 startLocked() 内部 (持 stateLock 且处于 Starting 态),
+        // 配合 isRunningInternal() 在 Starting && tunFd != null 时返回 true，杜绝重启窗口内状态闪断。
         LogStore.append("[core] 按内核请求重启隧道 (保持 TUN)")
-        runCatching { MirageNative.stop() }
-        val rc = startInternal()
-        if (rc != 0) {
-            LogStore.append("[core] 内核请求的重启失败 rc=$rc")
+        val rc = synchronized(stateLock) {
+            if (!FailoverControl.shouldHonorEvent(serviceState)) {
+                LogStore.append("[core] 重启前状态已变为 $serviceState, 放弃重启")
+                return
+            }
+            serviceState = ServiceState.Starting
+            startInternal()
+        }
+        if (rc != 0 && rc != RC_REJECTED_WHILE_STOPPING) {
+            LogStore.append("[core] 内核请求的重启失败 rc=$rc, 停止服务")
+            clearActive(this)
+            failAndStop(-1)
+        } else if (rc != 0) {
+            LogStore.append("[core] 内核请求的重启被拒绝 rc=$rc")
         }
     }
 
@@ -1071,9 +1115,11 @@ class CoreService : VpnService() {
         log("[core] stop()")
         clearActive(this)
         cancelAllJobs()
-        flushLogsAndStats()
-        runCatching { MirageNative.clearDnsCache() }
-        runCatching { MirageNative.stop() }
+        if (NativeLoader.isLoaded()) {
+            flushLogsAndStats()
+            runCatching { MirageNative.clearDnsCache() }
+            runCatching { MirageNative.stop() }
+        }
         tunFd?.let { runCatching { it.close() } }
         tunFd = null
         runCatching {
@@ -1114,7 +1160,10 @@ class CoreService : VpnService() {
         return if (isRunningInternal()) native(fallback) { MirageNative.getPoolSize() } else fallback
     }
 
-    fun setRulesInternal(json: String): Boolean = native(false) { MirageNative.setRules(json) }
+    fun setRulesInternal(json: String): Boolean {
+        updateConfig { it.copy(rulesJson = json) }
+        return native(false) { MirageNative.setRules(json) }
+    }
     fun setBlockQuicInternal(block: Boolean): Boolean {
         updateConfig { it.copy(blockQuic = block) }
         return if (isRunningInternal()) native(false) { MirageNative.setBlockQuic(block) } else true
@@ -1130,14 +1179,15 @@ class CoreService : VpnService() {
         if (isRunningInternal()) native(serviceConfig.udpMux) { MirageNative.isUdpMux() } else serviceConfig.udpMux
     fun clearDnsCacheInternal(): Boolean = native(false) { MirageNative.clearDnsCache() }
     fun setDnsServersInternal(directDns: String, remoteDns: String): Boolean {
-        updateConfig { it.copy(directDns = directDns) }
-        updateConfig { it.copy(remoteDns = remoteDns) }
+        updateConfig { it.copy(directDns = directDns, remoteDns = remoteDns) }
         return if (isRunningInternal()) native(false) { MirageNative.setDnsServers(directDns, remoteDns) } else true
     }
     fun getDirectDnsInternal(): String = serviceConfig.directDns
     fun getRemoteDnsInternal(): String = serviceConfig.remoteDns
 
-    fun isRunningInternal(): Boolean = native(false) { MirageNative.isRunning() }
+    fun isRunningInternal(): Boolean =
+        synchronized(stateLock) { serviceState == ServiceState.Starting && tunFd != null } ||
+            native(false) { MirageNative.isRunning() }
     fun isHealthyInternal(): Boolean = native(false) { MirageNative.isHealthy() }
     fun latencyMsInternal(): Long = native(-1L) { MirageNative.latencyMs() }
     fun getStatsInternal(): DoubleArray = native(DoubleArray(0)) { MirageNative.getStats() }
@@ -1291,7 +1341,7 @@ class CoreService : VpnService() {
 
     fun setLogLevelInternal(level: String): Boolean {
         log("[core] 切换内核日志级别: $level")
-        return MirageNative.setLogLevel(level)
+        return native(false) { MirageNative.setLogLevel(level) }
     }
 
     override fun onRevoke() {
@@ -1311,8 +1361,10 @@ class CoreService : VpnService() {
         // 否则排队中的 startInternal 永远观测不到它。
         synchronized(stateLock) { serviceState = ServiceState.Stopping }
         cancelAllJobs()
-        flushLogsAndStats()
-        runCatching { MirageNative.stop() }
+        if (NativeLoader.isLoaded()) {
+            flushLogsAndStats()
+            runCatching { MirageNative.stop() }
+        }
         runCatching { tunFd?.close() }
         tunFd = null
         synchronized(stateLock) { serviceState = ServiceState.Stopped }
@@ -1530,10 +1582,6 @@ class CoreService : VpnService() {
             "16.0.0.0" to 4,
             "32.0.0.0" to 3,
             "64.0.0.0" to 3,
-            "72.0.0.0" to 5,
-            "76.0.0.0" to 6,
-            "78.0.0.0" to 7,
-            "80.0.0.0" to 4,
             "96.0.0.0" to 6,
             "100.0.0.0" to 10,
             "100.128.0.0" to 9,
@@ -1575,7 +1623,6 @@ class CoreService : VpnService() {
             "192.170.0.0" to 15,
             "192.172.0.0" to 14,
             "192.176.0.0" to 12,
-            "192.188.0.0" to 14,
             "192.192.0.0" to 10,
             "193.0.0.0" to 8,
             "194.0.0.0" to 7,

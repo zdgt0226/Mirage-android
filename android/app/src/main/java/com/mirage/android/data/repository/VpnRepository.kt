@@ -385,6 +385,7 @@ class VpnRepository(private val context: Context) {
             putExtra("enable_ipv6", _isIpv6Enabled.value)
             putExtra("mtu", com.mirage.android.core.TunConfigStore.getMtu(context))
             putExtra("app_filter_json", com.mirage.android.core.AppFilterStore.toJson(appFilterConfig))
+            putExtra("rules_json", com.mirage.android.core.RuleStore.toJson(context))
             putExtra("direct_dns", dnsRepo.getDirectDns())
             putExtra("remote_dns", dnsRepo.getRemoteDns())
             putExtra("block_quic", _isBlockQuic.value)
@@ -626,15 +627,18 @@ class VpnRepository(private val context: Context) {
                     if (foreground || tick % 5 == 0L) {
                         if (!isBusConnected) {
                             val statsArr = CoreController.getStats()
+                            if (!isActive) break
                             if (statsArr != null && statsArr.size >= 7) {
                                 _trafficStats.value = TrafficStats.fromArray(statsArr)
                             }
                         }
                         val lat = CoreController.latencyMs()
+                        val healthy = CoreController.isHealthy()
+                        if (!isActive) break
                         _latencyMs.value = lat
                         // 与延迟同节拍取健康位。只在确认 isRunning 的分支里取:
                         // 未运行时内核返回 false, 照搬会在断开瞬间闪一下「上游不可用」。
-                        _upstreamHealthy.value = CoreController.isHealthy()
+                        _upstreamHealthy.value = healthy
                     }
 
                     // 2. 活跃连接 / 近期请求拉取:

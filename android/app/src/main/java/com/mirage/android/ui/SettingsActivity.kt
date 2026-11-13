@@ -26,10 +26,20 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var binding: ActivitySettingsBinding
     private var coreManagerDialog: CoreManagerDialog? = null
 
-    private val pickSoLauncher = registerForActivityResult(
-        ActivityResultContracts.GetContent()
-    ) { uri: Uri? ->
-        if (uri != null) coreManagerDialog?.handleImportUri(uri)
+    private val pickSoLauncher: androidx.activity.result.ActivityResultLauncher<String> =
+        registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+            if (uri != null) {
+                val dialog = coreManagerDialog ?: CoreManagerDialog(
+                    context = this,
+                    onPickSoFile = { launchSoPicker() },
+                    onCoreChanged = { refreshSummaries() }
+                ).also { coreManagerDialog = it }
+                dialog.handleImportUri(uri)
+            }
+        }
+
+    private fun launchSoPicker() {
+        pickSoLauncher.launch("*/*")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -122,14 +132,18 @@ class SettingsActivity : AppCompatActivity() {
     private fun showTunDialog() = SettingsActions.showTun(this) { refreshSummaries() }
 
     private fun showCoreDialog() {
-        coreManagerDialog = SettingsActions.showCore(this) { pickSoLauncher.launch("*/*") }
+        coreManagerDialog = SettingsActions.showCore(
+            activity = this,
+            onPickSo = { pickSoLauncher.launch("*/*") },
+            onCoreChanged = { refreshSummaries() }
+        )
     }
 
     private fun showVersionDialog() = SettingsActions.showVersion(this) { showCoreDialog() }
 
     private fun showBackupDialog() = SettingsActions.showBackup(this)
 
-    private fun showRestoreDialog() = SettingsActions.showRestore(this)
+    private fun showRestoreDialog() = SettingsActions.showRestore(this) { refreshSummaries() }
 
     companion object {
         fun start(ctx: Context) = ctx.startActivity(Intent(ctx, SettingsActivity::class.java))

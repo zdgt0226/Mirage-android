@@ -31,34 +31,15 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         if (index in nodes.indices) nodes[index] else null
     }.stateIn(viewModelScope, SharingStarted.Eagerly, nodeRepo.getSelectedNode())
 
-    private val _historyUp = kotlinx.coroutines.flow.MutableStateFlow<List<Float>>(emptyList())
-    val historyUp: StateFlow<List<Float>> = _historyUp
-
-    private val _historyDown = kotlinx.coroutines.flow.MutableStateFlow<List<Float>>(emptyList())
-    val historyDown: StateFlow<List<Float>> = _historyDown
-
-    private val maxHistoryPoints = 60
-    private val upList = ArrayDeque<Float>()
-    private val downList = ArrayDeque<Float>()
-
-    init {
-        viewModelScope.launch {
-            trafficStats.collect { s ->
-                upList.addLast(s.upRate.toFloat())
-                downList.addLast(s.downRate.toFloat())
-                while (upList.size > maxHistoryPoints) upList.removeFirst()
-                while (downList.size > maxHistoryPoints) downList.removeFirst()
-                _historyUp.value = upList.toList()
-                _historyDown.value = downList.toList()
-            }
-        }
-    }
-
     fun setOutboundMode(mode: Int) {
         vpnRepo.setOutboundMode(mode)
     }
 
-    fun toggleConnection(onRequirePermission: () -> Unit, onProceedConnect: () -> Unit) {
+    fun toggleConnection(
+        onRequirePermission: () -> Unit,
+        onProceedConnect: () -> Unit,
+        onNoNode: () -> Unit = {},
+    ) {
         if (vpnState.value is VpnState.Syncing || vpnState.value is VpnState.Stopping) {
             return
         }
@@ -67,6 +48,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             val nodes = nodeRepo.nodes.value
             if (nodes.isEmpty()) {
+                onNoNode()
                 return
             }
             if (nodeRepo.isAutoSelect.value && nodes.size > 1) {

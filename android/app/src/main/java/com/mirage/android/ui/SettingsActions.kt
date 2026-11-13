@@ -62,11 +62,15 @@ internal object SettingsActions {
         TunConfigDialog(activity) { onChanged() }.show()
     }
 
-    fun showCore(activity: AppCompatActivity, onPickSo: () -> Unit): CoreManagerDialog {
+    fun showCore(
+        activity: AppCompatActivity,
+        onPickSo: () -> Unit,
+        onCoreChanged: () -> Unit = {},
+    ): CoreManagerDialog {
         val dialog = CoreManagerDialog(
             context = activity,
             onPickSoFile = onPickSo,
-            onCoreChanged = {}
+            onCoreChanged = onCoreChanged
         )
         dialog.show()
         return dialog
@@ -141,7 +145,7 @@ internal object SettingsActions {
             .show()
     }
 
-    fun showRestore(activity: AppCompatActivity) {
+    fun showRestore(activity: AppCompatActivity, onRestored: () -> Unit = {}) {
         val input = EditText(activity).apply {
             hint = activity.getString(R.string.restore_hint)
             setTextSize(12f)
@@ -151,13 +155,22 @@ internal object SettingsActions {
         AlertDialog.Builder(activity)
             .setTitle(R.string.restore_title)
             .setView(input)
-            .setPositiveButton(R.string.restore_merge) { _, _ -> doRestore(activity, input, overwrite = false) }
-            .setNeutralButton(R.string.restore_overwrite) { _, _ -> doRestore(activity, input, overwrite = true) }
+            .setPositiveButton(R.string.restore_merge) { _, _ ->
+                doRestore(activity, input, overwrite = false, onRestored = onRestored)
+            }
+            .setNeutralButton(R.string.restore_overwrite) { _, _ ->
+                doRestore(activity, input, overwrite = true, onRestored = onRestored)
+            }
             .setNegativeButton(R.string.cancel, null)
             .show()
     }
 
-    private fun doRestore(activity: AppCompatActivity, input: EditText, overwrite: Boolean) {
+    private fun doRestore(
+        activity: AppCompatActivity,
+        input: EditText,
+        overwrite: Boolean,
+        onRestored: () -> Unit,
+    ) {
         val json = input.text.toString().trim()
         if (json.isEmpty()) {
             Toast.makeText(activity, R.string.content_empty, Toast.LENGTH_SHORT).show()
@@ -167,6 +180,7 @@ internal object SettingsActions {
             val (nodes, rules) = ConfigBackup.import(activity, json, overwrite = overwrite)
             NodeRepository.getInstance(activity).reload()
             RuleRepository.getInstance(activity).reload()
+            onRestored()
             val msg = if (overwrite) R.string.restore_overwritten else R.string.restore_merged
             Toast.makeText(activity, activity.getString(msg, nodes, rules), Toast.LENGTH_LONG).show()
         }.onFailure { e ->

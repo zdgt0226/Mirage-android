@@ -83,12 +83,20 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private val pickSoLauncher = registerForActivityResult(
-        ActivityResultContracts.GetContent()
-    ) { uri: Uri? ->
-        if (uri != null) {
-            coreManagerDialog?.handleImportUri(uri)
+    private val pickSoLauncher: androidx.activity.result.ActivityResultLauncher<String> =
+        registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+            if (uri != null) {
+                val dialog = coreManagerDialog ?: CoreManagerDialog(
+                    context = this,
+                    onPickSoFile = { launchSoPicker() },
+                    onCoreChanged = { bumpSettings() },
+                ).also { coreManagerDialog = it }
+                dialog.handleImportUri(uri)
+            }
         }
+
+    private fun launchSoPicker() {
+        pickSoLauncher.launch("*/*")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -133,8 +141,10 @@ class MainActivity : AppCompatActivity() {
         checkGeoInitialization()
 
         if (intent?.getBooleanExtra(EXTRA_AUTO_CONNECT, false) == true) {
+            intent.removeExtra(EXTRA_AUTO_CONNECT)
             requestVpnPermissionAndConnect()
         } else if (intent?.getBooleanExtra(EXTRA_AUTO_DISCONNECT, false) == true) {
+            intent.removeExtra(EXTRA_AUTO_DISCONNECT)
             homeViewModel.disconnect()
         }
     }
@@ -159,6 +169,9 @@ class MainActivity : AppCompatActivity() {
                 homeViewModel.toggleConnection(
                     onRequirePermission = { requestVpnPermissionAndConnect() },
                     onProceedConnect = { requestVpnPermissionAndConnect() },
+                    onNoNode = {
+                        Toast.makeText(this, R.string.select_node_first, Toast.LENGTH_SHORT).show()
+                    },
                 )
             },
             onSelectNode = { index -> nodesViewModel.selectNode(index) },
@@ -196,7 +209,7 @@ class MainActivity : AppCompatActivity() {
                 onOpenCore = { showCoreManager() },
                 onOpenVersion = { SettingsActions.showVersion(this) { showCoreManager() } },
                 onBackup = { SettingsActions.showBackup(this) },
-                onRestore = { SettingsActions.showRestore(this) },
+                onRestore = { SettingsActions.showRestore(this) { bumpSettings() } },
             )
         }
     }
@@ -206,7 +219,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showCoreManager() {
-        coreManagerDialog = SettingsActions.showCore(this) { pickSoLauncher.launch("*/*") }
+        coreManagerDialog = SettingsActions.showCore(
+            activity = this,
+            onPickSo = { pickSoLauncher.launch("*/*") },
+            onCoreChanged = { bumpSettings() },
+        )
     }
 
     /** 出站模式三选一。下标语义与 `outboundModeTitleRes` 一致: 0 规则 / 1 全局 / 2 直连。 */
@@ -290,8 +307,10 @@ class MainActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         handleIncomingUri(intent)
         if (intent.getBooleanExtra(EXTRA_AUTO_CONNECT, false)) {
+            intent.removeExtra(EXTRA_AUTO_CONNECT)
             requestVpnPermissionAndConnect()
         } else if (intent.getBooleanExtra(EXTRA_AUTO_DISCONNECT, false)) {
+            intent.removeExtra(EXTRA_AUTO_DISCONNECT)
             homeViewModel.disconnect()
         }
     }

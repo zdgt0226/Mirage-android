@@ -61,10 +61,27 @@ object ElfChecker {
     }
 
     /**
-     * 检查该 ABI 是否能在当前 Android 设备上运行。
+     * 返回与当前进程位宽匹配的 ABI 列表 (64 位进程绝不可加载 32 位 .so, 反之亦然)。
+     * 在单元测试 JVM 环境下若 SUPPORTED_64_BIT_ABIS / SUPPORTED_32_BIT_ABIS 为空，回退到 SUPPORTED_ABIS。
+     */
+    fun supportedProcessAbis(): List<String> {
+        val abis64 = Build.SUPPORTED_64_BIT_ABIS ?: emptyArray()
+        val abis32 = Build.SUPPORTED_32_BIT_ABIS ?: emptyArray()
+        if (abis64.isNotEmpty()) {
+            val is64 = runCatching { android.os.Process.is64Bit() }.getOrDefault(true)
+            val chosen = if (is64) abis64 else abis32
+            if (chosen.isNotEmpty()) return chosen.toList()
+        } else if (abis32.isNotEmpty()) {
+            return abis32.toList()
+        }
+        return (Build.SUPPORTED_ABIS ?: emptyArray()).toList()
+    }
+
+    /**
+     * 检查该 ABI 是否能在当前 Android 设备及当前进程位宽下运行。
      */
     fun isDeviceCompatible(abi: String): Boolean {
-        return Build.SUPPORTED_ABIS.any { it.equals(abi, ignoreCase = true) }
+        return supportedProcessAbis().any { it.equals(abi, ignoreCase = true) }
     }
 
     // ---- .dynsym 符号表解析 (用于自定义内核的 JNI 符号集门禁) ----
@@ -78,10 +95,11 @@ object ElfChecker {
     private const val MAX_STRTAB_BYTES = 8 * 1024 * 1024
 
     /**
-     * 读取 .so 动态符号表里以 [prefix] 开头的符号名。
+     * 读取 .so 动态符号表里以 [prefix] 开头的已定义导出符号名。
      *
      * 只读 .dynsym (动态符号表) —— `strip` 不会移除它, 导出函数名一定在其中;
      * 相比扫描整个文件找字符串, 不会把 .rodata 里偶然同形的字面量误当成导出符号。
+     * 同时过滤掉未定义引用 (`st_shndx == SHN_UNDEF`) 与局部符号 (`STB_LOCAL`)。
      *
      * 失败一律返回 failure, **调用方必须按拒绝处理**: 解析不出符号表不等于"没有缺符号"。
      */
@@ -131,7 +149,8 @@ object ElfChecker {
                 if (shNum > MAX_SECTIONS) {
                     return Result.failure(IllegalArgumentException("节头数量异常 ($shNum)"))
                 }
-                if (shOff + shNum.toLong() * shEntSize > fileLen) {
+                val shTableSize = shNum.toLong() * shEntSize.toLong()
+                if (shTableSize <= 0L || shOff > fileLen || shTableSize > fileLen - shOff) {
                     return Result.failure(IllegalArgumentException("节头表越界, 文件可能被截断"))
                 }
 
@@ -165,7 +184,7 @@ object ElfChecker {
                 if (symEnt != symEntExpected) {
                     return Result.failure(IllegalArgumentException("动态符号表项大小异常 ($symEnt)"))
                 }
-                if (symSize <= 0L || symOff + symSize > fileLen) {
+                if (symSize <= 0L || symOff > fileLen || symSize > fileLen - symOff) {
                     return Result.failure(IllegalArgumentException("动态符号表越界, 文件可能被截断"))
                 }
                 if (strIdx <= 0 || strIdx >= shNum) {
@@ -182,7 +201,7 @@ object ElfChecker {
                     strOff = raf.readAt(strBase + 0x10, 4, little)
                     strSize = raf.readAt(strBase + 0x14, 4, little)
                 }
-                if (strSize <= 0L || strOff + strSize > fileLen) {
+                if (strOff < 0L || strSize <= 0L || strOff > fileLen || strSize > fileLen - strOff) {
                     return Result.failure(IllegalArgumentException("字符串表越界, 文件可能被截断"))
                 }
                 if (strSize > MAX_STRTAB_BYTES) {
@@ -194,15 +213,29 @@ object ElfChecker {
                     return Result.failure(IllegalArgumentException("符号数量异常 ($symCount)"))
                 }
 
+                val dynsym = ByteArray(symSize.toInt())
+                raf.seek(symOff)
+                raf.readFully(dynsym)
+
                 val strtab = ByteArray(strSize.toInt())
                 raf.seek(strOff)
                 raf.readFully(strtab)
 
                 val prefixBytes = prefix.toByteArray(Charsets.US_ASCII)
                 val out = HashSet<String>()
-                for (i in 0 until symCount) {
+                val symEntInt = symEntExpected.toInt()
+                val infoOffset = if (is64) 4 else 12
+                val shndxOffset = if (is64) 6 else 14
+                for (i in 0 until symCount.toInt()) {
+                    val symBase = i * symEntInt
+                    val stInfo = dynsym[symBase + infoOffset].toInt() and 0xFF
+                    val stBind = stInfo ushr 4
+                    val stShndx = readU16(dynsym, symBase + shndxOffset, little)
+                    // 排除未定义导入符号 (SHN_UNDEF == 0) 与局部符号 (STB_LOCAL == 0)
+                    if (stShndx == 0 || stBind == 0) continue
+
                     // st_name 是两种位宽下的首个字段, 偏移都为 0
-                    val nameOff = raf.readAt(symOff + i * symEntExpected, 4, little)
+                    val nameOff = readU32(dynsym, symBase, little)
                     if (nameOff <= 0L || nameOff >= strSize) continue
                     val start = nameOff.toInt()
                     if (!startsWithAt(strtab, start, prefixBytes)) continue
@@ -222,6 +255,22 @@ object ElfChecker {
         if (at < 0 || at + prefix.size > buf.size) return false
         for (i in prefix.indices) if (buf[at + i] != prefix[i]) return false
         return true
+    }
+
+    private fun readU16(b: ByteArray, pos: Int, little: Boolean): Int {
+        val b0 = b[pos].toInt() and 0xFF
+        val b1 = b[pos + 1].toInt() and 0xFF
+        return if (little) (b1 shl 8) or b0 else (b0 shl 8) or b1
+    }
+
+    private fun readU32(b: ByteArray, pos: Int, little: Boolean): Long {
+        var v = 0L
+        if (little) {
+            for (i in 3 downTo 0) v = (v shl 8) or (b[pos + i].toLong() and 0xFF)
+        } else {
+            for (i in 0 until 4) v = (v shl 8) or (b[pos + i].toLong() and 0xFF)
+        }
+        return v
     }
 
     /** 从 [pos] 读 [width] 字节的无符号小端/大端整数。 */

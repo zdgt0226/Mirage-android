@@ -15,11 +15,16 @@ import java.util.concurrent.CopyOnWriteArraySet
  */
 object CoreController {
 
+    @Volatile
     private var service: ICoreService? = null
+    @Volatile
     private var bound = false
+    @Volatile
     private var ctx: Context? = null
     private val callbacks = CopyOnWriteArraySet<ICoreCallback>()
+    @Volatile
     private var currentBinder: IBinder? = null
+    private val connectLock = Any()
 
     /**
      * 绑定就绪后要补跑的动作。
@@ -35,10 +40,12 @@ object CoreController {
 
     private val deathRecipient: IBinder.DeathRecipient = object : IBinder.DeathRecipient {
         override fun binderDied() {
-            currentBinder?.unlinkToDeath(this, 0)
-            currentBinder = null
-            service = null
-            bound = false
+            synchronized(connectLock) {
+                currentBinder?.unlinkToDeath(this, 0)
+                currentBinder = null
+                service = null
+                bound = false
+            }
             running.value = false
             bindRequested = false
             callbacks.forEach { cb -> runCatching { cb.onStateChanged(false) } }
@@ -51,9 +58,14 @@ object CoreController {
     private val conn = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             val s = ICoreService.Stub.asInterface(binder)
-            service = s
-            bound = true
-            currentBinder = binder
+            val actions: List<Map.Entry<String, () -> Unit>>
+            synchronized(connectLock) {
+                service = s
+                bound = true
+                currentBinder = binder
+                actions = pendingOnConnect.entries.toList()
+                pendingOnConnect.clear()
+            }
             runCatching { binder?.linkToDeath(deathRecipient, 0) }
 
             // 重新注册所有待生效回调
@@ -69,21 +81,19 @@ object CoreController {
 
             android.util.Log.d("CoreController", "onServiceConnected")
             // 补跑绑定期间入队的动作
-            if (pendingOnConnect.isNotEmpty()) {
-                val actions = pendingOnConnect.entries.toList()
-                pendingOnConnect.clear()
-                actions.forEach { (key, action) ->
-                    runCatching { action() }
-                        .onFailure { android.util.Log.w("CoreController", "待执行动作 $key 失败: ${it.message}") }
-                }
+            actions.forEach { (key, action) ->
+                runCatching { action() }
+                    .onFailure { android.util.Log.w("CoreController", "待执行动作 $key 失败: ${it.message}") }
             }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
-            runCatching { currentBinder?.unlinkToDeath(deathRecipient, 0) }
-            currentBinder = null
-            service = null
-            bound = false
+            synchronized(connectLock) {
+                runCatching { currentBinder?.unlinkToDeath(deathRecipient, 0) }
+                currentBinder = null
+                service = null
+                bound = false
+            }
             running.value = false
             bindRequested = false
             callbacks.forEach { cb -> runCatching { cb.onStateChanged(false) } }
@@ -133,10 +143,12 @@ object CoreController {
             .onFailure { android.util.Log.w("CoreController", "unbindService 失败: ${it.message}") }
         bindRequested = false
         android.util.Log.d("CoreController", "unbind() 完成")
-        runCatching { currentBinder?.unlinkToDeath(deathRecipient, 0) }
-        currentBinder = null
-        service = null
-        bound = false
+        synchronized(connectLock) {
+            runCatching { currentBinder?.unlinkToDeath(deathRecipient, 0) }
+            currentBinder = null
+            service = null
+            bound = false
+        }
     }
 
     fun isBound(): Boolean = bound && service != null
@@ -147,17 +159,25 @@ object CoreController {
      * [key] 相同的重复调用只保留最后一次 —— 避免连点连接时堆积多个陈旧动作。
      */
     fun runWhenConnected(key: String, action: () -> Unit) {
-        if (isBound()) {
+        val runNow = synchronized(connectLock) {
+            if (isBound()) {
+                true
+            } else {
+                pendingOnConnect[key] = action
+                false
+            }
+        }
+        if (runNow) {
             runCatching { action() }
                 .onFailure { android.util.Log.w("CoreController", "动作 $key 失败: ${it.message}") }
-            return
         }
-        pendingOnConnect[key] = action
     }
 
     /** 撤销尚未执行的待办动作 (如用户已停止, 推送不再有意义)。 */
     fun cancelPending(key: String) {
-        pendingOnConnect.remove(key)
+        synchronized(connectLock) {
+            pendingOnConnect.remove(key)
+        }
     }
 
     private inline fun <T> call(block: (ICoreService) -> T): T? {

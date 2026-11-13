@@ -67,4 +67,23 @@ class BypassLanRoutesTest {
             assertTrue("$ip 应进隧道", covered(ip))
         }
     }
+
+    @Test
+    fun `路由表内不存在重叠或重复的冗余子网段`() {
+        val ranges = CoreService.NON_LAN_IPV4_ROUTES.map { (net, prefix) ->
+            val mask = if (prefix == 0) 0L else (-1L shl (32 - prefix)) and 0xFFFFFFFFL
+            val start = ipToLong(net) and mask
+            val size = 1L shl (32 - prefix)
+            val end = start + size - 1L
+            Triple("$net/$prefix", start, end)
+        }
+        for (i in ranges.indices) {
+            for (j in i + 1 until ranges.size) {
+                val a = ranges[i]
+                val b = ranges[j]
+                val overlaps = a.second <= b.third && b.second <= a.third
+                assertFalse("路由网段存在重叠冗余: ${a.first} 与 ${b.first}", overlaps)
+            }
+        }
+    }
 }

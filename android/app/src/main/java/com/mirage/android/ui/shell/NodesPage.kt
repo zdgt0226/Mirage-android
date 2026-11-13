@@ -167,7 +167,7 @@ fun NodesPage(
                 ),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                itemsIndexed(nodes, key = { _, node -> node.uri }) { index, node ->
+                itemsIndexed(nodes, key = { index, node -> "${index}_${node.uri}" }) { index, node ->
                     NodeRow(
                         node = node,
                         selected = index == selectedIndex,

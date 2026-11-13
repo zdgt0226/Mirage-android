@@ -2,14 +2,16 @@ package com.mirage.android.ui.viewmodel
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
 import com.mirage.android.core.CoreController
 import com.mirage.android.data.model.Rule
 import com.mirage.android.data.repository.RuleRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import org.json.JSONArray
-import org.json.JSONObject
 
 class RulesViewModel(application: Application) : AndroidViewModel(application) {
     private val ruleRepo = RuleRepository.getInstance(application)
@@ -25,26 +27,37 @@ class RulesViewModel(application: Application) : AndroidViewModel(application) {
     private val _hasUnappliedChanges = MutableStateFlow(false)
     val hasUnappliedChanges: StateFlow<Boolean> = _hasUnappliedChanges.asStateFlow()
 
-    /** 应用内核规则命中统计到规则列表。 */
+    /** 应用内核规则命中统计到规则列表（仅当命中计数确实变化时才发射新列表）。 */
     fun applyHits(hitsMap: Map<String, Long>) {
-        ruleRepo.applyHits(hitsMap)
+        val currentRules = ruleRepo.rules.value
+        val changed = currentRules.any { r ->
+            val key = "${r.id}|${r.displayName}|${r.action}"
+            val altKey = "${r.kind}|${r.pattern}|${r.action}"
+            val newHits = hitsMap[key] ?: hitsMap[altKey] ?: 0L
+            newHits != r.hits
+        }
+        if (changed) {
+            ruleRepo.applyHits(hitsMap)
+        }
     }
 
-    /** 从内核拉取最新命中统计并刷新列表。 */
+    /** 从内核拉取最新命中统计并刷新列表（在 IO 调度器执行 IPC 与 JSON 解析）。 */
     fun refreshRuleHits() {
-        val json = CoreController.getRuleHits()
-        if (json.isNotEmpty() && json != "[]") {
-            runCatching {
-                val arr = org.json.JSONArray(json)
-                val hitsMap = HashMap<String, Long>()
-                for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
-                    val kind = o.optString("kind")
-                    val pat = o.optString("pattern")
-                    val act = o.optString("action")
-                    hitsMap["$kind|$pat|$act"] = o.optLong("hits", 0)
+        viewModelScope.launch(Dispatchers.IO) {
+            val json = CoreController.getRuleHits()
+            if (json.isNotEmpty() && json != "[]") {
+                runCatching {
+                    val arr = JSONArray(json)
+                    val hitsMap = HashMap<String, Long>()
+                    for (i in 0 until arr.length()) {
+                        val o = arr.getJSONObject(i)
+                        val kind = o.optString("kind")
+                        val pat = o.optString("pattern")
+                        val act = o.optString("action")
+                        hitsMap["$kind|$pat|$act"] = o.optLong("hits", 0)
+                    }
+                    applyHits(hitsMap)
                 }
-                ruleRepo.applyHits(hitsMap)
             }
         }
     }
@@ -68,9 +81,11 @@ class RulesViewModel(application: Application) : AndroidViewModel(application) {
 
     fun addRule(pattern: String, kind: String, action: String) {
         val type = when (kind) {
-            "cidr" -> "cidr"
+            "cidr", "ip_cidr" -> "cidr"
             "geosite" -> "geosite"
             "geoip" -> "geoip"
+            "port" -> "port"
+            "protocol" -> "protocol"
             else -> "domain"
         }
         ruleRepo.addRule(Rule(type = type, kind = kind, pattern = pattern.trim().lowercase(), action = action))
@@ -79,9 +94,11 @@ class RulesViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateRule(index: Int, pattern: String, kind: String, action: String) {
         val type = when (kind) {
-            "cidr" -> "cidr"
+            "cidr", "ip_cidr" -> "cidr"
             "geosite" -> "geosite"
             "geoip" -> "geoip"
+            "port" -> "port"
+            "protocol" -> "protocol"
             else -> "domain"
         }
         ruleRepo.updateRule(index, Rule(type = type, kind = kind, pattern = pattern.trim().lowercase(), action = action))

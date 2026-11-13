@@ -162,6 +162,7 @@ class CoreServiceStateTest {
         assertEquals("best", cfg.failoverMode)
         assertTrue(cfg.nodes.isEmpty())
         assertEquals(0, cfg.outboundMode)
+        assertEquals("", cfg.rulesJson)
     }
 
     @Test
@@ -174,13 +175,15 @@ class CoreServiceStateTest {
                 selectedPackages = setOf("com.example.app")
             ),
             failoverMode = "next",
-            outboundMode = 1
+            outboundMode = 1,
+            rulesJson = """{"default":"proxy","rules":[]}"""
         )
         assertEquals("mirage://pass@203.0.113.1:443?sni=sni.test", cfg.uri)
         assertTrue(cfg.appFilterConfig!!.enabled)
         assertEquals(AppFilterMode.DISALLOW, cfg.appFilterConfig!!.mode)
         assertEquals("next", cfg.failoverMode)
         assertEquals(1, cfg.outboundMode)
+        assertEquals("""{"default":"proxy","rules":[]}""", cfg.rulesJson)
     }
 
     // ── 下沉方案 P3: 故障切换控制面 ────────────────────────────────────

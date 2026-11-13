@@ -16,20 +16,20 @@ object NodeStore {
     ) {
         /** 密码 (mirage://密码@host:port?sni=...) 含百分号解码。 */
         val password: String get() {
-            val raw = uri.substringAfter("mirage://").substringBeforeLast("@")
+            val raw = uri.substringAfter("mirage://").substringBefore("#").substringBefore("?").substringBeforeLast("@")
             return percentDecode(raw)
         }
         val server: String get() {
-            val hp = uri.substringAfter("mirage://").substringAfterLast("@").substringBefore("?")
+            val hp = uri.substringAfter("mirage://").substringBefore("#").substringAfterLast("@").substringBefore("?")
             return hp.substringBeforeLast(":").removePrefix("[").removeSuffix("]")
         }
         val port: String get() {
-            val hp = uri.substringAfter("mirage://").substringAfterLast("@").substringBefore("?")
+            val hp = uri.substringAfter("mirage://").substringBefore("#").substringAfterLast("@").substringBefore("?")
             return hp.substringAfterLast(":").trimEnd('/')
         }
         /** SNI (伪装域名)。 */
         val sni: String get() {
-            val q = uri.substringAfter("?", "")
+            val q = uri.substringBefore("#").substringAfter("?", "")
             return q.split("&").firstOrNull { it.startsWith("sni=") }
                 ?.substringAfter("=")?.let { percentDecode(it) } ?: ""
         }
@@ -39,17 +39,28 @@ object NodeStore {
             /** 百分号解码 (URI 里密码/SNI 的转义)。 */
             fun percentDecode(s: String): String {
                 if (!s.contains('%')) return s
-                val sb = StringBuilder()
+                val sb = StringBuilder(s.length)
+                val byteBuf = java.io.ByteArrayOutputStream()
                 var i = 0
                 while (i < s.length) {
-                    val c = s[i]
-                    if (c == '%' && i + 2 < s.length) {
-                        val hex = s.substring(i + 1, i + 3)
-                        sb.append(hex.toIntOrNull(16)?.toChar() ?: c)
-                        i += 3
-                    } else {
-                        sb.append(c); i++
+                    if (s[i] == '%' && i + 2 < s.length) {
+                        val d1 = Character.digit(s[i + 1], 16)
+                        val d2 = Character.digit(s[i + 2], 16)
+                        if (d1 >= 0 && d2 >= 0) {
+                            byteBuf.write((d1 shl 4) or d2)
+                            i += 3
+                            continue
+                        }
                     }
+                    if (byteBuf.size() > 0) {
+                        sb.append(byteBuf.toByteArray().toString(Charsets.UTF_8))
+                        byteBuf.reset()
+                    }
+                    sb.append(s[i])
+                    i += 1
+                }
+                if (byteBuf.size() > 0) {
+                    sb.append(byteBuf.toByteArray().toString(Charsets.UTF_8))
                 }
                 return sb.toString()
             }
@@ -57,10 +68,13 @@ object NodeStore {
             /** 百分号编码 (密码/SNI 特殊字符)。 */
             fun percentEncode(s: String): String {
                 val sb = StringBuilder()
-                for (c in s) {
-                    when {
-                        c.isLetterOrDigit() || c in "-_.~" -> sb.append(c)
-                        else -> sb.append('%').append(String.format("%02X", c.code))
+                for (b in s.toByteArray(Charsets.UTF_8)) {
+                    val v = b.toInt() and 0xFF
+                    val c = v.toChar()
+                    if ((c in 'a'..'z') || (c in 'A'..'Z') || (c in '0'..'9') || c in "-_.~") {
+                        sb.append(c)
+                    } else {
+                        sb.append('%').append(String.format("%02X", v))
                     }
                 }
                 return sb.toString()
@@ -94,11 +108,26 @@ object NodeStore {
         }.getOrDefault(emptyList())
     }
 
+    fun toJson(list: List<Node>): String {
+        val arr = JSONArray()
+        for (n in list) {
+            arr.put(JSONObject().put("uri", n.uri).put("name", n.name))
+        }
+        return arr.toString()
+    }
+
     fun getNodes(ctx: Context): List<Node> =
         parseNodesJson(getNodesJson(ctx))
 
     fun addNode(ctx: Context, node: Node): Int {
         val list = getNodes(ctx).toMutableList()
+        val existingIdx = list.indexOfFirst { it.uri == node.uri }
+        if (existingIdx >= 0) {
+            val updatedName = node.name.ifBlank { list[existingIdx].name }
+            list[existingIdx] = list[existingIdx].copy(name = updatedName)
+            saveNodes(ctx, list)
+            return existingIdx
+        }
         list.add(node)
         saveNodes(ctx, list)
         return list.size - 1
@@ -123,11 +152,7 @@ object NodeStore {
     }
 
     fun saveNodes(ctx: Context, list: List<Node>) {
-        val arr = JSONArray()
-        for (n in list) {
-            arr.put(JSONObject().put("uri", n.uri).put("name", n.name))
-        }
-        val json = arr.toString()
+        val json = toJson(list)
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putString(KEY_NODES, json).apply()
         CoreController.updateNodes(json)
@@ -160,10 +185,13 @@ object NodeStore {
     }
 
     fun getTestMethod(ctx: Context): String =
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_TEST_METHOD, "tcp") ?: "tcp"
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_TEST_METHOD, com.mirage.android.data.repository.NodeRepository.DEFAULT_TEST_METHOD)
+            ?: com.mirage.android.data.repository.NodeRepository.DEFAULT_TEST_METHOD
 
     fun setTestMethod(ctx: Context, method: String) {
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_TEST_METHOD, method).apply()
+        val norm = com.mirage.android.data.repository.NodeRepository.normalizeTestMethod(method)
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_TEST_METHOD, norm).apply()
     }
 
     fun getPoolSize(ctx: Context): Int =
@@ -175,7 +203,10 @@ object NodeStore {
 
     /** 从 mirage:// 串生成显示名。 */
     fun defaultName(uri: String): String {
-        val core = uri.substringAfter("mirage://").substringAfter("@").substringBefore("?")
-        return core.substringBefore(":").removePrefix("[").removeSuffix("]")
+        val body = uri.removePrefix("mirage://").substringBefore("#").substringBefore("?")
+        if (!body.contains("@")) return ""
+        val hostPort = body.substringAfterLast("@")
+        val host = if (hostPort.contains(":")) hostPort.substringBeforeLast(":") else hostPort
+        return host.removePrefix("[").removeSuffix("]")
     }
 }

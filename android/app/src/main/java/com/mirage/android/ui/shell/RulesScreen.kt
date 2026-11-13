@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -51,9 +52,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -62,6 +68,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -70,8 +77,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import com.mirage.android.R
+import com.mirage.android.core.GeoManager
 import com.mirage.android.data.model.Rule
 import com.mirage.android.data.model.RuleCondition
 import com.mirage.android.ui.theme.mirage
@@ -94,42 +104,55 @@ fun RulesScreen(
     val colors = MaterialTheme.mirage
     val haptics = rememberShellHaptics()
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
 
     val rules by viewModel.rules.collectAsStateWithLifecycle()
     val defaultAction by viewModel.defaultAction.collectAsStateWithLifecycle()
     val hasUnappliedChanges by viewModel.hasUnappliedChanges.collectAsStateWithLifecycle()
 
-    // 周期性拉取内核规则命中统计
-    LaunchedEffect(Unit) {
-        while (isActive) {
-            viewModel.refreshRuleHits()
-            delay(2000L)
+    // 周期性拉取内核规则命中统计（跟随 STARTED 生命周期，后台自动挂起）
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (isActive) {
+                viewModel.refreshRuleHits()
+                delay(2000L)
+            }
         }
     }
 
-    // 弹窗状态管理
-    var showEditDialog by remember { mutableStateOf(false) }
-    var editIndex by remember { mutableStateOf<Int?>(null) }
-    var editingRule by remember { mutableStateOf<Rule?>(null) }
+    // 弹窗状态管理（rememberSaveable 保证旋屏不丢弹窗）
+    var showEditDialog by rememberSaveable { mutableStateOf(false) }
+    var editIndex by rememberSaveable { mutableStateOf<Int?>(null) }
+    var editingRuleId by rememberSaveable { mutableStateOf<String?>(null) }
 
-    var showDeleteDialog by remember { mutableStateOf(false) }
-    var deleteIndex by remember { mutableStateOf<Int?>(null) }
-    var deletingRule by remember { mutableStateOf<Rule?>(null) }
+    var showDeleteDialog by rememberSaveable { mutableStateOf(false) }
+    var deleteIndex by rememberSaveable { mutableStateOf<Int?>(null) }
+    var deletingRuleId by rememberSaveable { mutableStateOf<String?>(null) }
 
-    var showDefaultActionDialog by remember { mutableStateOf(false) }
-    var showPresetsDialog by remember { mutableStateOf(false) }
+    var showDefaultActionDialog by rememberSaveable { mutableStateOf(false) }
+    var showPresetsDialog by rememberSaveable { mutableStateOf(false) }
+
+    fun resolveRuleIndex(ruleId: String?, fallbackIndex: Int?): Int? {
+        if (!ruleId.isNullOrBlank()) {
+            val byId = rules.indexOfFirst { it.id == ruleId }
+            if (byId >= 0) return byId
+        }
+        return fallbackIndex?.takeIf { it in rules.indices }
+    }
 
     // 拖拽重排状态
     val lazyListState = rememberLazyListState()
     var draggingIndex by remember { mutableStateOf<Int?>(null) }
+    var draggedItemKey by remember { mutableStateOf<Any?>(null) }
     var dragOffsetY by remember { mutableFloatStateOf(0f) }
 
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(colors.canvas)
-            .statusBarsPadding(),
+            .statusBarsPadding()
+            .navigationBarsPadding(),
     ) {
         // 顶部导航栏
         Row(
@@ -198,7 +221,7 @@ fun RulesScreen(
                 label = stringResource(R.string.rules_add),
                 modifier = Modifier.weight(1f),
                 onClick = {
-                    editingRule = null
+                    editingRuleId = null
                     editIndex = null
                     showEditDialog = true
                 },
@@ -250,33 +273,69 @@ fun RulesScreen(
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 100.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                itemsIndexed(rules, key = { _, rule -> rule.id }) { index, rule ->
+                itemsIndexed(
+                    items = rules,
+                    key = { index, rule ->
+                        if (rule.id.isNotBlank() && rules.indexOfFirst { it.id == rule.id } == index) {
+                            "id_${rule.id}"
+                        } else {
+                            "pos_${index}_${rule.id}"
+                        }
+                    },
+                ) { index, rule ->
+                    val itemKey = if (rule.id.isNotBlank() && rules.indexOfFirst { it.id == rule.id } == index) {
+                        "id_${rule.id}"
+                    } else {
+                        "pos_${index}_${rule.id}"
+                    }
                     RuleRow(
                         index = index,
                         rule = rule,
                         isDragging = draggingIndex == index,
                         dragOffsetY = if (draggingIndex == index) dragOffsetY else 0f,
-                        onToggleEnabled = { viewModel.toggleRuleEnabled(index) },
+                        onToggleEnabled = {
+                            val idx = resolveRuleIndex(rule.id, index) ?: return@RuleRow
+                            viewModel.toggleRuleEnabled(idx)
+                        },
                         onEdit = {
-                            editingRule = rule
-                            editIndex = index
+                            editingRuleId = rule.id
+                            editIndex = resolveRuleIndex(rule.id, index)
                             showEditDialog = true
                         },
                         onDelete = {
-                            deletingRule = rule
-                            deleteIndex = index
+                            deletingRuleId = rule.id
+                            deleteIndex = resolveRuleIndex(rule.id, index)
                             showDeleteDialog = true
                         },
+                        onMoveTop = if (index > 0) {
+                            {
+                                val idx = resolveRuleIndex(rule.id, index)
+                                if (idx != null && idx > 0) viewModel.moveRule(idx, 0)
+                            }
+                        } else null,
                         onMoveUp = if (index > 0) {
-                            { viewModel.moveRule(index, index - 1) }
+                            {
+                                val idx = resolveRuleIndex(rule.id, index)
+                                if (idx != null && idx > 0) viewModel.moveRule(idx, idx - 1)
+                            }
                         } else null,
                         onMoveDown = if (index < rules.size - 1) {
-                            { viewModel.moveRule(index, index + 1) }
+                            {
+                                val idx = resolveRuleIndex(rule.id, index)
+                                if (idx != null && idx < rules.size - 1) viewModel.moveRule(idx, idx + 1)
+                            }
+                        } else null,
+                        onMoveBottom = if (index < rules.size - 1) {
+                            {
+                                val idx = resolveRuleIndex(rule.id, index)
+                                if (idx != null && idx < rules.size - 1) viewModel.moveRule(idx, rules.size - 1)
+                            }
                         } else null,
                         onDragStart = {
-                            val idx = rules.indexOfFirst { it.id == rule.id }
-                            if (idx >= 0) {
+                            val idx = resolveRuleIndex(rule.id, index)
+                            if (idx != null) {
                                 draggingIndex = idx
+                                draggedItemKey = itemKey
                                 dragOffsetY = 0f
                                 haptics.longPress()
                             }
@@ -286,6 +345,10 @@ fun RulesScreen(
                             dragOffsetY += dy
                             val visibleItems = lazyListState.layoutInfo.visibleItemsInfo
                             val currentItem = visibleItems.find { it.index == currentIdx } ?: return@RuleRow
+                            // 等待上一次交换后的布局刷新落地，防止同一帧内用旧 layoutInfo 反复交换
+                            if (draggedItemKey != null && currentItem.key != draggedItemKey) {
+                                return@RuleRow
+                            }
                             val currentCenter = currentItem.offset + currentItem.size / 2 + dragOffsetY
 
                             // 视口边缘自动平滑滚动
@@ -318,6 +381,7 @@ fun RulesScreen(
                         },
                         onDragEnd = {
                             draggingIndex = null
+                            draggedItemKey = null
                             dragOffsetY = 0f
                         },
                     )
@@ -361,6 +425,10 @@ fun RulesScreen(
     // 常用分流预设模板弹窗
     if (showPresetsDialog) {
         PresetsDialog(
+            onAddPresetRule = { presetRule ->
+                viewModel.saveRule(null, presetRule)
+                showPresetsDialog = false
+            },
             onApplyTemplate = { templateId ->
                 viewModel.applyPresetTemplate(templateId)
                 showPresetsDialog = false
@@ -371,12 +439,23 @@ fun RulesScreen(
 
     // 单条规则添加与编辑弹窗
     if (showEditDialog) {
+        val resolvedEditIdx = if (editingRuleId == null && editIndex == null) {
+            null
+        } else {
+            resolveRuleIndex(editingRuleId, editIndex)
+        }
+        val currentEditingRule = resolvedEditIdx?.let { rules.getOrNull(it) }
         EditRuleDialog(
-            existing = editingRule,
-            editIndex = editIndex,
+            existing = currentEditingRule,
+            editIndex = resolvedEditIdx,
             onDismiss = { showEditDialog = false },
             onSave = { ruleToSave ->
-                viewModel.saveRule(editIndex, ruleToSave)
+                val targetIdx = if (editingRuleId == null && editIndex == null) {
+                    null
+                } else {
+                    resolveRuleIndex(editingRuleId, editIndex)
+                }
+                viewModel.saveRule(targetIdx, ruleToSave)
                 Toast.makeText(context, R.string.rules_updated, Toast.LENGTH_SHORT).show()
                 showEditDialog = false
             },
@@ -384,46 +463,53 @@ fun RulesScreen(
     }
 
     // 删除规则确认弹窗
-    if (showDeleteDialog && deletingRule != null && deleteIndex != null) {
-        val rule = deletingRule!!
-        val idx = deleteIndex!!
-        AlertDialog(
-            onDismissRequest = { showDeleteDialog = false },
-            title = {
-                Text(
-                    text = stringResource(R.string.rule_delete_title),
-                    color = colors.ink,
-                    fontWeight = FontWeight.Bold,
-                )
-            },
-            text = {
-                Text(
-                    text = stringResource(R.string.rule_delete_message, rule.displayName),
-                    color = colors.inkSecondary,
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showDeleteDialog = false
-                        haptics.reject()
-                        viewModel.deleteRule(idx)
-                    },
-                ) {
+    if (showDeleteDialog) {
+        val resolvedDeleteIdx = resolveRuleIndex(deletingRuleId, deleteIndex)
+        val rule = resolvedDeleteIdx?.let { rules.getOrNull(it) }
+        if (rule == null || resolvedDeleteIdx == null) {
+            showDeleteDialog = false
+        } else {
+            AlertDialog(
+                onDismissRequest = { showDeleteDialog = false },
+                title = {
                     Text(
-                        text = stringResource(R.string.delete),
-                        color = colors.error,
+                        text = stringResource(R.string.rule_delete_title),
+                        color = colors.ink,
                         fontWeight = FontWeight.Bold,
                     )
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDeleteDialog = false }) {
-                    Text(stringResource(R.string.cancel), color = colors.inkSecondary)
-                }
-            },
-            containerColor = colors.card,
-        )
+                },
+                text = {
+                    Text(
+                        text = stringResource(R.string.rule_delete_message, rule.displayName),
+                        color = colors.inkSecondary,
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            val targetIdx = resolveRuleIndex(deletingRuleId, deleteIndex)
+                            showDeleteDialog = false
+                            if (targetIdx != null) {
+                                haptics.reject()
+                                viewModel.deleteRule(targetIdx)
+                            }
+                        },
+                    ) {
+                        Text(
+                            text = stringResource(R.string.delete),
+                            color = colors.error,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showDeleteDialog = false }) {
+                        Text(stringResource(R.string.cancel), color = colors.inkSecondary)
+                    }
+                },
+                containerColor = colors.card,
+            )
+        }
     }
 }
 
@@ -437,8 +523,10 @@ private fun RuleRow(
     onToggleEnabled: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
+    onMoveTop: (() -> Unit)?,
     onMoveUp: (() -> Unit)?,
     onMoveDown: (() -> Unit)?,
+    onMoveBottom: (() -> Unit)?,
     onDragStart: () -> Unit,
     onDragDelta: (Float) -> Unit,
     onDragEnd: () -> Unit,
@@ -446,6 +534,10 @@ private fun RuleRow(
     val colors = MaterialTheme.mirage
     val haptics = rememberShellHaptics()
     val context = LocalContext.current
+
+    val currentOnDragStart by rememberUpdatedState(onDragStart)
+    val currentOnDragDelta by rememberUpdatedState(onDragDelta)
+    val currentOnDragEnd by rememberUpdatedState(onDragEnd)
 
     val scale by animateFloatAsState(
         targetValue = if (isDragging) 1.03f else 1f,
@@ -457,6 +549,7 @@ private fun RuleRow(
         animationSpec = motionAware(ShellMotion.press()),
         label = "ruleDragElevation",
     )
+    val dragHandleDesc = stringResource(R.string.rule_drag_handle)
 
     Row(
         modifier = Modifier
@@ -475,23 +568,23 @@ private fun RuleRow(
                 color = if (isDragging) colors.blue else colors.outline,
                 shape = RoundedCornerShape(14.dp),
             )
-            .pointerInput(rule.id) {
+            .pointerInput(rule.id.ifBlank { index }) {
                 detectDragGesturesAfterLongPress(
-                    onDragStart = { onDragStart() },
+                    onDragStart = { currentOnDragStart() },
                     onDrag = { change, dragAmount ->
                         change.consume()
-                        onDragDelta(dragAmount.y)
+                        currentOnDragDelta(dragAmount.y)
                     },
-                    onDragEnd = { onDragEnd() },
-                    onDragCancel = { onDragEnd() },
+                    onDragEnd = { currentOnDragEnd() },
+                    onDragCancel = { currentOnDragEnd() },
                 )
             }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
             ) {
-                haptics.toggle()
-                onToggleEnabled()
+                haptics.tap()
+                onEdit()
             }
             .padding(horizontal = 12.dp, vertical = 10.dp)
             .graphicsLayer {
@@ -503,7 +596,8 @@ private fun RuleRow(
         Column(
             modifier = Modifier
                 .defaultMinSize(minWidth = 36.dp)
-                .padding(end = 8.dp),
+                .padding(end = 8.dp)
+                .semantics { contentDescription = dragHandleDesc },
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(
@@ -629,8 +723,10 @@ private fun RuleRow(
         RuleOverflowMenu(
             onEdit = onEdit,
             onDelete = onDelete,
+            onMoveTop = onMoveTop,
             onMoveUp = onMoveUp,
             onMoveDown = onMoveDown,
+            onMoveBottom = onMoveBottom,
         )
     }
 }
@@ -640,8 +736,10 @@ private fun RuleRow(
 private fun RuleOverflowMenu(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
+    onMoveTop: (() -> Unit)?,
     onMoveUp: (() -> Unit)?,
     onMoveDown: (() -> Unit)?,
+    onMoveBottom: (() -> Unit)?,
 ) {
     val colors = MaterialTheme.mirage
     val haptics = rememberShellHaptics()
@@ -666,6 +764,16 @@ private fun RuleOverflowMenu(
             expanded = open,
             onDismissRequest = { open = false },
         ) {
+            if (onMoveTop != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.rule_menu_top), color = colors.ink) },
+                    onClick = {
+                        open = false
+                        haptics.tap()
+                        onMoveTop()
+                    },
+                )
+            }
             if (onMoveUp != null) {
                 DropdownMenuItem(
                     text = { Text(stringResource(R.string.rule_menu_up), color = colors.ink) },
@@ -683,6 +791,16 @@ private fun RuleOverflowMenu(
                         open = false
                         haptics.tap()
                         onMoveDown()
+                    },
+                )
+            }
+            if (onMoveBottom != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.rule_menu_bottom), color = colors.ink) },
+                    onClick = {
+                        open = false
+                        haptics.tap()
+                        onMoveBottom()
                     },
                 )
             }
@@ -809,9 +927,10 @@ private fun DefaultActionDialog(
     )
 }
 
-// 常用分流预设模板弹窗
+// 常用分流预设与单条 Geo 标签添加弹窗
 @Composable
 private fun PresetsDialog(
+    onAddPresetRule: (Rule) -> Unit,
     onApplyTemplate: (Int) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -819,11 +938,26 @@ private fun PresetsDialog(
     val haptics = rememberShellHaptics()
     val context = LocalContext.current
 
+    val presetTags = GeoManager.PRESET_GEO_TAGS
+    var selectedTagIdx by rememberSaveable { mutableIntStateOf(0) }
+    val safeTagIdx = selectedTagIdx.coerceIn(0, (presetTags.size - 1).coerceAtLeast(0))
+    val currentPreset = presetTags.getOrNull(safeTagIdx)
+    var selectedAction by rememberSaveable {
+        mutableStateOf(currentPreset?.defaultAction ?: "proxy")
+    }
+    var tagDropdownExpanded by remember { mutableStateOf(false) }
+
+    val actions = listOf(
+        "proxy" to R.string.rule_action_proxy,
+        "direct" to R.string.rule_action_direct,
+        "block" to R.string.rule_action_block,
+    )
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                text = stringResource(R.string.rules_template_title),
+                text = stringResource(R.string.rules_preset_title),
                 color = colors.ink,
                 fontWeight = FontWeight.Bold,
             )
@@ -837,6 +971,141 @@ private fun PresetsDialog(
                     text = stringResource(R.string.rules_preset_intro),
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.inkSecondary,
+                )
+
+                // 单条 Geo 标签预设快速添加
+                if (currentPreset != null) {
+                    Text(
+                        text = stringResource(R.string.rules_preset_pick_tag),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.inkSecondary,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(colors.pillBg)
+                                .border(1.dp, colors.pillStroke, RoundedCornerShape(8.dp))
+                                .clickable { tagDropdownExpanded = true }
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = currentPreset.title,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.ink,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(text = "▼", fontSize = 10.sp, color = colors.inkSecondary)
+                        }
+                        DropdownMenu(
+                            expanded = tagDropdownExpanded,
+                            onDismissRequest = { tagDropdownExpanded = false },
+                        ) {
+                            presetTags.forEachIndexed { idx, tagItem ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = tagItem.title,
+                                            color = if (idx == safeTagIdx) colors.blue else colors.ink,
+                                            fontWeight = if (idx == safeTagIdx) FontWeight.Bold else FontWeight.Normal,
+                                        )
+                                    },
+                                    onClick = {
+                                        selectedTagIdx = idx
+                                        selectedAction = tagItem.defaultAction
+                                        tagDropdownExpanded = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+
+                    Text(
+                        text = stringResource(R.string.rules_route_action),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.inkSecondary,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        actions.forEach { (actionKey, labelRes) ->
+                            val selected = selectedAction == actionKey
+                            val (selColor, selBg) = when (actionKey) {
+                                "direct" -> colors.connected to colors.connected.copy(alpha = 0.15f)
+                                "block" -> colors.error to colors.error.copy(alpha = 0.15f)
+                                else -> colors.blue to colors.accentTint
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (selected) selBg else colors.pillBg)
+                                    .border(
+                                        1.dp,
+                                        if (selected) selColor else colors.pillStroke,
+                                        RoundedCornerShape(8.dp),
+                                    )
+                                    .clickable {
+                                        haptics.tap()
+                                        selectedAction = actionKey
+                                    }
+                                    .padding(vertical = 8.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = stringResource(labelRes),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (selected) selColor else colors.ink,
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                    maxLines = 1,
+                                )
+                            }
+                        }
+                    }
+
+                    ActionChip(
+                        label = stringResource(R.string.rules_preset_add_one),
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = {
+                            haptics.confirm()
+                            val newRule = Rule(
+                                name = currentPreset.title,
+                                type = currentPreset.kind,
+                                kind = currentPreset.kind,
+                                pattern = currentPreset.tag,
+                                action = selectedAction,
+                                conditions = listOf(RuleCondition(currentPreset.kind, currentPreset.tag)),
+                            )
+                            val actionDisplay = context.getString(newRule.actionDisplayNameRes)
+                            onAddPresetRule(newRule)
+                            Toast.makeText(
+                                context,
+                                context.getString(
+                                    R.string.rules_preset_added,
+                                    "${currentPreset.kind}:${currentPreset.tag}",
+                                    actionDisplay,
+                                ),
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        },
+                    )
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                }
+
+                Text(
+                    text = stringResource(R.string.rules_template_switch),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = colors.inkSecondary,
+                    fontWeight = FontWeight.Bold,
                 )
                 val templates = listOf(
                     Triple(0, R.string.tpl_classic, R.string.tpl_classic_desc),
@@ -890,7 +1159,19 @@ private fun PresetsDialog(
     )
 }
 
-// 单条规则添加与编辑弹窗
+private fun normalizeConditionType(raw: String): String = when (raw.lowercase()) {
+    "cidr", "ip_cidr" -> "ip_cidr"
+    "exact", "domain_exact" -> "domain_exact"
+    "keyword", "domain_keyword" -> "domain_keyword"
+    "regex", "domain_regex" -> "domain_regex"
+    "geosite" -> "geosite"
+    "geoip" -> "geoip"
+    "port" -> "port"
+    "protocol" -> "protocol"
+    else -> "domain_suffix"
+}
+
+// 单条/多条件复合规则添加与编辑弹窗
 @Composable
 private fun EditRuleDialog(
     existing: Rule?,
@@ -902,21 +1183,41 @@ private fun EditRuleDialog(
     val haptics = rememberShellHaptics()
     val context = LocalContext.current
 
-    var name by remember { mutableStateOf(existing?.name.orEmpty()) }
-    var pattern by remember {
+    var name by rememberSaveable(existing?.id) { mutableStateOf(existing?.name.orEmpty()) }
+    var action by rememberSaveable(existing?.id) { mutableStateOf(existing?.action ?: "proxy") }
+    var logic by rememberSaveable(existing?.id) {
         mutableStateOf(
-            existing?.pattern?.takeIf { it.isNotBlank() }
-                ?: existing?.effectiveConditions?.firstOrNull()?.pattern.orEmpty(),
+            if (existing?.logic?.equals("AND", ignoreCase = true) == true) "AND" else "OR",
         )
     }
-    var kind by remember {
-        mutableStateOf(
-            existing?.kind?.takeIf { it.isNotBlank() }
-                ?: existing?.effectiveConditions?.firstOrNull()?.type
-                ?: "domain_suffix",
-        )
+
+    val conditions = rememberSaveable(
+        existing?.id,
+        saver = listSaver(
+            save = { list -> list.flatMap { listOf(it.type, it.pattern) } },
+            restore = { flat ->
+                mutableStateListOf<RuleCondition>().apply {
+                    for (i in 0 until flat.size step 2) {
+                        add(
+                            RuleCondition(
+                                normalizeConditionType(flat[i]),
+                                flat.getOrElse(i + 1) { "" },
+                            ),
+                        )
+                    }
+                    if (isEmpty()) {
+                        add(RuleCondition("domain_suffix", ""))
+                    }
+                }
+            },
+        ),
+    ) {
+        val initial = existing?.effectiveConditions
+            ?.takeIf { it.isNotEmpty() }
+            ?.map { RuleCondition(normalizeConditionType(it.type), it.pattern) }
+            ?: listOf(RuleCondition("domain_suffix", ""))
+        mutableStateListOf<RuleCondition>().apply { addAll(initial) }
     }
-    var action by remember { mutableStateOf(existing?.action ?: "proxy") }
 
     val kinds = listOf(
         "domain_suffix" to R.string.cond_kind_domain_suffix,
@@ -936,11 +1237,16 @@ private fun EditRuleDialog(
         "block" to R.string.rule_action_block,
     )
 
+    val logicOptions = listOf(
+        "OR" to R.string.rule_logic_or,
+        "AND" to R.string.rule_logic_and,
+    )
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                text = stringResource(if (existing == null) R.string.rule_dialog_add else R.string.rule_dialog_edit),
+                text = stringResource(if (existing == null && editIndex == null) R.string.rule_dialog_add else R.string.rule_dialog_edit),
                 style = MaterialTheme.typography.titleLarge,
                 color = colors.ink,
                 fontWeight = FontWeight.Bold,
@@ -1026,112 +1332,208 @@ private fun EditRuleDialog(
                     }
                 }
 
-                // 3. 匹配类型
-                Text(
-                    text = stringResource(R.string.rule_kind_label),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = colors.inkSecondary,
-                    fontWeight = FontWeight.Bold,
-                )
-                var kindDropdownExpanded by remember { mutableStateOf(false) }
-                val currentKindLabel = kinds.find { it.first == kind }?.second ?: R.string.cond_kind_domain_suffix
-                Box(modifier = Modifier.fillMaxWidth()) {
+                // 3. 多条件匹配逻辑 (OR / AND)
+                if (conditions.size > 1) {
+                    Text(
+                        text = stringResource(R.string.rule_logic_label),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.inkSecondary,
+                        fontWeight = FontWeight.Bold,
+                    )
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(colors.pillBg)
-                            .border(1.dp, colors.pillStroke, RoundedCornerShape(8.dp))
-                            .clickable { kindDropdownExpanded = true }
-                            .padding(horizontal = 12.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        Text(
-                            text = stringResource(currentKindLabel),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = colors.ink,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Text(text = "▼", fontSize = 10.sp, color = colors.inkSecondary)
-                    }
-                    DropdownMenu(
-                        expanded = kindDropdownExpanded,
-                        onDismissRequest = { kindDropdownExpanded = false },
-                    ) {
-                        kinds.forEach { (kKey, kLabelRes) ->
-                            DropdownMenuItem(
-                                text = {
-                                    Text(
-                                        text = stringResource(kLabelRes),
-                                        color = if (kind == kKey) colors.blue else colors.ink,
-                                        fontWeight = if (kind == kKey) FontWeight.Bold else FontWeight.Normal,
+                        logicOptions.forEach { (logicKey, labelRes) ->
+                            val selected = logic.equals(logicKey, ignoreCase = true)
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (selected) colors.accentTint else colors.pillBg)
+                                    .border(
+                                        1.dp,
+                                        if (selected) colors.blue else colors.pillStroke,
+                                        RoundedCornerShape(8.dp),
                                     )
-                                },
-                                onClick = {
-                                    kind = kKey
-                                    kindDropdownExpanded = false
-                                },
-                            )
+                                    .clickable {
+                                        haptics.tap()
+                                        logic = logicKey
+                                    }
+                                    .padding(vertical = 8.dp, horizontal = 6.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = stringResource(labelRes),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (selected) colors.blue else colors.ink,
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
                         }
                     }
                 }
 
-                // 4. 匹配内容 (Pattern)
+                // 4. 匹配条件清单
                 Text(
                     text = stringResource(R.string.rule_conditions_label),
                     style = MaterialTheme.typography.labelMedium,
                     color = colors.inkSecondary,
                     fontWeight = FontWeight.Bold,
                 )
-                OutlinedTextField(
-                    value = pattern,
-                    onValueChange = { pattern = it },
-                    placeholder = {
-                        Text(
-                            text = stringResource(R.string.rule_condition_hint),
-                            fontSize = 13.sp,
-                            color = colors.inkSecondary,
+
+                val deleteCondDesc = stringResource(R.string.rule_delete_condition)
+                conditions.forEachIndexed { condIdx, cond ->
+                    val normalizedKind = normalizeConditionType(cond.type)
+                    var kindDropdownExpanded by remember { mutableStateOf(false) }
+                    val currentKindLabel = kinds.find { it.first == normalizedKind }?.second
+                        ?: R.string.cond_kind_domain_suffix
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(colors.pillBg.copy(alpha = 0.45f))
+                            .border(1.dp, colors.outline.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
+                            .padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Box(modifier = Modifier.weight(1f)) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(colors.pillBg)
+                                        .border(1.dp, colors.pillStroke, RoundedCornerShape(8.dp))
+                                        .clickable { kindDropdownExpanded = true }
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = stringResource(currentKindLabel),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = colors.ink,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    Text(text = "▼", fontSize = 10.sp, color = colors.inkSecondary)
+                                }
+                                DropdownMenu(
+                                    expanded = kindDropdownExpanded,
+                                    onDismissRequest = { kindDropdownExpanded = false },
+                                ) {
+                                    kinds.forEach { (kKey, kLabelRes) ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    text = stringResource(kLabelRes),
+                                                    color = if (normalizedKind == kKey) colors.blue else colors.ink,
+                                                    fontWeight = if (normalizedKind == kKey) FontWeight.Bold else FontWeight.Normal,
+                                                )
+                                            },
+                                            onClick = {
+                                                conditions[condIdx] = cond.copy(type = kKey)
+                                                kindDropdownExpanded = false
+                                            },
+                                        )
+                                    }
+                                }
+                            }
+                            if (conditions.size > 1) {
+                                IconButton(
+                                    onClick = {
+                                        if (conditions.size <= 1) {
+                                            Toast.makeText(
+                                                context,
+                                                R.string.rule_need_one_condition,
+                                                Toast.LENGTH_SHORT,
+                                            ).show()
+                                        } else {
+                                            haptics.tap()
+                                            conditions.removeAt(condIdx)
+                                        }
+                                    },
+                                    modifier = Modifier.semantics { contentDescription = deleteCondDesc },
+                                ) {
+                                    Text(
+                                        text = "✕",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = colors.error,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                }
+                            }
+                        }
+
+                        OutlinedTextField(
+                            value = cond.pattern,
+                            onValueChange = { newText ->
+                                conditions[condIdx] = cond.copy(pattern = newText)
+                            },
+                            placeholder = {
+                                Text(
+                                    text = stringResource(R.string.rule_condition_hint),
+                                    fontSize = 13.sp,
+                                    color = colors.inkSecondary,
+                                )
+                            },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = colors.ink,
+                                unfocusedTextColor = colors.ink,
+                                focusedBorderColor = colors.blue,
+                                unfocusedBorderColor = colors.outline,
+                            ),
                         )
-                    },
-                    singleLine = true,
+                    }
+                }
+
+                // 5. 添加条件按钮
+                ActionChip(
+                    label = stringResource(R.string.rule_add_condition),
                     modifier = Modifier.fillMaxWidth(),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = colors.ink,
-                        unfocusedTextColor = colors.ink,
-                        focusedBorderColor = colors.blue,
-                        unfocusedBorderColor = colors.outline,
-                    ),
+                    onClick = {
+                        conditions.add(RuleCondition("domain_suffix", ""))
+                    },
                 )
             }
         },
         confirmButton = {
             TextButton(
                 onClick = {
-                    val trimmedPattern = pattern.trim().lowercase()
-                    if (trimmedPattern.isBlank()) {
+                    val validConds = conditions.mapNotNull { c ->
+                        val p = c.pattern.trim().lowercase()
+                        if (p.isBlank()) null else RuleCondition(normalizeConditionType(c.type), p)
+                    }
+                    if (validConds.isEmpty()) {
                         Toast.makeText(context, R.string.rule_need_valid_param, Toast.LENGTH_SHORT).show()
                         return@TextButton
                     }
                     haptics.confirm()
-                    val ctype = when (kind.lowercase()) {
-                        "cidr" -> "ip_cidr"
-                        "exact" -> "domain_exact"
-                        "keyword" -> "domain_keyword"
-                        "regex" -> "domain_regex"
-                        else -> kind.lowercase()
+                    val first = validConds.first()
+                    val mappedType = when (first.type) {
+                        "cidr", "ip_cidr" -> "cidr"
+                        "geosite" -> "geosite"
+                        "geoip" -> "geoip"
+                        "port" -> "port"
+                        "protocol" -> "protocol"
+                        else -> "domain"
                     }
                     val updated = (existing ?: Rule()).copy(
                         name = name.trim(),
-                        pattern = trimmedPattern,
-                        kind = kind,
-                        type = when (kind) {
-                            "cidr", "ip_cidr" -> "cidr"
-                            "geosite" -> "geosite"
-                            "geoip" -> "geoip"
-                            else -> "domain"
-                        },
+                        logic = if (logic.equals("AND", ignoreCase = true)) "AND" else "OR",
+                        pattern = first.pattern,
+                        kind = first.type,
+                        type = mappedType,
                         action = action,
-                        conditions = listOf(RuleCondition(ctype, trimmedPattern)),
+                        conditions = validConds,
                     )
                     onSave(updated)
                 },

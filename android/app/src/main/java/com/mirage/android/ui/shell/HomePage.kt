@@ -1,5 +1,6 @@
 package com.mirage.android.ui.shell
 
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
@@ -50,6 +51,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,6 +64,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
@@ -133,6 +137,7 @@ fun HomePage(
     trafficViewModel: TrafficViewModel,
     modifier: Modifier = Modifier,
 ) {
+    val context = LocalContext.current
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
     val haptics = rememberShellHaptics()
@@ -141,7 +146,23 @@ fun HomePage(
     val navBottomPx = WindowInsets.navigationBars.getBottom(density)
     val snapSpec = motionAware(ShellMotion.drawer<Float>())
 
-    val panelState = remember {
+    val panelState = rememberSaveable(
+        saver = Saver(
+            save = { it.targetValue.name },
+            restore = { savedName ->
+                val initial = runCatching { PanelAnchor.valueOf(savedName) }
+                    .getOrDefault(PanelAnchor.Collapsed)
+                AnchoredDraggableState(
+                    initialValue = initial,
+                    positionalThreshold = { distance -> distance * 0.5f },
+                    velocityThreshold = { with(density) { 125.dp.toPx() } },
+                    snapAnimationSpec = snapSpec,
+                    decayAnimationSpec = ShellMotion.decay(),
+                    confirmValueChange = { true },
+                )
+            },
+        ),
+    ) {
         AnchoredDraggableState(
             initialValue = PanelAnchor.Collapsed,
             // 过半即换档。位置阈值与下面的速度阈值是「或」的关系:
@@ -221,7 +242,18 @@ fun HomePage(
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            HeroToggle(state = state, upstreamHealthy = upstreamHealthy, onToggle = onToggle)
+            HeroToggle(
+                state = state,
+                upstreamHealthy = upstreamHealthy,
+                onToggle = {
+                    if (!state.isRunning && nodes.isEmpty()) {
+                        haptics.reject()
+                        Toast.makeText(context, R.string.select_node_first, Toast.LENGTH_SHORT).show()
+                    } else {
+                        onToggle()
+                    }
+                },
+            )
             Spacer(Modifier.height(20.dp))
             Text(
                 text = statusLabel(state, upstreamHealthy),
@@ -271,9 +303,13 @@ fun HomePage(
                 }
                 .offset {
                     // anchors 落地前 offset 是 NaN, requireOffset() 会抛。
-                    // 首帧必须给收起位, 否则面板会在屏幕上闪一下满屏。
+                    // 首帧按当前档位给偏移: 收起位在底部, 展开位在 0f。
                     val o = panelState.offset
-                    val y = if (o.isNaN()) panelHeightPx.toFloat() else o
+                    val y = if (o.isNaN()) {
+                        if (panelState.targetValue == PanelAnchor.Expanded) 0f else panelHeightPx.toFloat()
+                    } else {
+                        o
+                    }
                     IntOffset(0, y.roundToInt())
                 }
                 .anchoredDraggable(panelState, Orientation.Vertical),

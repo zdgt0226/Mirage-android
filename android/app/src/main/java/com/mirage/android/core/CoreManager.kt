@@ -157,9 +157,9 @@ class CoreManager private constructor(private val context: Context) {
             val abi = abiResult.getOrThrow()
             if (!ElfChecker.isDeviceCompatible(abi)) {
                 tempFile.delete()
-                val devAbis = Build.SUPPORTED_ABIS.joinToString(", ")
+                val devAbis = ElfChecker.supportedProcessAbis().ifEmpty { Build.SUPPORTED_ABIS.toList() }.joinToString(", ")
                 return Result.failure(
-                    IllegalArgumentException("架构不兼容！该内核为 $abi，但当前设备支持: $devAbis")
+                    IllegalArgumentException("架构不兼容！该内核为 $abi，但当前进程支持: $devAbis")
                 )
             }
 
@@ -340,7 +340,7 @@ class CoreManager private constructor(private val context: Context) {
                 val bodyText = conn.inputStream.bufferedReader().use { it.readText() }
                 val releasesJson = JSONArray(bodyText)
                 val list = mutableListOf<OnlineReleaseInfo>()
-                val supportedAbis = Build.SUPPORTED_ABIS.toList()
+                val supportedAbis = ElfChecker.supportedProcessAbis().ifEmpty { Build.SUPPORTED_ABIS.toList() }
 
                 for (i in 0 until releasesJson.length()) {
                     val rel = releasesJson.getJSONObject(i)
@@ -353,19 +353,18 @@ class CoreManager private constructor(private val context: Context) {
                     var matchedAsset: JSONObject? = null
                     var matchedAbi = "arm64-v8a"
 
-                    for (j in 0 until assets.length()) {
-                        val asset = assets.getJSONObject(j)
-                        val aName = asset.optString("name", "")
-                        if (!aName.endsWith(".so")) continue
-
-                        for (abi in supportedAbis) {
-                            val keyword = when (abi) {
-                                "arm64-v8a" -> listOf("arm64", "aarch64")
-                                "armeabi-v7a" -> listOf("armv7", "arm32", "armeabi")
-                                "x86_64" -> listOf("x86_64", "amd64")
-                                "x86" -> listOf("i386", "i686", "x86")
-                                else -> listOf(abi)
-                            }
+                    for (abi in supportedAbis) {
+                        val keyword = when (abi) {
+                            "arm64-v8a" -> listOf("arm64", "aarch64")
+                            "armeabi-v7a" -> listOf("armv7", "arm32", "armeabi")
+                            "x86_64" -> listOf("x86_64", "amd64")
+                            "x86" -> listOf("i386", "i686", "x86")
+                            else -> listOf(abi)
+                        }
+                        for (j in 0 until assets.length()) {
+                            val asset = assets.getJSONObject(j)
+                            val aName = asset.optString("name", "")
+                            if (!aName.endsWith(".so")) continue
                             if (keyword.any { aName.contains(it, ignoreCase = true) } || aName == "libmirage_jni.so") {
                                 matchedAsset = asset
                                 matchedAbi = abi
@@ -456,7 +455,7 @@ class CoreManager private constructor(private val context: Context) {
                 while (redirectCount < 6) {
                     val url = java.net.URL(currentUrl)
                     val c = (url.openConnection() as java.net.HttpURLConnection).apply {
-                        instanceFollowRedirects = true
+                        instanceFollowRedirects = false
                         connectTimeout = 12000
                         readTimeout = 30000
                         setRequestProperty("User-Agent", "Mirage-Android-Client")
@@ -464,12 +463,16 @@ class CoreManager private constructor(private val context: Context) {
                     val code = c.responseCode
                     if (code in listOf(301, 302, 303, 307, 308)) {
                         val location = c.getHeaderField("Location")
+                        c.disconnect()
                         if (!location.isNullOrBlank()) {
+                            if (!location.startsWith("https://")) {
+                                throw java.io.IOException("拒绝非 HTTPS 重定向: $location")
+                            }
                             currentUrl = location
                             redirectCount++
-                            c.disconnect()
                             continue
                         }
+                        throw java.io.IOException("重定向响应缺少 Location 头 (HTTP $code)")
                     }
                     finalConn = c
                     break

@@ -110,6 +110,31 @@ class NativeSymbolGateTest {
         assertTrue(ElfChecker.exportedSymbols(f, prefix).getOrThrow().isEmpty())
     }
 
+    @Test
+    fun undefinedAndLocalSymbolsAreIgnored() {
+        val f = writeElf(
+            tmp.newFile("undef_local.so"),
+            listOf("${prefix}start", "${prefix}stop", "${prefix}isRunning"),
+            is64 = true,
+            symbolShndx = mapOf("${prefix}start" to 0),       // SHN_UNDEF (imported, not exported)
+            symbolInfo = mapOf("${prefix}stop" to 0x02)        // STB_LOCAL | STT_FUNC
+        )
+        val got = ElfChecker.exportedSymbols(f, prefix).getOrThrow()
+        assertEquals(setOf("${prefix}isRunning"), got)
+    }
+
+    @Test
+    fun signedLongOverflowInSectionOffsetsFailsClosed() {
+        val f = writeElf(tmp.newFile("overflow.so"), listOf("${prefix}start"), is64 = true)
+        val bytes = f.readBytes()
+        // 将 .dynsym 节头中的 sh_offset 篡改为 Long.MAX_VALUE - 8，使 sh_offset + sh_size 发生有符号 Long 溢出变为负数
+        val shOff = 64 + 2 * 24 + (1 + "${prefix}start".length + 1)
+        val sh1 = shOff + 64
+        putLong(bytes, sh1 + 0x18, Long.MAX_VALUE - 8L)
+        f.writeBytes(bytes)
+        assertTrue("sh_offset + sh_size 溢出必须失败", ElfChecker.exportedSymbols(f, prefix).isFailure)
+    }
+
     // ---- fail-closed: 解析不出来必须 failure, 不能当成"没缺符号" ----
 
     @Test
@@ -198,6 +223,8 @@ class NativeSymbolGateTest {
         symbolNames: List<String>,
         is64: Boolean,
         omitDynsym: Boolean = false,
+        symbolShndx: Map<String, Int> = emptyMap(),
+        symbolInfo: Map<String, Int> = emptyMap(),
     ): File {
         val ehSize = if (is64) 64 else 52
         val shEntSize = if (is64) 64 else 40
@@ -220,8 +247,10 @@ class NativeSymbolGateTest {
         for ((i, n) in symbolNames.withIndex()) {
             val base = (i + 1) * symEntSize
             putInt(dynsym, base, offsets.getValue(n))   // st_name 在两种位宽下偏移都是 0
-            dynsym[base + (if (is64) 4 else 12)] = 0x12 // st_info: GLOBAL|FUNC
-            putShort(dynsym, base + (if (is64) 6 else 14), 1) // st_shndx
+            val info = symbolInfo[n] ?: 0x12            // 默认 GLOBAL|FUNC
+            val shndx = symbolShndx[n] ?: 1             // 默认已定义节索引 1
+            dynsym[base + (if (is64) 4 else 12)] = info.toByte()
+            putShort(dynsym, base + (if (is64) 6 else 14), shndx)
         }
 
         val symOff = ehSize
