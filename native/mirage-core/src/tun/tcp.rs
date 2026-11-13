@@ -21,7 +21,7 @@ use tracing::{debug, warn};
 
 use crate::proxy::outbound::Address;
 use crate::proxy::tunnel::Tunnel;
-use crate::tun::{lock_inner, TunStack};
+use crate::tun::{lock_inner, smol_now, TunInner, TunStack};
 
 /// 活跃 TCP 连接计数 (含隧道/直连, 流量监测用)。
 pub static TCP_ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -181,8 +181,15 @@ impl TunTcpAbortHandle {
             if g.sockets.iter().any(|(h, _)| h == self.handle) {
                 g.sockets.get_mut::<tcp::Socket>(self.handle).abort();
             }
+            let TunInner {
+                iface,
+                device,
+                sockets,
+                ..
+            } = &mut *g;
+            iface.poll(smol_now(std::time::Instant::now()), device, sockets);
         }
-        self.stack.poll_now();
+        self.stack.wake.notify_one();
     }
 }
 
@@ -518,6 +525,7 @@ async fn relay_proxy(
     }
 
     // 拆成读写半程: upload (app→tunnel) / download (tunnel→app)
+    let mut active_fd = tunnel.get_raw_fd();
     let (mut tun_reader, mut tun_writer) = (tunnel.reader, tunnel.writer);
 
     // 发送首包数据：若发送失败，说明从池中取到的隧道可能由于运营商 CGNAT 静默超时已半死，
@@ -532,6 +540,7 @@ async fn relay_proxy(
                         crate::monitor::record_conn_close(cid, 0, 0, "Initial Write Failed");
                         return;
                     }
+                    active_fd = retry_tunnel.get_raw_fd();
                     tun_reader = retry_tunnel.reader;
                     tun_writer = retry_tunnel.writer;
                 }
@@ -547,6 +556,22 @@ async fn relay_proxy(
             std::sync::atomic::Ordering::Relaxed,
         );
     }
+
+    let pool_opt = stack
+        .engine()
+        .outbounds
+        .get(stack.engine().default_tag())
+        .and_then(|node| {
+            if let crate::proxy::outbound::OutboundNode::Mirage { pool, .. } = &*node.resolve_leaf()
+            {
+                Some(pool.clone())
+            } else {
+                None
+            }
+        });
+    let _active_guard = active_fd
+        .zip(pool_opt.as_ref())
+        .map(|(fd, p)| p.active_fd_guard(fd));
 
     let local_abort = stream.abort_handle();
     let (mut local_rd, mut local_wr) = tokio::io::split(stream);

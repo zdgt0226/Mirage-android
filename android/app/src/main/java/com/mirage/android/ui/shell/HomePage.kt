@@ -475,7 +475,7 @@ private fun PanelSummary(
         // 小屏上列表区就少一行可见内容。
         Row(Modifier.fillMaxWidth()) {
             Text(
-                text = if (state.isRunning && latencyMs > 0) {
+                text = if (state.isRunning && latencyMs >= 0) {
                     stringResource(R.string.home_rtt, latencyMs.toString())
                 } else {
                     stringResource(R.string.home_latency_none)

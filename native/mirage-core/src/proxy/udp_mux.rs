@@ -148,18 +148,23 @@ pub struct MuxTunnel {
     flows: Arc<StdMutex<HashMap<u32, FlowEntry>>>,
     next_sid: AtomicU32,
     alive: Arc<AtomicBool>,
+    _active_guard: Option<crate::proxy::pool::ActiveFdGuard>,
 }
 
 impl MuxTunnel {
     /// 从 pool 取一条隧道, 发 MUX_SENTINEL, spawn 共享 writer + demux 泵。
     async fn create(pool: &Arc<WarmPool>) -> anyhow::Result<Arc<MuxTunnel>> {
         let mut tunnel = pool.get().await?;
+        let _active_guard = tunnel.get_raw_fd().map(|fd| pool.active_fd_guard(fd));
         tunnel.writer.send_data(&[MUX_SENTINEL]).await?;
-        Ok(Self::from_tunnel(tunnel))
+        Ok(Self::from_tunnel(tunnel, _active_guard))
     }
 
     /// 用一条已就绪 (sentinel 已发) 的隧道 spawn 共享 writer + demux 泵。
-    fn from_tunnel(tunnel: crate::proxy::tunnel::Tunnel) -> Arc<MuxTunnel> {
+    fn from_tunnel(
+        tunnel: crate::proxy::tunnel::Tunnel,
+        _active_guard: Option<crate::proxy::pool::ActiveFdGuard>,
+    ) -> Arc<MuxTunnel> {
         let (uplink_tx, mut uplink_rx) = mpsc::channel::<Vec<u8>>(1024);
         let flows: Arc<StdMutex<HashMap<u32, FlowEntry>>> = Default::default();
         let alive = Arc::new(AtomicBool::new(true));
@@ -237,6 +242,7 @@ impl MuxTunnel {
             flows,
             next_sid: AtomicU32::new(1),
             alive,
+            _active_guard,
         })
     }
 

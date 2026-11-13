@@ -168,17 +168,9 @@ impl Engine {
     /// RTT 毫秒 (App 状态栏显示)。
     /// 默认出站的隧道延迟 (毫秒)。
     ///
-    /// 走 `OutboundNode::latency_ms("rtt")` 而**不是**直接取 `latency_rtt_ms()`：
-    /// 后者只读 `Mirage { rtt_ms }` 这个原子，而该原子在本代码树里**没有任何写者**
-    /// —— 上游唯一的写入方在 `startup.rs`，用 eBPF 读 socket cookie 的 `srtt_us`，
-    /// 而 Android 裁剪树没有 `startup.rs`、普通应用也拿不到 eBPF。
-    /// 结果是界面上的「隧道 RTT」永远显示 `--`（2026-11-09 真机实测：连到健康的
-    /// 本地节点、流量正常中继时同样是 `--`）。
-    ///
-    /// `latency_ms("rtt")` 自带 `latency_rtt_ms().or_else(latency_http_ms)` 的回退，
-    /// 而 `latency_http_ms` 读的正是连接池已经在记的握手耗时中位数
-    /// (`PoolStats::latency_ms`，由 `record_latency` 在每次成功建连时写入)。
-    /// 所以这里只是把本来就存在的回退接上，不新增任何统计实现。
+    /// 优先走 `latency_rtt_ms()`: 基于内核 `getsockopt(TCP_INFO)` 实时采样当前活跃或池内空闲
+    /// 隧道的微秒级平滑 RTT (`tcpi_rtt`)，无需 root 权限或 eBPF；无可用套接字时自动回退到
+    /// `latency_http_ms()` (连接池建连握手耗时中位数)。
     pub fn latency_ms(&self) -> Option<u64> {
         self.outbounds
             .get(&self.default_tag)

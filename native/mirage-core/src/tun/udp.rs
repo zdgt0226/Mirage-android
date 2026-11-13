@@ -376,6 +376,7 @@ async fn udp_flow_relay(
             return;
         }
     };
+    let _active_guard = tunnel.get_raw_fd().map(|fd| pool.active_fd_guard(fd));
     if tunnel.writer.send_data(&[0x00]).await.is_err() {
         crate::monitor::record_conn_close(cid, 0, 0, "Handshake Failed");
         return;

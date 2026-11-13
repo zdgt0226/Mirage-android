@@ -81,8 +81,22 @@ impl OutboundNode {
 
     pub fn latency_rtt_ms(self: &Arc<Self>) -> Option<u64> {
         match &**self {
-            Self::Mirage { rtt_ms, .. } => {
-                let rtt = rtt_ms.load(std::sync::atomic::Ordering::Relaxed);
+            Self::Mirage { rtt_ms, pool, .. } => {
+                let rtt = if let Some(rtt_us) = pool.sample_tcp_rtt_us() {
+                    let ms = (rtt_us as u64 / 1000).max(if rtt_us > 0 { 1 } else { 0 });
+                    let prev = rtt_ms.swap(ms, std::sync::atomic::Ordering::Relaxed);
+                    if prev == u64::MAX || prev.abs_diff(ms) >= 5 {
+                        tracing::debug!(
+                            "[RTT] 实时采样更新: {}ms (raw={}us, prev={}ms)",
+                            ms,
+                            rtt_us,
+                            if prev == u64::MAX { -1 } else { prev as i64 }
+                        );
+                    }
+                    ms
+                } else {
+                    rtt_ms.load(std::sync::atomic::Ordering::Relaxed)
+                };
                 if rtt > 0 && rtt != u64::MAX {
                     Some(rtt)
                 } else {
