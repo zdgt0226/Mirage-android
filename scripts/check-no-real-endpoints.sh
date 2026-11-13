@@ -270,9 +270,9 @@ if [[ -n "$matches_a" ]]; then
                 valid=1
             elif [[ "$host" =~ ^192\.0\.2\.[0-9]+$ || "$host" =~ ^198\.51\.100\.[0-9]+$ || "$host" =~ ^203\.0\.113\.[0-9]+$ ]]; then
                 valid=1
-            elif [[ "$host" =~ ^[2001]:0*[dD][bB]8: || "$host" =~ ^2001:0*[dD][bB]8: ]]; then
+            elif [[ "$host" =~ ^2001:0*[dD][bB]8: ]]; then
                 valid=1
-            elif [[ "$host" =~ (\.example|\.example\.com|example\.com|\.test|\.invalid|\.localhost)$ ]]; then
+            elif [[ "$host" =~ (^|\.)(example|example\.com|test|invalid|localhost)$ ]]; then
                 valid=1
             elif [[ "$host" == "host" || "$host" == "hostonly" || "$host" == "h" || "$host" == "端口" ]]; then
                 valid=1

@@ -115,7 +115,39 @@ exit $TEST_STATUS
 EOS
 chmod +x "$ROOTFS/root/run-test.sh"
 
-# 2. 启动容器 (后台)
+# 2. 宿主侧先起 lite-server 并等待监听就绪 (避免容器启动过快在服务端监听前发起握手)
+mkdir -p "$HERE/.build"
+cat > "$HERE/.build/lite_server.json" <<EOF
+{
+  "listen": "0.0.0.0",
+  "port": $PORT,
+  "password": "$PASS",
+  "sni": "www.apple.com",
+  "log_level": "info"
+}
+EOF
+"$HERE/.build/mirage-rs-server-bin/mirage-rs" lite-server -c "$HERE/.build/lite_server.json" > "$HERE/.build/server.log" 2>&1 &
+SERVER_PID=$!
+echo "$SERVER_PID" > "$HERE/.build/server.pid"
+SERVER_READY=0
+for i in $(seq 1 20); do
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        break
+    fi
+    if ss -lnt 2>/dev/null | grep -qE ":${PORT}\b"; then
+        SERVER_READY=1
+        break
+    fi
+    sleep 0.2
+done
+if [[ $SERVER_READY -ne 1 ]] || ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    echo "[-] 宿主 lite-server 启动失败或未在端口 $PORT 就绪" >&2
+    cat "$HERE/.build/server.log" >&2 || true
+    exit 1
+fi
+echo "==> 宿主 lite-server 已启动并监听 ($PORT)"
+
+# 3. 启动容器 (后台)
 echo "==> 启动 nspawn 容器 ..."
 systemd-nspawn -D "$ROOTFS" --as-pid2 --network-veth \
   --bind /dev/net/tun \
@@ -123,7 +155,7 @@ systemd-nspawn -D "$ROOTFS" --as-pid2 --network-veth \
   /root/run-test.sh > "$HERE/.build/nspawn-test.log" 2>&1 &
 NSPAWN_PID=$!
 
-# 3. 宿主侧 veth + NAT
+# 4. 宿主侧 veth + NAT
 for i in $(seq 1 20); do
     HOST_VETH=$(ip link | grep -oE "${NS_PREFIX}-[^:@]*" | head -1 || true)
     if [[ -n "$HOST_VETH" ]]; then
@@ -144,27 +176,6 @@ if [[ -n "$OUT_IF" ]]; then
       iptables -t nat -A POSTROUTING -s "$NET.0/24" -o "$OUT_IF" -j MASQUERADE 2>/dev/null || true
 fi
 echo "==> 宿主 veth $HOST_VETH 已配置 ($NET.1)"
-
-# 4. 宿主侧起 lite-server
-cat > "$HERE/.build/lite_server.json" <<EOF
-{
-  "listen": "0.0.0.0",
-  "port": $PORT,
-  "password": "$PASS",
-  "sni": "www.apple.com",
-  "log_level": "info"
-}
-EOF
-"$HERE/.build/mirage-rs-server-bin/mirage-rs" lite-server -c "$HERE/.build/lite_server.json" > "$HERE/.build/server.log" 2>&1 &
-SERVER_PID=$!
-echo "$SERVER_PID" > "$HERE/.build/server.pid"
-sleep 1
-if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    echo "[-] 宿主 lite-server 启动失败" >&2
-    cat "$HERE/.build/server.log" >&2 || true
-    exit 1
-fi
-echo "==> 宿主 lite-server 已启动 ($PORT)"
 
 # 5. 等容器跑完
 CONTAINER_RC=0
